@@ -1,14 +1,15 @@
 {
-  "name": "standalone-plans",
+  "name": "event-based-reminders-app",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 8664",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 8664",
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.100.1",
     "next": "16.2.1",
     "react": "19.2.4",
     "react-dom": "19.2.4"
