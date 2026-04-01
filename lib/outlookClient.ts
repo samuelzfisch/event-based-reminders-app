@@ -98,6 +98,9 @@ const OUTLOOK_OAUTH_STATE_KEY = "event_based_reminders_app_outlook_oauth_state_v
 const LEGACY_OUTLOOK_OAUTH_STATE_KEYS = ["standalone_plans_outlook_oauth_state_v1"];
 const OUTLOOK_OAUTH_VERIFIER_KEY = "event_based_reminders_app_outlook_oauth_verifier_v1";
 const LEGACY_OUTLOOK_OAUTH_VERIFIER_KEYS = ["standalone_plans_outlook_oauth_verifier_v1"];
+const OUTLOOK_OAUTH_VERIFIER_COOKIE = "event_based_reminders_app_outlook_oauth_verifier";
+const OUTLOOK_LOCAL_REDIRECT_URI = "http://localhost:8664/api/auth/microsoft/callback";
+const OUTLOOK_HOSTED_REDIRECT_URI = "https://event-based-reminders-app.vercel.app/api/auth/microsoft/callback";
 export const OUTLOOK_CONNECTION_UPDATED_EVENT = "event-based-reminders-app:outlook-connection-updated";
 export const OUTLOOK_OAUTH_MESSAGE_TYPE = "event_based_reminders_app_outlook_oauth_result";
 
@@ -134,7 +137,17 @@ function getOutlookTenantId() {
 
 function getOutlookRedirectUri() {
   if (typeof window === "undefined") return "";
-  return `${window.location.origin}/api/auth/microsoft/callback`;
+  return window.location.hostname === "localhost" ? OUTLOOK_LOCAL_REDIRECT_URI : OUTLOOK_HOSTED_REDIRECT_URI;
+}
+
+function writeOutlookOAuthVerifierCookie(value: string) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${OUTLOOK_OAUTH_VERIFIER_COOKIE}=${encodeURIComponent(value)}; Path=/; Max-Age=600; SameSite=Lax; Secure`;
+}
+
+function clearOutlookOAuthVerifierCookie() {
+  if (typeof document === "undefined") return;
+  document.cookie = `${OUTLOOK_OAUTH_VERIFIER_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; Secure`;
 }
 
 function normalizeOutlookEmail(value: string | null | undefined) {
@@ -242,6 +255,28 @@ function saveStoredOutlookSession(session: OutlookSession) {
   const didWrite = writePersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, JSON.stringify(session));
   if (!didWrite) return;
   emitOutlookConnectionUpdated();
+}
+
+function saveOutlookSessionFromTokenPayload(payload: {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+}) {
+  if (!payload.access_token) {
+    throw new Error("Failed to connect Outlook.");
+  }
+
+  const session: OutlookSession = {
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token,
+    expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
+    scope: payload.scope,
+    obtainedAt: new Date().toISOString(),
+  };
+
+  saveStoredOutlookSession(session);
+  return session;
 }
 
 function loadStoredOutlookIdentity(): OutlookConnectedIdentity | null {
@@ -458,22 +493,15 @@ export function getOutlookConnectionState(expectedEmail?: string): OutlookConnec
 async function refreshStoredOutlookSession(requiredScopes: string[] = []) {
   const rawSession = loadRawStoredOutlookSession();
   const refreshToken = String(rawSession?.refreshToken ?? "").trim();
-  const clientId = getOutlookClientId();
-  if (!clientId || !refreshToken) return null;
+  if (!refreshToken) return null;
 
-  const tokenUrl = `https://login.microsoftonline.com/${getOutlookTenantId()}/oauth2/v2.0/token`;
-  const body = new URLSearchParams({
-    client_id: clientId,
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    redirect_uri: getOutlookRedirectUri(),
-    scope: OUTLOOK_SCOPES.join(" "),
-  });
-
-  const response = await fetch(tokenUrl, {
+  const response = await fetch("/api/auth/microsoft/refresh", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      refreshToken,
+      redirectUri: getOutlookRedirectUri(),
+    }),
   });
 
   const payload = (await response.json()) as {
@@ -489,15 +517,10 @@ async function refreshStoredOutlookSession(requiredScopes: string[] = []) {
     return null;
   }
 
-  const session: OutlookSession = {
-    accessToken: payload.access_token,
-    refreshToken: payload.refresh_token || refreshToken,
-    expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
-    scope: payload.scope,
-    obtainedAt: new Date().toISOString(),
-  };
-
-  saveStoredOutlookSession(session);
+  const session = saveOutlookSessionFromTokenPayload({
+    ...payload,
+    refresh_token: payload.refresh_token || refreshToken,
+  });
   if (requiredScopes.length > 0 && !hasRequiredScopes(session, requiredScopes)) {
     return null;
   }
@@ -554,56 +577,6 @@ async function requireStoredOutlookAccessToken(input: {
   return session.accessToken;
 }
 
-async function exchangeOutlookAuthCode(input: {
-  code: string;
-  codeVerifier: string;
-  redirectUri: string;
-}) {
-  const clientId = getOutlookClientId();
-  if (!clientId) {
-    throw new Error("Outlook is not configured yet. Add NEXT_PUBLIC_MICROSOFT_CLIENT_ID first.");
-  }
-
-  const tokenUrl = `https://login.microsoftonline.com/${getOutlookTenantId()}/oauth2/v2.0/token`;
-  const body = new URLSearchParams({
-    client_id: clientId,
-    grant_type: "authorization_code",
-    code: input.code,
-    redirect_uri: input.redirectUri,
-    code_verifier: input.codeVerifier,
-    scope: OUTLOOK_SCOPES.join(" "),
-  });
-
-  const response = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-
-  const payload = (await response.json()) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    scope?: string;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (!response.ok || !payload.access_token) {
-    throw new Error(payload.error_description || payload.error || "Failed to connect Outlook.");
-  }
-
-  const session: OutlookSession = {
-    accessToken: payload.access_token,
-    refreshToken: payload.refresh_token,
-    expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
-    scope: payload.scope,
-    obtainedAt: new Date().toISOString(),
-  };
-  saveStoredOutlookSession(session);
-  return session;
-}
-
 async function connectOutlookInteractively() {
   if (typeof window === "undefined") {
     throw new Error("Outlook connection is only available in the browser.");
@@ -621,6 +594,7 @@ async function connectOutlookInteractively() {
 
   writePersistedValue("sessionStorage", OUTLOOK_OAUTH_STATE_KEY, state);
   writePersistedValue("sessionStorage", OUTLOOK_OAUTH_VERIFIER_KEY, codeVerifier);
+  writeOutlookOAuthVerifierCookie(codeVerifier);
 
   const url = new URL(`https://login.microsoftonline.com/${getOutlookTenantId()}/oauth2/v2.0/authorize`);
   url.searchParams.set("client_id", clientId);
@@ -657,8 +631,11 @@ async function connectOutlookInteractively() {
       const data = event.data as
         | {
             type?: string;
-            code?: string;
             state?: string;
+            accessToken?: string;
+            refreshToken?: string;
+            expiresIn?: number;
+            scope?: string;
             error?: string;
             errorDescription?: string;
           }
@@ -668,20 +645,16 @@ async function connectOutlookInteractively() {
 
       migrateOutlookOAuthStorage();
       const expectedState = readPersistedValue("sessionStorage", OUTLOOK_OAUTH_STATE_KEY, LEGACY_OUTLOOK_OAUTH_STATE_KEYS);
-      const storedVerifier = readPersistedValue(
-        "sessionStorage",
-        OUTLOOK_OAUTH_VERIFIER_KEY,
-        LEGACY_OUTLOOK_OAUTH_VERIFIER_KEYS
-      );
       removePersistedValue("sessionStorage", OUTLOOK_OAUTH_STATE_KEY, LEGACY_OUTLOOK_OAUTH_STATE_KEYS);
       removePersistedValue("sessionStorage", OUTLOOK_OAUTH_VERIFIER_KEY, LEGACY_OUTLOOK_OAUTH_VERIFIER_KEYS);
+      clearOutlookOAuthVerifierCookie();
 
       if (data.error) {
         fail(data.errorDescription || "Outlook permission was not granted.");
         return;
       }
 
-      if (!data.code || !data.state || !expectedState || data.state !== expectedState || !storedVerifier) {
+      if (!data.state || !expectedState || data.state !== expectedState) {
         fail("Outlook sign-in could not be verified. Please try again.");
         return;
       }
@@ -689,10 +662,11 @@ async function connectOutlookInteractively() {
       cleanup();
       try {
         resolve(
-          await exchangeOutlookAuthCode({
-            code: data.code,
-            codeVerifier: storedVerifier,
-            redirectUri,
+          saveOutlookSessionFromTokenPayload({
+            access_token: data.accessToken,
+            refresh_token: data.refreshToken,
+            expires_in: data.expiresIn,
+            scope: data.scope,
           })
         );
       } catch (error) {
