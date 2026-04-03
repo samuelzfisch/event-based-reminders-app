@@ -28,7 +28,8 @@ function areOutlookConnectionStatesEqual(left: OutlookConnectionState | null, ri
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings>(() => loadAppSettings());
   const [savedSettings, setSavedSettings] = useState<AppSettings>(() => loadAppSettings());
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [planBuilderSaveMessage, setPlanBuilderSaveMessage] = useState<string | null>(null);
+  const [emailSignatureSaveMessage, setEmailSignatureSaveMessage] = useState<string | null>(null);
   const [outlookConnection, setOutlookConnection] = useState<OutlookConnectionState | null>(null);
   const [outlookMessage, setOutlookMessage] = useState<string | null>(null);
   const [outlookError, setOutlookError] = useState<string | null>(null);
@@ -36,7 +37,11 @@ export default function SettingsPage() {
   const [hasMounted, setHasMounted] = useState(false);
   const savedSettingsRef = useRef(savedSettings);
 
-  const hasUnsavedChanges = JSON.stringify(settings) !== JSON.stringify(savedSettings);
+  const hasUnsavedPlanBuilderChanges =
+    settings.defaultReminderTime !== savedSettings.defaultReminderTime || settings.emailHandlingMode !== savedSettings.emailHandlingMode;
+  const hasUnsavedEmailSignatureChanges =
+    settings.emailSignatureEnabled !== savedSettings.emailSignatureEnabled ||
+    settings.emailSignatureText !== savedSettings.emailSignatureText;
 
   useEffect(() => {
     setHasMounted(true);
@@ -46,25 +51,20 @@ export default function SettingsPage() {
     savedSettingsRef.current = savedSettings;
   }, [savedSettings]);
 
-  function persistSettings(nextSettings: AppSettings, message = "Settings saved locally.") {
+  function persistSettings(nextSettings: AppSettings) {
     saveAppSettings(nextSettings);
     savedSettingsRef.current = nextSettings;
     setSavedSettings((current) => (areAppSettingsEqual(current, nextSettings) ? current : nextSettings));
-    setSettings((current) => (areAppSettingsEqual(current, nextSettings) ? current : nextSettings));
-    setSaveMessage(message);
   }
 
   function updateSettings<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
     setSettings((current) => ({ ...current, [key]: value }));
-    setSaveMessage(null);
-  }
-
-  function updateEmailHandlingMode(value: EmailHandlingMode) {
-    const nextSettings = {
-      ...settings,
-      emailHandlingMode: value,
-    };
-    persistSettings(nextSettings, "Email handling mode saved.");
+    if (key === "defaultReminderTime" || key === "emailHandlingMode") {
+      setPlanBuilderSaveMessage(null);
+    }
+    if (key === "emailSignatureEnabled" || key === "emailSignatureText") {
+      setEmailSignatureSaveMessage(null);
+    }
   }
 
   function buildSettingsFromConnection(current: AppSettings, connection: OutlookConnectionState) {
@@ -146,8 +146,22 @@ export default function SettingsPage() {
     };
   }, []);
 
-  function onSave() {
-    persistSettings(settings);
+  function onSavePlanBuilderSettings() {
+    persistSettings({
+      ...savedSettingsRef.current,
+      defaultReminderTime: settings.defaultReminderTime,
+      emailHandlingMode: settings.emailHandlingMode,
+    });
+    setPlanBuilderSaveMessage("Plan builder defaults saved.");
+  }
+
+  function onSaveEmailSignatureSettings() {
+    persistSettings({
+      ...savedSettingsRef.current,
+      emailSignatureEnabled: settings.emailSignatureEnabled,
+      emailSignatureText: settings.emailSignatureText,
+    });
+    setEmailSignatureSaveMessage("Email signature saved.");
   }
 
   async function onConnectOutlook() {
@@ -236,15 +250,28 @@ export default function SettingsPage() {
               <span className="font-medium text-gray-700">Email handling mode</span>
               <select
                 value={settings.emailHandlingMode}
-                onChange={(e) => updateEmailHandlingMode(e.target.value as EmailHandlingMode)}
+                onChange={(e) => updateSettings("emailHandlingMode", e.target.value as EmailHandlingMode)}
                 className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
               >
                 <option value="draft">Save to Drafts</option>
                 <option value="schedule">Schedule Send</option>
                 <option value="send">Send Immediately</option>
               </select>
-              <p className="text-xs text-gray-500">This saves immediately when changed.</p>
             </label>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs text-gray-500">
+                {hasUnsavedPlanBuilderChanges ? "Plan builder changes are not saved yet." : "Plan builder defaults are saved locally."}
+              </div>
+              <button
+                type="button"
+                onClick={onSavePlanBuilderSettings}
+                disabled={!hasUnsavedPlanBuilderChanges}
+                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Save Plan Builder Defaults
+              </button>
+            </div>
+            {planBuilderSaveMessage ? <p className="text-xs text-green-700">{planBuilderSaveMessage}</p> : null}
           </div>
         </div>
 
@@ -319,16 +346,19 @@ export default function SettingsPage() {
               />
             </label>
             <div className="flex items-center justify-between gap-3">
-              <div className="text-xs text-gray-500">{hasUnsavedChanges ? "Changes are not saved yet." : "All settings are saved locally."}</div>
+              <div className="text-xs text-gray-500">
+                {hasUnsavedEmailSignatureChanges ? "Email signature changes are not saved yet." : "Email signature settings are saved locally."}
+              </div>
               <button
                 type="button"
-                onClick={onSave}
-                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                onClick={onSaveEmailSignatureSettings}
+                disabled={!hasUnsavedEmailSignatureChanges}
+                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Save Settings
+                Save Signature
               </button>
             </div>
-            {saveMessage ? <p className="text-xs text-green-700">{saveMessage}</p> : null}
+            {emailSignatureSaveMessage ? <p className="text-xs text-green-700">{emailSignatureSaveMessage}</p> : null}
           </div>
         </div>
       </section>
