@@ -1,9 +1,41 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 
-import { listExecutionHistory, type ExecutionHistoryRecord } from "../../lib/executionHistory";
+import {
+  EXECUTION_HISTORY_UPDATED_EVENT,
+  listExecutionHistory,
+  type ExecutionHistoryRecord,
+} from "../../lib/executionHistory";
+
+type PlanExecutionGroup = {
+  key: string;
+  planName: string;
+  executionGroupId: string | null;
+  items: ExecutionHistoryRecord[];
+  latestExecutedAt: string;
+};
+
+type DayExecutionGroup = {
+  day: string;
+  plans: PlanExecutionGroup[];
+};
+
+type HistoryEmailDraftDetails = {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+};
+
+type HistoryMeetingDetails = {
+  attendees: string[];
+  location: string;
+  title: string;
+  body: string;
+};
 
 function formatDayLabel(value: string) {
   return new Intl.DateTimeFormat("en-US", {
@@ -14,29 +46,110 @@ function formatDayLabel(value: string) {
   }).format(new Date(value));
 }
 
-function formatTimestamp(value: string) {
+function formatDateTime(value: string | null) {
+  if (!value) return "Not available";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not available";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(parsed);
 }
 
-function getStatusClasses(status: ExecutionHistoryRecord["status"]) {
-  if (status === "success") return "bg-green-50 text-green-700 ring-green-200";
-  if (status === "failed") return "bg-red-50 text-red-700 ring-red-200";
-  return "bg-amber-50 text-amber-700 ring-amber-200";
+function formatDateOnly(value: string | null) {
+  if (!value) return "Not available";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not available";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  }).format(parsed);
 }
 
-function getPathLabel(path: ExecutionHistoryRecord["path"]) {
-  return path === "graph" ? "Microsoft Graph" : "Fallback export";
+function formatTimeOnly(value: string | null) {
+  if (!value) return "Not available";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not available";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
+function formatItemTypeLabel(type: ExecutionHistoryRecord["itemType"]) {
+  if (type === "teams_meeting") return "Teams meeting";
+  return type.charAt(0).toUpperCase() + type.slice(1);
+}
+
+function formatTimelineItemType(record: ExecutionHistoryRecord) {
+  if (record.itemType === "teams_meeting") return "Teams Meeting";
+  if (record.itemType === "meeting") return "Meeting";
+  if (record.itemType === "reminder") return "Reminder";
+  if (record.itemType === "email") {
+    const action = typeof record.details.action === "string" ? record.details.action : "";
+    if (action === "draft_created") return "Email Draft";
+    if (action === "email_scheduled") return "Scheduled Email";
+    if (action === "email_sent") return "Email";
+    if (record.path === "fallback" && record.fallbackExportKind === "eml") return "Email Draft";
+    return "Email";
+  }
+  return formatItemTypeLabel(record.itemType);
+}
+
+function getViewFullLabel(record: ExecutionHistoryRecord) {
+  const label = formatTimelineItemType(record);
+  return `View Full ${label}`;
+}
+
+function getTypeAccentClasses(label: string) {
+  if (label === "Reminder") return "text-blue-600";
+  if (label === "Meeting" || label === "Teams Meeting") return "text-violet-600";
+  return "text-green-600";
+}
+
+function readStringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function getHistoryBody(record: ExecutionHistoryRecord) {
+  return typeof record.details.body === "string" ? record.details.body : "";
+}
+
+function getHistoryEmailDraftDetails(record: ExecutionHistoryRecord): HistoryEmailDraftDetails | null {
+  const value = record.details.emailDraft;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const draft = value as Record<string, unknown>;
+  return {
+    to: readStringArray(draft.to),
+    cc: readStringArray(draft.cc),
+    bcc: readStringArray(draft.bcc),
+    subject: typeof draft.subject === "string" ? draft.subject : "",
+    body: typeof draft.body === "string" ? draft.body : "",
+  };
+}
+
+function getHistoryMeetingDetails(record: ExecutionHistoryRecord): HistoryMeetingDetails | null {
+  const value = record.details.meetingDraft;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const meeting = value as Record<string, unknown>;
+  return {
+    attendees: readStringArray(meeting.attendees),
+    location: typeof meeting.location === "string" ? meeting.location : "",
+    title: typeof meeting.title === "string" ? meeting.title : record.title,
+    body: typeof meeting.body === "string" ? meeting.body : "",
+  };
 }
 
 export default function HistoryPage() {
   const [records, setRecords] = useState<ExecutionHistoryRecord[]>([]);
-  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
+  const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
+  const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -44,205 +157,297 @@ export default function HistoryPage() {
     async function load() {
       setLoading(true);
       const nextRecords = await listExecutionHistory();
+      console.info("[historyPage] loaded records", {
+        count: nextRecords.length,
+        days: Array.from(new Set(nextRecords.map((record) => record.executedAt.slice(0, 10)))),
+        firstRecord: nextRecords[0]
+          ? {
+              id: nextRecords[0].id,
+              userKey: nextRecords[0].userKey,
+              executionGroupId: nextRecords[0].executionGroupId,
+              planName: nextRecords[0].planName,
+              executedAt: nextRecords[0].executedAt,
+            }
+          : null,
+      });
       if (cancelled) return;
       setRecords(nextRecords);
-      setSelectedRecordId((current) => current ?? nextRecords[0]?.id ?? null);
+      setExpandedDays((current) => {
+        if (Object.keys(current).length > 0) return current;
+        return Object.fromEntries(nextRecords.map((record) => [record.executedAt.slice(0, 10), true]));
+      });
+      setExpandedPlans((current) => {
+        if (Object.keys(current).length > 0) return current;
+        return {};
+      });
       setLoading(false);
     }
 
     void load();
 
+    function refresh() {
+      void load();
+    }
+
+    window.addEventListener(EXECUTION_HISTORY_UPDATED_EVENT, refresh as EventListener);
+
     return () => {
       cancelled = true;
+      window.removeEventListener(EXECUTION_HISTORY_UPDATED_EVENT, refresh as EventListener);
     };
   }, []);
 
-  const groupedRecords = useMemo(() => {
-    const groups: Array<{ day: string; items: ExecutionHistoryRecord[] }> = [];
-    const map = new Map<string, ExecutionHistoryRecord[]>();
+  const groupedRecords = useMemo<DayExecutionGroup[]>(() => {
+    const dayMap = new Map<string, Map<string, PlanExecutionGroup>>();
 
     for (const record of records) {
       const day = record.executedAt.slice(0, 10);
-      const existing = map.get(day);
+      const dayGroup = dayMap.get(day) ?? new Map<string, PlanExecutionGroup>();
+      if (!dayMap.has(day)) dayMap.set(day, dayGroup);
+
+      const groupKey = record.executionGroupId || `legacy:${record.planName || "Unnamed plan"}:${day}`;
+      const existing = dayGroup.get(groupKey);
+
       if (existing) {
-        existing.push(record);
-      } else {
-        const nextGroup = [record];
-        map.set(day, nextGroup);
-        groups.push({ day, items: nextGroup });
+        existing.items.push(record);
+        if (record.executedAt > existing.latestExecutedAt) {
+          existing.latestExecutedAt = record.executedAt;
+        }
+        continue;
       }
+
+      dayGroup.set(groupKey, {
+        key: groupKey,
+        planName: record.planName || record.subject || record.title || "Unnamed plan",
+        executionGroupId: record.executionGroupId,
+        items: [record],
+        latestExecutedAt: record.executedAt,
+      });
     }
 
-    return groups;
+    return Array.from(dayMap.entries()).map(([day, planMap]) => ({
+      day,
+      plans: Array.from(planMap.values()).sort((left, right) => right.latestExecutedAt.localeCompare(left.latestExecutedAt)),
+    }));
   }, [records]);
-
-  const selectedRecord = records.find((record) => record.id === selectedRecordId) ?? null;
 
   return (
     <div className="space-y-8 text-gray-900">
-      <section className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+      <section>
         <div>
           <h1 className="text-3xl font-bold text-gray-900">History</h1>
-          <p className="mt-2 max-w-3xl text-sm text-gray-600">
-            Review what was created from Plans by day, including Outlook Graph executions and local fallback exports.
-          </p>
-        </div>
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm shadow-sm md:min-w-[280px]">
-          <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Execution log</div>
-          <div className="mt-1 font-medium text-gray-900">{records.length} recorded items</div>
-          <div className="mt-1 text-xs text-gray-600">Each entry captures the final path used for that item.</div>
         </div>
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.9fr)]">
-        <div className="rounded-2xl border bg-white shadow-sm">
-          <div className="border-b px-6 py-4">
-            <h2 className="text-lg font-semibold text-gray-900">By day</h2>
-          </div>
-          <div className="p-6">
-            {loading ? (
-              <p className="text-sm text-gray-600">Loading history…</p>
-            ) : groupedRecords.length === 0 ? (
-              <div className="space-y-3 rounded-2xl border border-dashed bg-gray-50 p-6 text-sm text-gray-600">
-                <p>No execution history yet.</p>
-                <Link href="/plans" className="inline-flex rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700">
-                  Go to Plans
-                </Link>
-              </div>
-            ) : (
-              <div className="space-y-8">
-                {groupedRecords.map((group) => (
-                  <section key={group.day} className="space-y-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">{formatDayLabel(group.day)}</div>
-                    <div className="space-y-3">
-                      {group.items.map((record) => {
-                        const isActive = record.id === selectedRecordId;
-                        return (
-                          <button
-                            key={record.id}
-                            type="button"
-                            onClick={() => setSelectedRecordId(record.id)}
-                            className={`w-full rounded-2xl border p-4 text-left transition ${
-                              isActive ? "border-blue-300 bg-blue-50/40 shadow-sm" : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
-                            }`}
-                          >
-                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                              <div className="min-w-0 space-y-2">
-                                <div className="flex flex-wrap items-center gap-2 text-xs">
-                                  <span className="rounded-full bg-gray-100 px-2.5 py-1 font-medium text-gray-700">{record.itemType}</span>
-                                  <span className={`rounded-full px-2.5 py-1 font-medium ring-1 ring-inset ${getStatusClasses(record.status)}`}>
-                                    {record.status}
-                                  </span>
-                                  <span className="rounded-full bg-white px-2.5 py-1 font-medium text-gray-600 ring-1 ring-gray-200">
-                                    {getPathLabel(record.path)}
-                                  </span>
-                                </div>
-                                <div>
-                                  <div className="font-medium text-gray-900">{record.subject || record.title || "Untitled item"}</div>
-                                  <div className="mt-1 text-sm text-gray-600">{record.planName || "Unnamed plan"}</div>
-                                </div>
-                                {record.recipients.length > 0 ? (
-                                  <div className="text-sm text-gray-600">Recipients: {record.recipients.join(", ")}</div>
-                                ) : null}
-                                {record.attendees.length > 0 ? (
-                                  <div className="text-sm text-gray-600">Attendees: {record.attendees.join(", ")}</div>
-                                ) : null}
-                              </div>
-                              <div className="shrink-0 text-sm text-gray-500">{formatTimestamp(record.executedAt)}</div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            )}
-          </div>
+      <section className="rounded-2xl border bg-white shadow-sm">
+        <div className="border-b px-6 py-4">
+          <h2 className="text-lg font-semibold text-gray-900">Execution History</h2>
         </div>
+        <div className="p-6">
+          {loading ? (
+            <p className="text-sm text-gray-600">Loading history…</p>
+          ) : groupedRecords.length === 0 ? (
+            <div className="space-y-3 rounded-2xl border border-dashed bg-gray-50 p-6 text-sm text-gray-600">
+              <p>No execution history yet.</p>
+              <p>History now persists locally as well as to Supabase when configured, so newly exported plans should show up here right away.</p>
+              <Link href="/plans" className="inline-flex rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700">
+                Go to Plans
+              </Link>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {groupedRecords.map((dayGroup) => {
+                const isDayExpanded = expandedDays[dayGroup.day] ?? true;
 
-        <aside className="rounded-2xl border bg-white shadow-sm">
-          <div className="border-b px-6 py-4">
-            <h2 className="text-lg font-semibold text-gray-900">Details</h2>
-          </div>
-          <div className="space-y-5 p-6">
-            {selectedRecord ? (
-              <>
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">{selectedRecord.itemType}</div>
-                  <h3 className="mt-1 text-xl font-semibold text-gray-900">
-                    {selectedRecord.subject || selectedRecord.title || "Untitled item"}
-                  </h3>
-                  <p className="mt-2 text-sm text-gray-600">{selectedRecord.planName || "Unnamed plan"}</p>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Status</div>
-                    <div className="mt-1 text-sm font-medium text-gray-900">{selectedRecord.status}</div>
-                  </div>
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Path</div>
-                    <div className="mt-1 text-sm font-medium text-gray-900">{getPathLabel(selectedRecord.path)}</div>
-                  </div>
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Timestamp</div>
-                    <div className="mt-1 text-sm font-medium text-gray-900">{formatTimestamp(selectedRecord.executedAt)}</div>
-                  </div>
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Fallback export</div>
-                    <div className="mt-1 text-sm font-medium text-gray-900">{selectedRecord.fallbackExportKind ?? "None"}</div>
-                  </div>
-                </div>
-
-                {selectedRecord.recipients.length > 0 ? (
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recipients</div>
-                    <p className="mt-2 text-sm text-gray-700">{selectedRecord.recipients.join(", ")}</p>
-                  </div>
-                ) : null}
-
-                {selectedRecord.attendees.length > 0 ? (
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Attendees</div>
-                    <p className="mt-2 text-sm text-gray-700">{selectedRecord.attendees.join(", ")}</p>
-                  </div>
-                ) : null}
-
-                <div className="flex flex-wrap gap-3">
-                  {selectedRecord.outlookWebLink ? (
-                    <a
-                      href={selectedRecord.outlookWebLink}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                return (
+                  <section key={dayGroup.day} className="rounded-2xl border border-gray-200">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedDays((current) => ({ ...current, [dayGroup.day]: !isDayExpanded }))}
+                      className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left hover:bg-gray-50"
                     >
-                      Open in Outlook
-                    </a>
-                  ) : null}
-                  {selectedRecord.teamsJoinLink ? (
-                    <a
-                      href={selectedRecord.teamsJoinLink}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                    >
-                      Join Teams
-                    </a>
-                  ) : null}
-                </div>
+                      <div className="text-lg font-semibold text-gray-900">{formatDayLabel(dayGroup.day)}</div>
+                      <div className="text-sm font-medium text-gray-500">{isDayExpanded ? "Collapse" : "Expand"}</div>
+                    </button>
 
-                {selectedRecord.details.reason && typeof selectedRecord.details.reason === "string" ? (
-                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-                    {selectedRecord.details.reason}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <p className="text-sm text-gray-600">Select a history item to view its details.</p>
-            )}
-          </div>
-        </aside>
+                    {isDayExpanded ? (
+                      <div className="space-y-4 border-t bg-gray-50/60 p-4">
+                        {dayGroup.plans.map((planGroup) => {
+                          const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
+                          return (
+                            <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
+                              <button
+                                type="button"
+                                onClick={() => setExpandedPlans((current) => ({ ...current, [planGroup.key]: !isPlanExpanded }))}
+                                className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left hover:bg-gray-50"
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-lg font-semibold text-gray-900">Event Name: {planGroup.planName}</div>
+                                  <div className="mt-1 text-sm text-gray-600">
+                                    {planGroup.items.length} created item{planGroup.items.length === 1 ? "" : "s"}
+                                  </div>
+                                  <div className="mt-1 text-sm text-gray-600">Created at: {formatDateTime(planGroup.latestExecutedAt)}</div>
+                                </div>
+                                <div className="text-sm font-medium text-gray-500">{isPlanExpanded ? "Collapse" : "Expand"}</div>
+                              </button>
+
+                              {isPlanExpanded ? (
+                                <div className="border-t p-5">
+                                  <div className="hidden items-center gap-x-3 border-b pb-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_170px]">
+                                    <div>Type</div>
+                                    <div>Title</div>
+                                    <div className="text-center">Date Disseminated</div>
+                                    <div className="text-center">Time</div>
+                                    <div className="text-right">Action</div>
+                                  </div>
+                                  <div className="divide-y">
+                                    {planGroup.items.map((item) => {
+                                      const itemTypeLabel = formatTimelineItemType(item);
+                                      const itemDateTime = item.scheduledFor || item.executedAt;
+                                      const isItemExpanded = expandedItems[item.id] ?? false;
+                                      const reminderBody = getHistoryBody(item);
+                                      const emailDraft = getHistoryEmailDraftDetails(item);
+                                      const meetingDetails = getHistoryMeetingDetails(item);
+                                      return (
+                                        <article key={item.id} className="py-4">
+                                          <div className="grid items-center gap-3 md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_170px]">
+                                            <div className={`text-sm font-medium ${getTypeAccentClasses(itemTypeLabel)}`}>{itemTypeLabel}</div>
+                                            <div className="min-w-0 truncate text-base text-gray-900">{item.subject || item.title || "Untitled item"}</div>
+                                            <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
+                                              {formatDateOnly(itemDateTime)}
+                                            </div>
+                                            <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
+                                              {formatTimeOnly(itemDateTime)}
+                                            </div>
+                                            <div className="flex justify-end">
+                                              <button
+                                                type="button"
+                                                onClick={() => setExpandedItems((current) => ({ ...current, [item.id]: !isItemExpanded }))}
+                                                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                                              >
+                                                {isItemExpanded ? `Hide ${itemTypeLabel}` : getViewFullLabel(item)}
+                                              </button>
+                                            </div>
+                                          </div>
+                                          {isItemExpanded ? (
+                                            <div className="mt-4 space-y-4 rounded-xl border bg-gray-50 p-4">
+                                              <div className="text-sm text-gray-700">Event Name: {planGroup.planName}</div>
+                                              {item.itemType === "reminder" ? (
+                                                <div className="bg-blue-50 px-4 py-3">
+                                                  <div className="grid grid-cols-1 gap-3">
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-blue-950">Reminder Body</label>
+                                                      <textarea
+                                                        rows={5}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={reminderBody}
+                                                      />
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              ) : null}
+                                              {(item.itemType === "meeting" || item.itemType === "teams_meeting") && meetingDetails ? (
+                                                <div className="bg-violet-50 px-4 py-3">
+                                                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                                    <div className="md:col-span-2">
+                                                      <label className="mb-1 block text-sm font-medium text-violet-950">To</label>
+                                                      <textarea
+                                                        rows={2}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={meetingDetails.attendees.join(", ")}
+                                                      />
+                                                    </div>
+                                                    <div className="md:col-span-2">
+                                                      <label className="mb-1 block text-sm font-medium text-violet-950">Subject</label>
+                                                      <input
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={meetingDetails.title}
+                                                      />
+                                                    </div>
+                                                    <div className="md:col-span-2">
+                                                      <label className="mb-1 block text-sm font-medium text-violet-950">Message</label>
+                                                      <textarea
+                                                        rows={6}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={meetingDetails.body}
+                                                      />
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              ) : null}
+                                              {item.itemType === "email" && emailDraft ? (
+                                                <div className="bg-amber-50 px-4 py-3">
+                                                  <div className="grid grid-cols-1 gap-3">
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-amber-950">To</label>
+                                                      <textarea
+                                                        rows={2}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={emailDraft.to.join(", ")}
+                                                      />
+                                                    </div>
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Cc</label>
+                                                      <textarea
+                                                        rows={2}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={emailDraft.cc.join(", ")}
+                                                      />
+                                                    </div>
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Bcc</label>
+                                                      <textarea
+                                                        rows={2}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={emailDraft.bcc.join(", ")}
+                                                      />
+                                                    </div>
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Subject</label>
+                                                      <input
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={emailDraft.subject}
+                                                      />
+                                                    </div>
+                                                    <div>
+                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Message</label>
+                                                      <textarea
+                                                        rows={8}
+                                                        readOnly
+                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                                        value={emailDraft.body}
+                                                      />
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          ) : null}
+                                        </article>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </section>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </section>
     </div>
   );

@@ -134,6 +134,7 @@ type OutlookExecutionResult = {
     | "meeting_created";
   title: string;
   message: string;
+  providerObjectId?: string;
   webLink?: string;
   joinUrl?: string;
 };
@@ -143,7 +144,6 @@ type ExecutionNotice = {
   title: string;
   message?: string;
   details?: string[];
-  links?: Array<{ href: string; label: string }>;
 };
 
 type GuidedFormState = {
@@ -257,21 +257,6 @@ function OutlookExecutionNoticeCard({
               ))}
             </div>
           ) : null}
-          {notice.links && notice.links.length > 0 ? (
-            <div className="flex flex-wrap gap-2 pt-1">
-              {notice.links.map((link) => (
-                <a
-                  key={`${link.href}:${link.label}`}
-                  href={link.href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex rounded-lg border border-current/20 bg-white px-3 py-1.5 text-xs font-medium hover:bg-white/80"
-                >
-                  {link.label}
-                </a>
-              ))}
-            </div>
-          ) : null}
         </div>
         <button
           type="button"
@@ -281,6 +266,24 @@ function OutlookExecutionNoticeCard({
           Dismiss
         </button>
       </div>
+    </div>
+  );
+}
+
+function ExportDoneBadge() {
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700">
+      <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5">
+        <path
+          d="M13 4.5 6.5 11 3 7.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span>Export Done</span>
     </div>
   );
 }
@@ -1557,6 +1560,136 @@ export default function PlansPage() {
     return normalizeMeetingDraft(item.meetingDraft)?.attendees ?? [];
   }
 
+  function getExecutionHistoryDetailFields(item: Plan["items"][number]) {
+    const rowKind = classifyPlanRow(item);
+
+    if (rowKind === "email") {
+      const draft = getResolvedEmailDraftForExecution(item);
+      return {
+        body: draft.body,
+        emailDraft: {
+          to: draft.to,
+          cc: draft.cc,
+          bcc: draft.bcc,
+          subject: draft.subject,
+          body: draft.body,
+        },
+      };
+    }
+
+    if (rowKind === "meeting") {
+      const meetingDraft = normalizeMeetingDraft(item.meetingDraft);
+      return {
+        body: item.body ?? "",
+        meetingDraft: {
+          attendees: meetingDraft?.attendees ?? [],
+          location: meetingDraft?.location ?? "",
+          title: item.customTitle ?? item.title,
+          body: item.body ?? "",
+        },
+      };
+    }
+
+    return {
+      body: item.body ?? "",
+    };
+  }
+
+  function getExecutionHistoryTiming(item: Plan["items"][number]) {
+    const rowKind = classifyPlanRow(item);
+
+    if (rowKind === "meeting" || rowKind === "reminder") {
+      const timing = buildPreviewItemGraphTiming(item);
+      return {
+        scheduledFor: timing.startISO,
+        endsAt: timing.endISO,
+        isAllDay: timing.isAllDay,
+      };
+    }
+
+    if (rowKind === "email" && appSettings.emailHandlingMode === "schedule") {
+      return {
+        scheduledFor: getEmailScheduledSendISO(item) || null,
+        endsAt: null,
+        isAllDay: false,
+      };
+    }
+
+    const dueDate = getEffectivePreviewItemDate(item);
+    const reminderTime = getUsableReminderTime(item.reminderTime);
+    return {
+      scheduledFor: dueDate && reminderTime ? buildLocalDateTimeIso(dueDate, reminderTime) : null,
+      endsAt: null,
+      isAllDay: false,
+    };
+  }
+
+  function getExecutionHistoryCapabilities(options: {
+    item: Plan["items"][number];
+    status: "success" | "fallback" | "failed";
+    path: "graph" | "fallback";
+    result?: OutlookExecutionResult;
+  }) {
+    if (options.path !== "graph") {
+      return {
+        provider: "local_export" as const,
+        providerObjectType: "file" as const,
+        providerObjectId: null,
+        canRecall: false,
+        canModify: false,
+        recallImplemented: false,
+        modifyImplemented: false,
+        recallReason: "Local exports do not create provider-backed objects, so they cannot be recalled.",
+        modifyReason: "Local export files cannot be modified after download from History.",
+      };
+    }
+
+    const action = options.result?.action ?? null;
+    const rowKind = classifyPlanRow(options.item);
+    const providerObjectType = rowKind === "email" ? "message" : "event";
+    const providerObjectId = options.result?.providerObjectId ?? null;
+
+    if (options.status !== "success" || !providerObjectId) {
+      return {
+        provider: "outlook" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: false,
+        canModify: false,
+        recallImplemented: false,
+        modifyImplemented: false,
+        recallReason: "This record does not include a provider object id, so recall is not available.",
+        modifyReason: "This record does not include a provider object id, so modify is not available.",
+      };
+    }
+
+    if (action === "email_sent") {
+      return {
+        provider: "outlook" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: false,
+        canModify: false,
+        recallImplemented: false,
+        modifyImplemented: false,
+        recallReason: "Sent emails are not recallable from this app.",
+        modifyReason: "Sent emails cannot be modified after send.",
+      };
+    }
+
+    return {
+      provider: "outlook" as const,
+      providerObjectType,
+      providerObjectId,
+      canRecall: true,
+      canModify: true,
+      recallImplemented: false,
+      modifyImplemented: false,
+      recallReason: "Outlook object metadata is stored, but provider recall is not implemented yet.",
+      modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+    };
+  }
+
   async function recordExecutionHistory(options: {
     item: Plan["items"][number];
     status: "success" | "fallback" | "failed";
@@ -1568,6 +1701,9 @@ export default function PlansPage() {
   }) {
     try {
       const subject = getExecutionHistoryTitle(options.item);
+      const timing = getExecutionHistoryTiming(options.item);
+      const capabilities = getExecutionHistoryCapabilities(options);
+      const detailFields = getExecutionHistoryDetailFields(options.item);
       await writeExecutionHistory({
         executionGroupId: options.executionGroupId ?? null,
         planName: previewPlan.name,
@@ -1581,6 +1717,18 @@ export default function PlansPage() {
         outlookWebLink: options.result?.webLink ?? null,
         teamsJoinLink: options.result?.joinUrl ?? null,
         fallbackExportKind: options.fallbackExportKind ?? null,
+        provider: capabilities.provider,
+        providerObjectId: capabilities.providerObjectId,
+        providerObjectType: capabilities.providerObjectType,
+        canRecall: capabilities.canRecall,
+        canModify: capabilities.canModify,
+        recallImplemented: capabilities.recallImplemented,
+        modifyImplemented: capabilities.modifyImplemented,
+        recallReason: capabilities.recallReason,
+        modifyReason: capabilities.modifyReason,
+        scheduledFor: timing.scheduledFor,
+        endsAt: timing.endsAt,
+        isAllDay: timing.isAllDay,
         details: {
           action: options.result?.action ?? null,
           message: options.result?.message ?? null,
@@ -1594,6 +1742,7 @@ export default function PlansPage() {
           reminderTime: options.item.reminderTime ?? null,
           teamsMeeting: Boolean(options.item.meetingDraft?.teamsMeeting),
           emailHandlingMode: classifyPlanRow(options.item) === "email" ? appSettings.emailHandlingMode : null,
+          ...detailFields,
         },
       });
     } catch {
@@ -1691,47 +1840,13 @@ export default function PlansPage() {
     }
   }
 
-  function getExecutionLinks(results: OutlookExecutionResult[]) {
-    const links: ExecutionNotice["links"] = [];
-    const seen = new Set<string>();
-
-    for (const result of results) {
-      if (result.webLink && !seen.has(`outlook:${result.webLink}`)) {
-        links.push({
-          href: result.webLink,
-          label:
-            result.action === "draft_created"
-              ? "Open in Outlook"
-              : result.action === "meeting_created"
-                ? "Open event in Outlook"
-                : "Open in Outlook",
-        });
-        seen.add(`outlook:${result.webLink}`);
-      }
-
-      if (result.joinUrl && !seen.has(`teams:${result.joinUrl}`)) {
-        links.push({
-          href: result.joinUrl,
-          label: "Join Teams Meeting",
-        });
-        seen.add(`teams:${result.joinUrl}`);
-      }
-    }
-
-    return links;
-  }
-
   function setExecutionNoticeForResult(result: OutlookExecutionResult) {
     const details = [result.title];
-    if (result.action === "meeting_created" && result.joinUrl) {
-      details.push("Teams join details are now available.");
-    }
 
     setExecutionNotice({
       tone: "success",
       title: result.message,
       details,
-      links: getExecutionLinks([result]),
     });
   }
 
@@ -1798,10 +1913,6 @@ export default function PlansPage() {
           .join(", ")}${options.failedCalendarItems.length > 3 ? ", ..." : ""}`
       );
     }
-    if (options.graphResults.some((result) => result.joinUrl)) {
-      details.push("Teams join links are available below for created online meetings.");
-    }
-
     const hasFallbacks = options.failedEmailItems.length > 0 || options.failedCalendarItems.length > 0;
     const hasGraphSuccesses = options.graphResults.length > 0;
 
@@ -1814,7 +1925,6 @@ export default function PlansPage() {
         : "Outlook export completed",
       message: options.graphUnavailableReason,
       details,
-      links: getExecutionLinks(options.graphResults).slice(0, 4),
     });
   }
 
@@ -1853,6 +1963,7 @@ export default function PlansPage() {
         action: "email_scheduled",
         title,
         message: "Outlook email scheduled.",
+        providerObjectId: result.id,
         webLink: result.webLink,
       } satisfies OutlookExecutionResult;
     }
@@ -1867,6 +1978,7 @@ export default function PlansPage() {
       action: "draft_created",
       title,
       message: "Outlook draft created.",
+      providerObjectId: result.id,
       webLink: result.webLink,
     } satisfies OutlookExecutionResult;
   }
@@ -1891,6 +2003,7 @@ export default function PlansPage() {
       action: rowKind === "meeting" ? "meeting_created" : "reminder_created",
       title: item.customTitle ?? item.title,
       message: rowKind === "meeting" ? "Outlook meeting created." : "Outlook calendar reminder created.",
+      providerObjectId: result.id,
       webLink: result.webLink,
       joinUrl: result.joinUrl,
     } satisfies OutlookExecutionResult;
@@ -1901,6 +2014,7 @@ export default function PlansPage() {
     if (!item) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
+    const executionGroupId = crypto.randomUUID();
 
     const graphAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
     if (graphAvailability.canUseGraph) {
@@ -1910,6 +2024,7 @@ export default function PlansPage() {
           item,
           status: "success",
           path: "graph",
+          executionGroupId,
           result,
         });
         setExecutionNoticeForResult(result);
@@ -1923,6 +2038,7 @@ export default function PlansPage() {
           item,
           status: "fallback",
           path: "fallback",
+          executionGroupId,
           fallbackExportKind: "eml",
           reason,
         });
@@ -1942,6 +2058,7 @@ export default function PlansPage() {
       item,
       status: "fallback",
       path: "fallback",
+      executionGroupId,
       fallbackExportKind: "eml",
       reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
     });
@@ -1958,6 +2075,7 @@ export default function PlansPage() {
     if (validateMeetingRowsForExport([itemId], { usePopup: true })) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
+    const executionGroupId = crypto.randomUUID();
 
     const graphAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
     if (graphAvailability.canUseGraph) {
@@ -1967,6 +2085,7 @@ export default function PlansPage() {
           item,
           status: "success",
           path: "graph",
+          executionGroupId,
           result,
         });
         setExecutionNoticeForResult(result);
@@ -1980,6 +2099,7 @@ export default function PlansPage() {
           item,
           status: "fallback",
           path: "fallback",
+          executionGroupId,
           fallbackExportKind: "ics",
           reason,
         });
@@ -1999,6 +2119,7 @@ export default function PlansPage() {
       item,
       status: "fallback",
       path: "fallback",
+      executionGroupId,
       fallbackExportKind: "ics",
       reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
     });
@@ -2336,6 +2457,7 @@ export default function PlansPage() {
     if (!item) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
+    const executionGroupId = crypto.randomUUID();
 
     const graphAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
     if (graphAvailability.canUseGraph) {
@@ -2345,6 +2467,7 @@ export default function PlansPage() {
           item,
           status: "success",
           path: "graph",
+          executionGroupId,
           result,
         });
         setExecutionNoticeForResult(result);
@@ -2358,6 +2481,7 @@ export default function PlansPage() {
           item,
           status: "fallback",
           path: "fallback",
+          executionGroupId,
           fallbackExportKind: "ics",
           reason,
         });
@@ -2377,6 +2501,7 @@ export default function PlansPage() {
       item,
       status: "fallback",
       path: "fallback",
+      executionGroupId,
       fallbackExportKind: "ics",
       reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
     });
@@ -4106,7 +4231,7 @@ export default function PlansPage() {
                     </div>
 
                     <div className="flex justify-end">
-                      <div className="flex w-full max-w-56 flex-col gap-2">
+                      <div className="flex w-full max-w-64 flex-col gap-2">
                         <button
                           type="button"
                           onClick={() => {
@@ -4144,6 +4269,11 @@ export default function PlansPage() {
                         >
                           Export
                         </button>
+                        {executionNotice?.tone === "success" ? (
+                          <div className="flex justify-end">
+                            <ExportDoneBadge />
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -4648,7 +4778,7 @@ export default function PlansPage() {
                       </p>
                     </div>
 
-                    <div className="flex flex-wrap gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
                       <button
                         onClick={() => {
                           void exportCurrentPlan({ skipValidation: true, skipConfirm: true });
@@ -4657,6 +4787,7 @@ export default function PlansPage() {
                       >
                         Export
                       </button>
+                      {executionNotice?.tone === "success" ? <ExportDoneBadge /> : null}
                     </div>
                   </div>
                 </>

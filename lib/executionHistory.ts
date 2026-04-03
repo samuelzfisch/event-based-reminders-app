@@ -1,3 +1,4 @@
+import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
 
@@ -5,6 +6,8 @@ export type ExecutionHistoryStatus = "success" | "fallback" | "failed";
 export type ExecutionHistoryPath = "graph" | "fallback";
 export type ExecutionHistoryItemType = "email" | "reminder" | "meeting" | "teams_meeting";
 export type ExecutionHistoryFallbackExportKind = "eml" | "ics" | null;
+export type ExecutionHistoryProvider = "outlook" | "local_export";
+export type ExecutionHistoryProviderObjectType = "message" | "event" | "file" | null;
 
 export type ExecutionHistoryRecord = {
   id: string;
@@ -22,12 +25,31 @@ export type ExecutionHistoryRecord = {
   outlookWebLink: string | null;
   teamsJoinLink: string | null;
   fallbackExportKind: ExecutionHistoryFallbackExportKind;
+  provider: ExecutionHistoryProvider;
+  providerObjectId: string | null;
+  providerObjectType: ExecutionHistoryProviderObjectType;
+  canRecall: boolean;
+  canModify: boolean;
+  recallImplemented: boolean;
+  modifyImplemented: boolean;
+  recallReason: string | null;
+  modifyReason: string | null;
+  scheduledFor: string | null;
+  endsAt: string | null;
+  isAllDay: boolean;
   details: Record<string, unknown>;
 };
 
 export type ExecutionHistoryInsert = Omit<ExecutionHistoryRecord, "id" | "userKey" | "executedAt"> & {
+  id?: string;
   executedAt?: string;
 };
+
+export const EXECUTION_HISTORY_UPDATED_EVENT = "event-based-reminders-app:execution-history-updated";
+const EXECUTION_HISTORY_STORAGE_KEY = "event-based-reminders-app:execution-history";
+const LEGACY_EXECUTION_HISTORY_STORAGE_KEYS = ["standalone-plans:execution-history"];
+const MAX_LOCAL_HISTORY_RECORDS = 400;
+const HISTORY_DEBUG_PREFIX = "[executionHistory]";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -56,63 +78,193 @@ function normalizeFallbackExportKind(value: unknown): ExecutionHistoryFallbackEx
   return null;
 }
 
+function readString(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNullableString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function readBoolean(value: unknown, fallback = false) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function normalizeProvider(value: unknown): ExecutionHistoryProvider {
+  return value === "local_export" ? "local_export" : "outlook";
+}
+
+function normalizeProviderObjectType(value: unknown): ExecutionHistoryProviderObjectType {
+  return value === "message" || value === "event" || value === "file" ? value : null;
+}
+
+function getLegacyDetails(value: Record<string, unknown>) {
+  return isObject(value.details) ? value.details : {};
+}
+
 function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
   if (!isObject(value) || typeof value.id !== "string") return null;
 
+  const details = getLegacyDetails(value);
+
   return {
     id: value.id,
-    userKey: typeof value.user_key === "string" ? value.user_key : "",
-    executionGroupId: typeof value.execution_group_id === "string" ? value.execution_group_id : null,
-    planName: typeof value.plan_name === "string" ? value.plan_name : "",
-    itemType: normalizeHistoryItemType(value.item_type),
-    title: typeof value.title === "string" ? value.title : "",
-    subject: typeof value.subject === "string" ? value.subject : "",
+    userKey: readString(value.user_key ?? value.userKey),
+    executionGroupId: readNullableString(value.execution_group_id ?? value.executionGroupId),
+    planName: readString(value.plan_name ?? value.planName),
+    itemType: normalizeHistoryItemType(value.item_type ?? value.itemType),
+    title: readString(value.title),
+    subject: readString(value.subject),
     status: normalizeHistoryStatus(value.status),
     path: normalizeHistoryPath(value.path),
     recipients: normalizeStringArray(value.recipients),
     attendees: normalizeStringArray(value.attendees),
-    executedAt: typeof value.executed_at === "string" ? value.executed_at : new Date(0).toISOString(),
-    outlookWebLink: typeof value.outlook_web_link === "string" ? value.outlook_web_link : null,
-    teamsJoinLink: typeof value.teams_join_link === "string" ? value.teams_join_link : null,
-    fallbackExportKind: normalizeFallbackExportKind(value.fallback_export_kind),
-    details: isObject(value.details) ? value.details : {},
+    executedAt: readString(value.executed_at ?? value.executedAt, new Date(0).toISOString()),
+    outlookWebLink: readNullableString(value.outlook_web_link ?? value.outlookWebLink),
+    teamsJoinLink: readNullableString(value.teams_join_link ?? value.teamsJoinLink),
+    fallbackExportKind: normalizeFallbackExportKind(value.fallback_export_kind ?? value.fallbackExportKind),
+    provider: normalizeProvider(value.provider ?? details.provider ?? (value.path === "fallback" ? "local_export" : "outlook")),
+    providerObjectId: readNullableString(value.provider_object_id ?? value.providerObjectId ?? details.providerObjectId),
+    providerObjectType: normalizeProviderObjectType(
+      value.provider_object_type ?? value.providerObjectType ?? details.providerObjectType
+    ),
+    canRecall: readBoolean(value.can_recall ?? value.canRecall ?? details.canRecall),
+    canModify: readBoolean(value.can_modify ?? value.canModify ?? details.canModify),
+    recallImplemented: readBoolean(value.recall_implemented ?? value.recallImplemented ?? details.recallImplemented),
+    modifyImplemented: readBoolean(value.modify_implemented ?? value.modifyImplemented ?? details.modifyImplemented),
+    recallReason: readNullableString(value.recall_reason ?? value.recallReason ?? details.recallReason),
+    modifyReason: readNullableString(value.modify_reason ?? value.modifyReason ?? details.modifyReason),
+    scheduledFor: readNullableString(value.scheduled_for ?? value.scheduledFor ?? details.scheduledFor),
+    endsAt: readNullableString(value.ends_at ?? value.endsAt ?? details.endsAt),
+    isAllDay: readBoolean(value.is_all_day ?? value.isAllDay ?? details.isAllDay),
+    details,
   };
 }
 
+function loadLocalExecutionHistory() {
+  if (typeof window === "undefined") return [];
+  migrateLegacyPersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, LEGACY_EXECUTION_HISTORY_STORAGE_KEYS);
+  const raw = readPersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, LEGACY_EXECUTION_HISTORY_STORAGE_KEYS);
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw) as unknown[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalExecutionHistory(records: ExecutionHistoryRecord[]) {
+  if (typeof window === "undefined") return;
+  const nextRecords = records.slice(0, MAX_LOCAL_HISTORY_RECORDS);
+  writePersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, JSON.stringify(nextRecords));
+  console.info(HISTORY_DEBUG_PREFIX, "saved local records", {
+    storageKey: EXECUTION_HISTORY_STORAGE_KEY,
+    count: nextRecords.length,
+    firstRecordId: nextRecords[0]?.id ?? null,
+  });
+  window.dispatchEvent(new CustomEvent(EXECUTION_HISTORY_UPDATED_EVENT, { detail: nextRecords[0] ?? null }));
+}
+
+function cacheExecutionHistoryRecord(record: ExecutionHistoryRecord) {
+  const nextRecords = [record, ...loadLocalExecutionHistory().filter((entry) => entry.id !== record.id)];
+  saveLocalExecutionHistory(nextRecords);
+}
+
+function mergeExecutionHistoryRecords(records: ExecutionHistoryRecord[]) {
+  const seen = new Set<string>();
+  return records
+    .filter((record) => {
+      if (seen.has(record.id)) return false;
+      seen.add(record.id);
+      return true;
+    })
+    .sort((left, right) => right.executedAt.localeCompare(left.executedAt));
+}
+
 export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
-  if (typeof window === "undefined" || !isSupabaseConfigured()) return;
+  if (typeof window === "undefined") return;
+
+  const userKey = getLocalUserKey();
+  if (!userKey) return;
+
+  const record: ExecutionHistoryRecord = {
+    ...entry,
+    id: entry.id ?? crypto.randomUUID(),
+    userKey,
+    executionGroupId: entry.executionGroupId ?? null,
+    executedAt: entry.executedAt ?? new Date().toISOString(),
+  };
+
+  console.info(HISTORY_DEBUG_PREFIX, "writeExecutionHistory called", {
+    storageKey: EXECUTION_HISTORY_STORAGE_KEY,
+    userKey,
+    executionGroupId: record.executionGroupId,
+    itemType: record.itemType,
+    status: record.status,
+    path: record.path,
+    executedAt: record.executedAt,
+    providerObjectId: record.providerObjectId,
+  });
+
+  cacheExecutionHistoryRecord(record);
+
+  if (!isSupabaseConfigured()) return;
 
   const supabase = getSupabaseBrowserClient();
-  const userKey = getLocalUserKey();
-
   if (!supabase || !userKey) return;
 
   await supabase.from("execution_history").insert({
+    id: record.id,
     user_key: userKey,
-    execution_group_id: entry.executionGroupId,
-    plan_name: entry.planName,
-    item_type: entry.itemType,
-    title: entry.title,
-    subject: entry.subject,
-    status: entry.status,
-    path: entry.path,
-    recipients: entry.recipients,
-    attendees: entry.attendees,
-    executed_at: entry.executedAt ?? new Date().toISOString(),
-    outlook_web_link: entry.outlookWebLink,
-    teams_join_link: entry.teamsJoinLink,
-    fallback_export_kind: entry.fallbackExportKind,
-    details: entry.details,
+    execution_group_id: record.executionGroupId,
+    plan_name: record.planName,
+    item_type: record.itemType,
+    title: record.title,
+    subject: record.subject,
+    status: record.status,
+    path: record.path,
+    recipients: record.recipients,
+    attendees: record.attendees,
+    executed_at: record.executedAt,
+    outlook_web_link: record.outlookWebLink,
+    teams_join_link: record.teamsJoinLink,
+    fallback_export_kind: record.fallbackExportKind,
+    details: {
+      ...record.details,
+      provider: record.provider,
+      providerObjectId: record.providerObjectId,
+      providerObjectType: record.providerObjectType,
+      canRecall: record.canRecall,
+      canModify: record.canModify,
+      recallImplemented: record.recallImplemented,
+      modifyImplemented: record.modifyImplemented,
+      recallReason: record.recallReason,
+      modifyReason: record.modifyReason,
+      scheduledFor: record.scheduledFor,
+      endsAt: record.endsAt,
+      isAllDay: record.isAllDay,
+    },
   });
 }
 
 export async function listExecutionHistory(limit = 200) {
-  if (typeof window === "undefined" || !isSupabaseConfigured()) return [];
+  const localRecords = loadLocalExecutionHistory();
+  const userKey = getLocalUserKey();
+  const matchingLocalRecords = localRecords.filter((record) => !record.userKey || record.userKey === userKey);
+  console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory local load", {
+    storageKey: EXECUTION_HISTORY_STORAGE_KEY,
+    userKey,
+    localCount: localRecords.length,
+    matchingLocalCount: matchingLocalRecords.length,
+  });
+  if (typeof window === "undefined" || !isSupabaseConfigured()) return matchingLocalRecords.slice(0, limit);
 
   const supabase = getSupabaseBrowserClient();
-  const userKey = getLocalUserKey();
 
-  if (!supabase || !userKey) return [];
+  if (!supabase || !userKey) return matchingLocalRecords.slice(0, limit);
 
   const { data, error } = await supabase
     .from("execution_history")
@@ -123,7 +275,24 @@ export async function listExecutionHistory(limit = 200) {
     .order("executed_at", { ascending: false })
     .limit(limit);
 
-  if (error || !data) return [];
+  if (error || !data) {
+    console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory supabase fallback", {
+      userKey,
+      hadError: Boolean(error),
+      localCount: matchingLocalRecords.length,
+    });
+    return matchingLocalRecords.slice(0, limit);
+  }
 
-  return data.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry));
+  const merged = mergeExecutionHistoryRecords([
+    ...data.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry)),
+    ...matchingLocalRecords,
+  ]).slice(0, limit);
+  console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory merged load", {
+    userKey,
+    remoteCount: data.length,
+    localCount: matchingLocalRecords.length,
+    mergedCount: merged.length,
+  });
+  return merged;
 }
