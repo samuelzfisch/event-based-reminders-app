@@ -259,14 +259,11 @@ export default function SettingsPage() {
               </select>
             </label>
             <div className="flex items-center justify-between gap-3">
-              <div className="text-xs text-gray-500">
-                {hasUnsavedPlanBuilderChanges ? "Plan builder changes are not saved yet." : "Plan builder defaults are saved locally."}
-              </div>
               <button
                 type="button"
                 onClick={onSavePlanBuilderSettings}
                 disabled={!hasUnsavedPlanBuilderChanges}
-                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:text-gray-900"
               >
                 Save Plan Builder Defaults
               </button>
@@ -346,14 +343,11 @@ export default function SettingsPage() {
               />
             </label>
             <div className="flex items-center justify-between gap-3">
-              <div className="text-xs text-gray-500">
-                {hasUnsavedEmailSignatureChanges ? "Email signature changes are not saved yet." : "Email signature settings are saved locally."}
-              </div>
               <button
                 type="button"
                 onClick={onSaveEmailSignatureSettings}
                 disabled={!hasUnsavedEmailSignatureChanges}
-                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:text-gray-900"
               >
                 Save Signature
               </button>
