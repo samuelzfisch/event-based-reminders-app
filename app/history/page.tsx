@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   EXECUTION_HISTORY_UPDATED_EVENT,
@@ -17,7 +17,6 @@ import {
   createOutlookCalendarEvent,
   replaceOutlookScheduledEmail,
   updateOutlookCalendarEvent,
-  updateOutlookMessageDraft,
   type OutlookRecallResult,
 } from "../../lib/outlookClient";
 import { createPlan, type TemplateItem } from "../../lib/planEngine";
@@ -51,16 +50,6 @@ type HistoryMeetingDetails = {
   location: string;
   title: string;
   body: string;
-};
-
-type HistoryEditDraft = {
-  subject: string;
-  body: string;
-  to: string;
-  cc: string;
-  bcc: string;
-  date: string;
-  time: string;
 };
 
 type SnapshotAnchorValue = {
@@ -219,11 +208,6 @@ function getItemTypeDisplayLabel(record: ExecutionHistoryRecord) {
   return primaryLabel;
 }
 
-function getViewFullLabel(record: ExecutionHistoryRecord) {
-  const label = formatTimelineItemType(record);
-  return `View Full ${label}`;
-}
-
 function getHistoryAction(record: ExecutionHistoryRecord) {
   return typeof record.details.action === "string" ? record.details.action : "";
 }
@@ -249,13 +233,6 @@ function readString(value: unknown, fallback = "") {
 
 function joinAddresses(value: string[]) {
   return value.join(", ");
-}
-
-function splitAddresses(value: string) {
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
 }
 
 function normalizeReminderTimeInput(value: string) {
@@ -349,100 +326,11 @@ function getHistoryMeetingDetails(record: ExecutionHistoryRecord): HistoryMeetin
   };
 }
 
-function createEditDraft(record: ExecutionHistoryRecord): HistoryEditDraft {
-  const emailDraft = getHistoryEmailDraftDetails(record);
-  const meetingDetails = getHistoryMeetingDetails(record);
-  return {
-    subject:
-      record.itemType === "email"
-        ? emailDraft?.subject ?? record.subject
-        : record.itemType === "meeting" || record.itemType === "teams_meeting"
-          ? meetingDetails?.title ?? record.subject
-          : record.subject,
-    body:
-      record.itemType === "email"
-        ? emailDraft?.body ?? ""
-        : record.itemType === "meeting" || record.itemType === "teams_meeting"
-          ? meetingDetails?.body ?? ""
-          : getHistoryBody(record),
-    to:
-      record.itemType === "email"
-        ? joinAddresses(emailDraft?.to ?? [])
-        : joinAddresses(meetingDetails?.attendees ?? []),
-    cc: joinAddresses(emailDraft?.cc ?? []),
-    bcc: joinAddresses(emailDraft?.bcc ?? []),
-    date: formatDateInputValue(record.scheduledFor || record.executedAt),
-    time: record.isAllDay ? "" : formatTimeInputValue(record.scheduledFor || record.executedAt),
-  };
-}
-
-function buildLocalIso(date: string, time: string) {
-  const normalizedTime = time.trim() ? `${time.trim()}:00` : "00:00:00";
-  return `${date}T${normalizedTime}`;
-}
-
 function addMinutesToIso(iso: string, minutes: number) {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
   parsed.setMinutes(parsed.getMinutes() + minutes);
   return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}T${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}:00`;
-}
-
-function getDurationMinutes(record: ExecutionHistoryRecord) {
-  if (!record.scheduledFor || !record.endsAt) {
-    return record.isAllDay ? 24 * 60 : 30;
-  }
-  const start = new Date(record.scheduledFor);
-  const end = new Date(record.endsAt);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    return record.isAllDay ? 24 * 60 : 30;
-  }
-  const diffMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
-  return diffMinutes;
-}
-
-function getOverrideChangedFields(record: ExecutionHistoryRecord, draft: HistoryEditDraft) {
-  const fields = new Set<string>();
-  const emailDraft = getHistoryEmailDraftDetails(record);
-  const meetingDetails = getHistoryMeetingDetails(record);
-
-  if ((draft.subject.trim() || "") !== (record.itemType === "email" ? emailDraft?.subject ?? record.subject : record.itemType === "meeting" || record.itemType === "teams_meeting" ? meetingDetails?.title ?? record.subject : record.subject)) {
-    fields.add("subject");
-  }
-  if ((draft.body ?? "") !== (record.itemType === "email" ? emailDraft?.body ?? "" : record.itemType === "meeting" || record.itemType === "teams_meeting" ? meetingDetails?.body ?? "" : getHistoryBody(record))) {
-    fields.add("body");
-  }
-  if (draft.date !== formatDateInputValue(record.scheduledFor || record.executedAt)) {
-    fields.add("date");
-  }
-  if (!record.isAllDay && draft.time !== formatTimeInputValue(record.scheduledFor || record.executedAt)) {
-    fields.add("time");
-  }
-  if (record.itemType === "email") {
-    if (draft.to !== joinAddresses(emailDraft?.to ?? [])) fields.add("to");
-    if (draft.cc !== joinAddresses(emailDraft?.cc ?? [])) fields.add("cc");
-    if (draft.bcc !== joinAddresses(emailDraft?.bcc ?? [])) fields.add("bcc");
-  }
-  if (record.itemType === "meeting" || record.itemType === "teams_meeting") {
-    if (draft.to !== joinAddresses(meetingDetails?.attendees ?? [])) fields.add("attendees");
-  }
-  if (record.itemType === "reminder" && (draft.subject.trim() || "") !== (record.subject || record.title)) {
-    fields.add("text");
-  }
-
-  return Array.from(fields);
-}
-
-function formatPreviewDateTime(value: string | null) {
-  if (!value) return "Not available";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "Not available";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(parsed);
 }
 
 function getExecutionPlanSnapshot(record: ExecutionHistoryRecord): ExecutionPlanSnapshot | null {
@@ -518,7 +406,45 @@ function diffDays(fromDate: string, toDate: string) {
   return Math.round((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
 }
 
-function buildUpdatedSnapshotAnchors(snapshot: ExecutionPlanSnapshot, nextEventDate: string) {
+function formatPreviewDateTime(value: string | null) {
+  if (!value) return "Not available";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not available";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
+function getCurrentEventTimeValue(planGroup: PlanExecutionGroup, snapshot: ExecutionPlanSnapshot | null) {
+  if (!snapshot?.anchorDate) return "";
+
+  const anchorTime =
+    snapshot.anchorValues.find((anchor) => normalizeAnchorKey(anchor.key) === normalizeAnchorKey("Dissemination Time"))?.value ||
+    snapshot.anchorValues.find((anchor) => normalizeAnchorKey(anchor.key) === normalizeAnchorKey("Earnings Call Time"))?.value ||
+    "";
+  const parsedAnchorTime = parseTimeInput(anchorTime);
+  if (parsedAnchorTime) {
+    return parsedAnchorTime;
+  }
+
+  const matchingEventDayRecord = planGroup.items.find((item) => {
+    const itemDate = formatDateInputValue(item.scheduledFor || item.executedAt);
+    return itemDate === snapshot.anchorDate;
+  });
+
+  return matchingEventDayRecord ? formatTimeInputValue(matchingEventDayRecord.scheduledFor || matchingEventDayRecord.executedAt) : "";
+}
+
+function getCurrentEventDisplay(planGroup: PlanExecutionGroup, snapshot: ExecutionPlanSnapshot | null) {
+  if (!snapshot?.anchorDate) return "Not available";
+  const eventTime = getCurrentEventTimeValue(planGroup, snapshot);
+  return `${formatDateOnly(`${snapshot.anchorDate}T00:00:00`)}${eventTime ? ` at ${formatTimeOnly(`${snapshot.anchorDate}T${eventTime}:00`)}` : ""}`;
+}
+
+function buildUpdatedSnapshotAnchors(snapshot: ExecutionPlanSnapshot, nextEventDate: string, nextEventTime?: string) {
   const deltaDays = diffDays(snapshot.anchorDate, nextEventDate);
   return snapshot.anchorValues.map((anchor) => {
     const normalizedKey = normalizeAnchorKey(anchor.key);
@@ -536,6 +462,12 @@ function buildUpdatedSnapshotAnchors(snapshot: ExecutionPlanSnapshot, nextEventD
     }
     if (snapshot.templateBaseType === "earnings" && normalizedKey === normalizeAnchorKey("Earnings Call Date")) {
       return { ...anchor, value: nextEventDate };
+    }
+    if (nextEventTime && normalizedKey === normalizeAnchorKey("Dissemination Time")) {
+      return { ...anchor, value: nextEventTime };
+    }
+    if (nextEventTime && normalizedKey === normalizeAnchorKey("Earnings Call Time")) {
+      return { ...anchor, value: nextEventTime };
     }
     return anchor;
   });
@@ -556,7 +488,7 @@ function buildTemplateItemsFromSnapshot(snapshot: ExecutionPlanSnapshot): Templa
   }));
 }
 
-function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: string) {
+function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: string, nextEventTime?: string) {
   const templateItems = buildTemplateItemsFromSnapshot(snapshot);
   const plan = createPlan({
     name: snapshot.eventName || snapshot.templateName || "Untitled plan",
@@ -565,7 +497,7 @@ function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: st
     weekendRule: snapshot.weekendRule,
     template: templateItems,
   });
-  const anchorMap = buildAnchorMap(buildUpdatedSnapshotAnchors(snapshot, nextEventDate));
+  const anchorMap = buildAnchorMap(buildUpdatedSnapshotAnchors(snapshot, nextEventDate, nextEventTime));
   return resolvePlanAnchors(plan, anchorMap);
 }
 
@@ -612,14 +544,14 @@ function getComputedPlanItemTiming(item: PlanItem) {
   };
 }
 
-function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: string): { snapshot: ExecutionPlanSnapshot | null; items: PlanReschedulePreviewItem[] } {
+function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: string, nextEventTime?: string): { snapshot: ExecutionPlanSnapshot | null; items: PlanReschedulePreviewItem[] } {
   const firstRecord = planGroup.items[0];
   const snapshot = firstRecord ? getExecutionPlanSnapshot(firstRecord) : null;
   if (!snapshot || !nextEventDate) {
     return { snapshot, items: [] };
   }
 
-  const rescheduledPlan = buildRescheduledPlan(snapshot, nextEventDate);
+  const rescheduledPlan = buildRescheduledPlan(snapshot, nextEventDate, nextEventTime);
   const nextItemsByRowId = new Map(rescheduledPlan.items.map((item) => [item.id, item]));
 
   const items = planGroup.items.map((record) => {
@@ -642,6 +574,21 @@ function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: stri
         newDateTime,
         isOverridden: true,
       };
+    }
+
+    if ((record.itemType === "meeting" || record.itemType === "teams_meeting") && record.endsAt) {
+      const meetingEnd = new Date(record.endsAt);
+      if (!Number.isNaN(meetingEnd.getTime()) && meetingEnd.getTime() < Date.now()) {
+        return {
+          record,
+          nextItem,
+          action: "Locked" as const,
+          reason: "This meeting already happened, so it will stay as-is.",
+          oldDateTime,
+          newDateTime: oldDateTime,
+          isOverridden: false,
+        };
+      }
     }
 
     if (actionName === "email_sent") {
@@ -741,22 +688,46 @@ function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: stri
   return { snapshot, items };
 }
 
+function getPlanModifyEligibility(planGroup: PlanExecutionGroup) {
+  const firstRecord = planGroup.items[0];
+  const snapshot = firstRecord ? getExecutionPlanSnapshot(firstRecord) : null;
+  if (!snapshot || !snapshot.anchorDate) {
+    return {
+      canModifyPlan: false,
+      snapshot,
+      baselinePreview: [] as PlanReschedulePreviewItem[],
+    };
+  }
+
+  const baselinePreview = getPlanModifyPreview(planGroup, snapshot.anchorDate).items;
+  const canModifyPlan = baselinePreview.some((item) => item.action === "Update" || item.action === "Replace" || item.action === "Unchanged");
+
+  return {
+    canModifyPlan,
+    snapshot,
+    baselinePreview,
+  };
+}
+
 export default function HistoryPage() {
+  const exposeModifyUI = true;
   const [records, setRecords] = useState<ExecutionHistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
   const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
-  const [editingItems, setEditingItems] = useState<Record<string, boolean>>({});
-  const [editDrafts, setEditDrafts] = useState<Record<string, HistoryEditDraft>>({});
+  const [openItemMenuId, setOpenItemMenuId] = useState<string | null>(null);
+  const [openPlanMenuId, setOpenPlanMenuId] = useState<string | null>(null);
   const [modifyingPlans, setModifyingPlans] = useState<Record<string, boolean>>({});
   const [planModifyDates, setPlanModifyDates] = useState<Record<string, string>>({});
+  const [planModifyTimes, setPlanModifyTimes] = useState<Record<string, string>>({});
   const [pendingPlanRecalls, setPendingPlanRecalls] = useState<Record<string, boolean>>({});
   const [pendingItemRecalls, setPendingItemRecalls] = useState<Record<string, boolean>>({});
-  const [pendingItemModifies, setPendingItemModifies] = useState<Record<string, boolean>>({});
   const [pendingPlanModifies, setPendingPlanModifies] = useState<Record<string, boolean>>({});
   const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string }>>({});
   const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error"; text: string }>>({});
+  const itemMenuRef = useRef<HTMLDivElement | null>(null);
+  const planMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -804,6 +775,30 @@ export default function HistoryPage() {
     };
   }, []);
 
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (!itemMenuRef.current) return;
+      if (!itemMenuRef.current.contains(event.target as Node)) {
+        setOpenItemMenuId(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (!planMenuRef.current) return;
+      if (!planMenuRef.current.contains(event.target as Node)) {
+        setOpenPlanMenuId(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const groupedRecords = useMemo<DayExecutionGroup[]>(() => {
     const dayMap = new Map<string, Map<string, PlanExecutionGroup>>();
 
@@ -838,36 +833,6 @@ export default function HistoryPage() {
     }));
   }, [records]);
 
-  function toggleItemEdit(record: ExecutionHistoryRecord, nextOpen?: boolean) {
-    const shouldOpen = nextOpen ?? !(editingItems[record.id] ?? false);
-    setExpandedItems((current) => ({ ...current, [record.id]: shouldOpen || current[record.id] || false }));
-    setEditingItems((current) => ({ ...current, [record.id]: shouldOpen }));
-    if (shouldOpen) {
-      setEditDrafts((current) => ({
-        ...current,
-        [record.id]: current[record.id] ?? createEditDraft(record),
-      }));
-    }
-  }
-
-  function handleEditDraftChange(recordId: string, field: keyof HistoryEditDraft, value: string) {
-    setEditDrafts((current) => ({
-      ...current,
-      [recordId]: {
-        ...(current[recordId] ?? {
-          subject: "",
-          body: "",
-          to: "",
-          cc: "",
-          bcc: "",
-          date: "",
-          time: "",
-        }),
-        [field]: value,
-      },
-    }));
-  }
-
   function togglePlanModify(planGroup: PlanExecutionGroup, nextOpen?: boolean) {
     const shouldOpen = nextOpen ?? !(modifyingPlans[planGroup.key] ?? false);
     setExpandedPlans((current) => ({ ...current, [planGroup.key]: shouldOpen || current[planGroup.key] || false }));
@@ -877,6 +842,10 @@ export default function HistoryPage() {
       setPlanModifyDates((current) => ({
         ...current,
         [planGroup.key]: current[planGroup.key] ?? snapshot?.anchorDate ?? "",
+      }));
+      setPlanModifyTimes((current) => ({
+        ...current,
+        [planGroup.key]: current[planGroup.key] ?? getCurrentEventTimeValue(planGroup, snapshot),
       }));
     }
   }
@@ -1027,198 +996,10 @@ export default function HistoryPage() {
     }));
   }
 
-  async function handleModifyItem(record: ExecutionHistoryRecord) {
-    const modifyState = getExecutionHistoryModifyState(record);
-    if (!modifyState.canModify || !modifyState.modifyImplemented || !record.providerObjectId) return;
-
-    const draft = editDrafts[record.id] ?? createEditDraft(record);
-    const action = getHistoryAction(record);
-    setPendingItemModifies((current) => ({ ...current, [record.id]: true }));
-    setItemMessages((current) => {
-      const next = { ...current };
-      delete next[record.id];
-      return next;
-    });
-
-    try {
-      const changedFields = getOverrideChangedFields(record, draft);
-      if (record.providerObjectType === "message" && record.itemType === "email") {
-        const nextEmailDraft = {
-          to: splitAddresses(draft.to),
-          cc: splitAddresses(draft.cc),
-          bcc: splitAddresses(draft.bcc),
-          subject: draft.subject.trim(),
-          body: draft.body,
-        };
-
-        if (action === "email_scheduled") {
-          if (!draft.date || !draft.time) {
-            throw new Error("Add a date and time before saving.");
-          }
-          const scheduledSendISO = buildLocalIso(draft.date, draft.time);
-          const replacedProviderObjectId = record.providerObjectId;
-          const replacementResult = await replaceOutlookScheduledEmail({
-            messageId: record.providerObjectId,
-            draft: nextEmailDraft,
-            fallbackSubject: draft.subject.trim() || record.subject || record.title || "Email draft",
-            scheduledSendISO,
-          });
-
-          await updateExecutionHistoryRecord(record.id, {
-            status: "modified",
-            title: draft.subject.trim() || record.title,
-            subject: draft.subject.trim() || record.subject,
-            recipients: [...nextEmailDraft.to, ...nextEmailDraft.cc, ...nextEmailDraft.bcc],
-            providerObjectId: replacementResult.id,
-            outlookWebLink: replacementResult.webLink,
-            scheduledFor: scheduledSendISO,
-            details: {
-              modifiedAt: new Date().toISOString(),
-              modifyError: null,
-              body: draft.body,
-              emailDraft: nextEmailDraft,
-              scheduledSendAt: scheduledSendISO,
-              scheduledEmailState: "scheduled",
-              replacedProviderObjectId,
-              overrideTracking: {
-                isOverridden: true,
-                overriddenAt: new Date().toISOString(),
-                overrideSource: "item_modify",
-                changedFields,
-              },
-              replacementHistory: [
-                ...(((Array.isArray(record.details.replacementHistory)
-                  ? record.details.replacementHistory
-                  : []) as unknown[]).filter(
-                  (entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
-                )),
-                {
-                  replacedProviderObjectId,
-                  replacementProviderObjectId: replacementResult.id,
-                  replacedAt: new Date().toISOString(),
-                },
-              ],
-            },
-          });
-        } else {
-          await updateOutlookMessageDraft({
-            messageId: record.providerObjectId,
-            draft: nextEmailDraft,
-            fallbackSubject: draft.subject.trim() || record.subject || record.title || "Email draft",
-          });
-
-          await updateExecutionHistoryRecord(record.id, {
-            status: "modified",
-            title: draft.subject.trim() || record.title,
-            subject: draft.subject.trim() || record.subject,
-            recipients: [...nextEmailDraft.to, ...nextEmailDraft.cc, ...nextEmailDraft.bcc],
-            details: {
-              modifiedAt: new Date().toISOString(),
-              modifyError: null,
-              body: draft.body,
-              emailDraft: nextEmailDraft,
-              overrideTracking: {
-                isOverridden: true,
-                overriddenAt: new Date().toISOString(),
-                overrideSource: "item_modify",
-                changedFields,
-              },
-            },
-          });
-        }
-      } else if (record.providerObjectType === "event") {
-        if (!draft.date) {
-          throw new Error("Add a date before saving.");
-        }
-
-        const startISO = record.isAllDay ? `${draft.date}T00:00:00` : buildLocalIso(draft.date, draft.time || "09:00");
-        const endISO = addMinutesToIso(startISO, getDurationMinutes(record));
-
-        await updateOutlookCalendarEvent({
-          eventId: record.providerObjectId,
-          subject: draft.subject.trim() || record.subject || record.title || "Event",
-          bodyText: draft.body,
-          startISO,
-          endISO,
-          timeZone: "America/New_York",
-          isAllDay: record.isAllDay,
-          attendees:
-            record.itemType === "meeting" || record.itemType === "teams_meeting"
-              ? splitAddresses(draft.to)
-              : undefined,
-        });
-
-        const nextDetails =
-          record.itemType === "meeting" || record.itemType === "teams_meeting"
-            ? {
-                meetingDraft: {
-                  ...(getHistoryMeetingDetails(record) ?? {
-                    attendees: [],
-                    location: "",
-                    title: "",
-                    body: "",
-                  }),
-                  attendees: splitAddresses(draft.to),
-                  title: draft.subject.trim() || record.subject,
-                  body: draft.body,
-                },
-              }
-            : {
-                body: draft.body,
-              };
-
-        await updateExecutionHistoryRecord(record.id, {
-          status: "modified",
-          title: draft.subject.trim() || record.title,
-          subject: draft.subject.trim() || record.subject,
-          attendees:
-            record.itemType === "meeting" || record.itemType === "teams_meeting" ? splitAddresses(draft.to) : record.attendees,
-          scheduledFor: startISO,
-          endsAt: endISO,
-          details: {
-            modifiedAt: new Date().toISOString(),
-            modifyError: null,
-            body: draft.body,
-            overrideTracking: {
-              isOverridden: true,
-              overriddenAt: new Date().toISOString(),
-              overrideSource: "item_modify",
-              changedFields,
-            },
-            ...nextDetails,
-          },
-        });
-      } else {
-        throw new Error("This item cannot be modified.");
-      }
-
-      setItemMessages((current) => ({
-        ...current,
-        [record.id]: { tone: "success", text: "Saved changes." },
-      }));
-      setEditingItems((current) => ({ ...current, [record.id]: false }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not save changes.";
-      await updateExecutionHistoryRecord(record.id, {
-        status: "modify_failed",
-        details: {
-          modifyError: message,
-          scheduledEmailState:
-            action === "email_scheduled" && message.includes("already been sent") ? "sent" : record.details.scheduledEmailState ?? null,
-        },
-      });
-      setItemMessages((current) => ({
-        ...current,
-        [record.id]: { tone: "error", text: message },
-      }));
-    } finally {
-      setPendingItemModifies((current) => ({ ...current, [record.id]: false }));
-    }
-  }
-
   async function handleModifyPlan(planGroup: PlanExecutionGroup) {
     const nextEventDate = planModifyDates[planGroup.key] ?? "";
-    const { snapshot, items } = getPlanModifyPreview(planGroup, nextEventDate);
+    const nextEventTime = planModifyTimes[planGroup.key] ?? "";
+    const { snapshot, items } = getPlanModifyPreview(planGroup, nextEventDate, nextEventTime);
     if (!snapshot || !nextEventDate) return;
 
     setPendingPlanModifies((current) => ({ ...current, [planGroup.key]: true }));
@@ -1246,6 +1027,7 @@ export default function HistoryPage() {
           appliedAt: new Date().toISOString(),
           fromEventDate: snapshot.anchorDate,
           toEventDate: nextEventDate,
+          toEventTime: nextEventTime || null,
           action,
         };
 
@@ -1488,24 +1270,22 @@ export default function HistoryPage() {
                       <div className="space-y-4 border-t bg-gray-50/60 p-4">
                         {dayGroup.plans.map((planGroup) => {
                           const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
-                          const isPlanModifying = modifyingPlans[planGroup.key] ?? false;
-                          const planSnapshot = getExecutionPlanSnapshot(planGroup.items[0]);
+                          const isPlanModifying = exposeModifyUI && (modifyingPlans[planGroup.key] ?? false);
+                          const { canModifyPlan, snapshot: planSnapshot } = getPlanModifyEligibility(planGroup);
                           const planModifyDate = planModifyDates[planGroup.key] ?? planSnapshot?.anchorDate ?? "";
-                          const planModifyPreview = planModifyDate ? getPlanModifyPreview(planGroup, planModifyDate) : { snapshot: planSnapshot, items: [] };
+                          const planModifyTime = planModifyTimes[planGroup.key] ?? "";
+                          const planModifyPreview = planModifyDate ? getPlanModifyPreview(planGroup, planModifyDate, planModifyTime) : { snapshot: planSnapshot, items: [] };
                           const recallablePlanItems = planGroup.items.filter((item) => {
                             const recallState = getExecutionHistoryRecallState(item);
                             return recallState.canRecall && recallState.recallImplemented;
                           });
-                          const canModifyPlan = Boolean(planSnapshot && !planSnapshot.noEventDate);
                           const planMessage = planMessages[planGroup.key] ?? null;
                           return (
                             <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
                               <div className="flex items-center justify-between gap-4 px-5 py-4">
                                 <div className="min-w-0">
-                                  <div className="text-lg font-semibold text-gray-900">Event Name: {planGroup.planName}</div>
-                                  <div className="mt-1 text-sm text-gray-600">
-                                    {planGroup.items.length} created item{planGroup.items.length === 1 ? "" : "s"}
-                                  </div>
+                                  <div className="text-lg font-semibold text-gray-900">Plan Name: {planGroup.planName}</div>
+                                  <div className="mt-1 text-sm text-gray-600">{planGroup.items.length} event{planGroup.items.length === 1 ? "" : "s"}</div>
                                   <div className="mt-1 text-sm text-gray-600">Created at: {formatDateTime(planGroup.latestExecutedAt)}</div>
                                   {planMessage ? (
                                     <div
@@ -1524,45 +1304,72 @@ export default function HistoryPage() {
                                 <div className="flex items-center gap-3">
                                   <button
                                     type="button"
-                                    onClick={() => togglePlanModify(planGroup)}
-                                    disabled={!canModifyPlan || pendingPlanModifies[planGroup.key]}
-                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                  >
-                                    {pendingPlanModifies[planGroup.key] ? "Updating..." : "Modify Event"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleRecallPlan(planGroup)}
-                                    disabled={recallablePlanItems.length === 0 || pendingPlanRecalls[planGroup.key]}
-                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                  >
-                                    {pendingPlanRecalls[planGroup.key] ? "Recalling..." : "Recall Event"}
-                                  </button>
-                                  <button
-                                    type="button"
                                     onClick={() => setExpandedPlans((current) => ({ ...current, [planGroup.key]: !isPlanExpanded }))}
                                     className="text-sm font-medium text-gray-500 hover:text-gray-700"
                                   >
                                     {isPlanExpanded ? "Collapse" : "Expand"}
                                   </button>
+                                  <div className="relative" ref={openPlanMenuId === planGroup.key ? planMenuRef : null}>
+                                    <button
+                                      type="button"
+                                      onClick={() => setOpenPlanMenuId((current) => (current === planGroup.key ? null : planGroup.key))}
+                                      title="Actions"
+                                      aria-label="Actions"
+                                      className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+                                    >
+                                      <span className="text-base leading-none">•••</span>
+                                    </button>
+                                    {openPlanMenuId === planGroup.key ? (
+                                      <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-44 rounded-xl border bg-white p-2 text-left shadow-lg">
+                                        {exposeModifyUI ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              togglePlanModify(planGroup, true);
+                                              setOpenPlanMenuId(null);
+                                            }}
+                                            disabled={!canModifyPlan || pendingPlanModifies[planGroup.key]}
+                                            className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
+                                          >
+                                            {pendingPlanModifies[planGroup.key] ? "Updating..." : "Modify Event"}
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            void handleRecallPlan(planGroup);
+                                            setOpenPlanMenuId(null);
+                                          }}
+                                          disabled={recallablePlanItems.length === 0 || pendingPlanRecalls[planGroup.key]}
+                                          className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
+                                        >
+                                          {pendingPlanRecalls[planGroup.key] ? "Recalling..." : "Recall Event"}
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
                                 </div>
                               </div>
 
                               {isPlanModifying ? (
                                 <div className="border-t bg-gray-50/70 px-5 py-4">
+                                  <div className="mb-4 text-sm text-gray-700">Current Event: {getCurrentEventDisplay(planGroup, planSnapshot)}</div>
                                   <div className="grid gap-4 md:grid-cols-[220px_220px_auto] md:items-end">
-                                    <div>
-                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Date</div>
-                                      <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
-                                        {planSnapshot?.anchorDate ? formatDateOnly(`${planSnapshot.anchorDate}T00:00:00`) : "Not available"}
-                                      </div>
-                                    </div>
                                     <div>
                                       <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Date</label>
                                       <input
                                         type="date"
                                         value={planModifyDate}
                                         onChange={(event) => setPlanModifyDates((current) => ({ ...current, [planGroup.key]: event.target.value }))}
+                                        className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Time</label>
+                                      <input
+                                        type="time"
+                                        value={planModifyTime}
+                                        onChange={(event) => setPlanModifyTimes((current) => ({ ...current, [planGroup.key]: event.target.value }))}
                                         className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
                                       />
                                     </div>
@@ -1584,121 +1391,144 @@ export default function HistoryPage() {
                                       </button>
                                     </div>
                                   </div>
-
                                   <div className="mt-4 overflow-hidden rounded-xl border bg-white">
-                                    <div className="hidden grid-cols-[140px_minmax(0,1fr)_180px_180px_150px] gap-3 border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid">
+                                    <div className="hidden grid-cols-[110px_minmax(0,1.35fr)_280px] gap-x-3 border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid">
                                       <div>Type</div>
                                       <div>Title</div>
-                                      <div>Old Date / Time</div>
-                                      <div>New Date / Time</div>
-                                      <div>Planned Action</div>
+                                      <div>Scheduled</div>
                                     </div>
                                     <div className="divide-y">
-                                      {planModifyPreview.items.map((previewItem) => (
-                                        <div key={`modify-preview:${planGroup.key}:${previewItem.record.id}`} className="grid gap-3 px-4 py-3 md:grid-cols-[140px_minmax(0,1fr)_180px_180px_150px] md:items-center">
-                                          <div className={`text-sm font-medium ${getTypeAccentClasses(formatTimelineItemType(previewItem.record))}`}>
-                                            {getItemTypeDisplayLabel(previewItem.record)}
-                                          </div>
-                                          <div className="text-sm text-gray-900">{previewItem.record.subject || previewItem.record.title}</div>
-                                          <div className="text-sm text-gray-600">{formatPreviewDateTime(previewItem.oldDateTime)}</div>
-                                          <div className="text-sm text-gray-900">{formatPreviewDateTime(previewItem.newDateTime)}</div>
-                                          <div className="text-sm">
-                                            <div
-                                              className={
-                                                previewItem.action === "Update"
-                                                  ? "text-blue-700"
-                                                  : previewItem.action === "Replace"
-                                                    ? "text-amber-700"
-                                                    : previewItem.action === "Locked"
-                                                      ? "text-gray-700"
-                                                      : previewItem.action === "Unsupported"
-                                                        ? "text-red-700"
-                                                        : "text-gray-500"
-                                              }
-                                            >
-                                              {previewItem.action}
+                                      {planModifyPreview.items.map((previewItem) => {
+                                        const scheduledChanged = previewItem.oldDateTime !== previewItem.newDateTime;
+                                        return (
+                                          <div key={`modify-preview:${planGroup.key}:${previewItem.record.id}`} className="grid gap-x-3 gap-y-3 px-4 py-3 md:grid-cols-[110px_minmax(0,1.35fr)_280px] md:items-start">
+                                            <div className={`text-sm font-medium ${getTypeAccentClasses(formatTimelineItemType(previewItem.record))}`}>
+                                              {getItemTypeDisplayLabel(previewItem.record)}
                                             </div>
-                                            {previewItem.reason ? <div className="mt-1 text-xs text-gray-500">{previewItem.reason}</div> : null}
+                                            <div className="text-sm text-gray-900">{previewItem.record.subject || previewItem.record.title}</div>
+                                            <div className="text-sm text-gray-900">
+                                              {scheduledChanged ? (
+                                                <div className="space-y-1">
+                                                  <div className="text-gray-500 line-through">{formatPreviewDateTime(previewItem.oldDateTime)}</div>
+                                                  <div>{formatPreviewDateTime(previewItem.newDateTime)}</div>
+                                                </div>
+                                              ) : (
+                                                <span>{formatPreviewDateTime(previewItem.oldDateTime)}</span>
+                                              )}
+                                              {previewItem.reason ? (
+                                                <div className="mt-2 text-xs text-gray-500">
+                                                  {previewItem.action === "Locked" ? `Skipped: ${previewItem.reason}` : previewItem.reason}
+                                                </div>
+                                              ) : null}
+                                            </div>
                                           </div>
-                                        </div>
-                                      ))}
+                                        );
+                                      })}
                                     </div>
                                   </div>
                                 </div>
                               ) : null}
 
-                              {isPlanExpanded ? (
+                              {isPlanExpanded && !isPlanModifying ? (
                                 <div className="border-t p-5">
-                                  <div className="hidden items-center gap-x-3 border-b pb-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_170px]">
-                                    <div>Type</div>
-                                    <div>Title</div>
-                                    <div className="text-center">Date Disseminated</div>
-                                    <div className="text-center">Time</div>
-                                    <div className="text-right">Action</div>
-                                  </div>
-                                  <div className="divide-y">
+                                  <div className="space-y-4">
                                     {planGroup.items.map((item) => {
-                                      const itemAction = getHistoryAction(item);
                                       const itemTypeLabel = formatTimelineItemType(item);
                                       const itemTypeDisplayLabel = getItemTypeDisplayLabel(item);
                                       const itemDateTime = item.scheduledFor || item.executedAt;
                                       const isItemExpanded = expandedItems[item.id] ?? false;
-                                      const isItemEditing = editingItems[item.id] ?? false;
                                       const reminderBody = getHistoryBody(item);
                                       const emailDraft = getHistoryEmailDraftDetails(item);
                                       const meetingDetails = getHistoryMeetingDetails(item);
                                       const recallState = getExecutionHistoryRecallState(item);
-                                      const modifyState = getExecutionHistoryModifyState(item);
-                                      const editDraft = editDrafts[item.id] ?? createEditDraft(item);
                                       const itemMessage = itemMessages[item.id] ?? null;
                                       return (
-                                        <article key={item.id} className="py-4">
-                                          <div className="grid items-center gap-3 md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_220px]">
-                                            <div className={`text-sm font-medium ${getTypeAccentClasses(itemTypeLabel)}`}>
-                                              {itemTypeDisplayLabel}
-                                              {item.status === "modified" ? <div className="mt-1 text-xs text-green-700">Modified</div> : null}
-                                              {item.status === "recalled" ? <div className="mt-1 text-xs text-green-700">Recalled</div> : null}
-                                              {item.status === "already_removed" ? <div className="mt-1 text-xs text-green-700">Already removed</div> : null}
-                                              {item.status === "already_canceled" ? <div className="mt-1 text-xs text-green-700">Already canceled</div> : null}
-                                              {item.status === "modify_failed" ? <div className="mt-1 text-xs text-red-700">Edit failed</div> : null}
-                                              {item.status === "recall_failed" ? <div className="mt-1 text-xs text-red-700">Recall failed</div> : null}
+                                        <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+                                          <div className="grid gap-4 md:grid-cols-[minmax(0,1.5fr)_190px_150px_64px] md:items-start">
+                                            <div className="min-w-0">
+                                              <div className={`mb-2 text-sm font-medium md:text-center ${getTypeAccentClasses(itemTypeLabel)}`}>
+                                                {itemTypeDisplayLabel}
+                                              </div>
+                                              <div className="flex min-h-[72px] items-center rounded-xl border bg-white px-4 py-3 text-base text-gray-900">
+                                                <div className="min-w-0 truncate">{item.subject || item.title || "Untitled item"}</div>
+                                              </div>
+                                              {item.status === "modified" ? <div className="mt-2 text-xs text-green-700 md:text-center">Modified</div> : null}
+                                              {item.status === "recalled" ? <div className="mt-2 text-xs text-green-700 md:text-center">Recalled</div> : null}
+                                              {item.status === "already_removed" ? <div className="mt-2 text-xs text-green-700 md:text-center">Already removed</div> : null}
+                                              {item.status === "already_canceled" ? <div className="mt-2 text-xs text-green-700 md:text-center">Already canceled</div> : null}
+                                              {item.status === "modify_failed" ? <div className="mt-2 text-xs text-red-700 md:text-center">Edit failed</div> : null}
+                                              {item.status === "recall_failed" ? <div className="mt-2 text-xs text-red-700 md:text-center">Recall failed</div> : null}
                                             </div>
-                                            <div className="min-w-0 truncate text-base text-gray-900">{item.subject || item.title || "Untitled item"}</div>
-                                            <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
-                                              {formatDateOnly(itemDateTime)}
+                                            <div className="md:text-center">
+                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Scheduled For</div>
+                                              <div className="flex min-h-[72px] items-center justify-center rounded-xl border bg-white px-4 py-3 text-sm text-gray-900">
+                                                {formatDateOnly(itemDateTime)}
+                                              </div>
                                             </div>
-                                            <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
-                                              {formatTimeOnly(itemDateTime)}
+                                            <div className="md:text-center">
+                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Time</div>
+                                              <div className="flex min-h-[72px] items-center justify-center rounded-xl border bg-white px-4 py-3 text-sm text-gray-900">
+                                                {formatTimeOnly(itemDateTime)}
+                                              </div>
                                             </div>
-                                            <div className="flex justify-end gap-2">
-                                              <button
-                                                type="button"
-                                                onClick={() => toggleItemEdit(item)}
-                                                disabled={!modifyState.canModify || !modifyState.modifyImplemented || pendingItemModifies[item.id]}
-                                                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                              >
-                                                {pendingItemModifies[item.id] ? "Saving..." : "Modify"}
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => void handleRecallItem(item)}
-                                                disabled={!recallState.canRecall || !recallState.recallImplemented || pendingItemRecalls[item.id]}
-                                                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                              >
-                                                {pendingItemRecalls[item.id] ? "Recalling..." : "Recall"}
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  setExpandedItems((current) => ({ ...current, [item.id]: !isItemExpanded }));
-                                                  if (isItemExpanded) {
-                                                    setEditingItems((current) => ({ ...current, [item.id]: false }));
-                                                  }
-                                                }}
-                                                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
-                                              >
-                                                {isItemExpanded ? `Hide ${itemTypeLabel}` : getViewFullLabel(item)}
-                                              </button>
+                                            <div className="md:text-center">
+                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-transparent">Action</div>
+                                              <div className="relative flex min-h-[72px] items-center justify-center" ref={openItemMenuId === item.id ? itemMenuRef : null}>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setOpenItemMenuId((current) => (current === item.id ? null : item.id))}
+                                                  title="Actions"
+                                                  aria-label="Actions"
+                                                  className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+                                                >
+                                                  <span className="text-base leading-none">•••</span>
+                                                </button>
+                                                {openItemMenuId === item.id ? (
+                                                  <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-44 rounded-xl border bg-white p-2 text-left shadow-lg">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setExpandedItems((current) => ({ ...current, [item.id]: !isItemExpanded }));
+                                                      setOpenItemMenuId(null);
+                                                    }}
+                                                    className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
+                                                  >
+                                                    {isItemExpanded ? "Hide Full" : "View Full"}
+                                                  </button>
+                                                  {item.outlookWebLink ? (
+                                                    <>
+                                                      <div className="my-1 border-t-2 border-double border-gray-200" />
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                          window.open(item.outlookWebLink || "", "_blank", "noopener,noreferrer");
+                                                          setOpenItemMenuId(null);
+                                                        }}
+                                                        className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
+                                                      >
+                                                        Edit in Outlook
+                                                      </button>
+                                                    </>
+                                                  ) : null}
+                                                  {recallState.canRecall && recallState.recallImplemented ? (
+                                                    <>
+                                                      <div className="my-1 border-t-2 border-double border-gray-200" />
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                          void handleRecallItem(item);
+                                                          setOpenItemMenuId(null);
+                                                        }}
+                                                        disabled={pendingItemRecalls[item.id]}
+                                                        className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
+                                                      >
+                                                        {pendingItemRecalls[item.id] ? "Recalling..." : "Recall"}
+                                                      </button>
+                                                    </>
+                                                  ) : null}
+                                                  </div>
+                                                ) : null}
+                                              </div>
                                             </div>
                                           </div>
                                           {isItemExpanded ? (
@@ -1711,53 +1541,8 @@ export default function HistoryPage() {
                                               {!recallState.canRecall && recallState.recallReason ? (
                                                 <div className="text-sm text-gray-600">{recallState.recallReason}</div>
                                               ) : null}
-                                              {!modifyState.canModify && modifyState.modifyReason ? (
-                                                <div className="text-sm text-gray-600">{modifyState.modifyReason}</div>
-                                              ) : null}
                                               <div className="text-sm text-gray-700">Event Name: {planGroup.planName}</div>
-                                              {isItemEditing && item.itemType === "reminder" ? (
-                                                <div className="bg-blue-50 px-4 py-3">
-                                                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                                                    <div className="md:col-span-2">
-                                                      <label className="mb-1 block text-sm font-medium text-blue-950">Reminder Text</label>
-                                                      <input
-                                                        className="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.subject}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "subject", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-blue-950">Date Disseminated</label>
-                                                      <input
-                                                        type="date"
-                                                        className="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.date}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "date", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    {!item.isAllDay ? (
-                                                      <div>
-                                                        <label className="mb-1 block text-sm font-medium text-blue-950">Time</label>
-                                                        <input
-                                                          type="time"
-                                                          className="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                          value={editDraft.time}
-                                                          onChange={(event) => handleEditDraftChange(item.id, "time", event.target.value)}
-                                                        />
-                                                      </div>
-                                                    ) : null}
-                                                    <div className="md:col-span-2">
-                                                      <label className="mb-1 block text-sm font-medium text-blue-950">Reminder Body</label>
-                                                      <textarea
-                                                        rows={5}
-                                                        className="w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.body}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "body", event.target.value)}
-                                                      />
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              ) : item.itemType === "reminder" ? (
+                                              {item.itemType === "reminder" ? (
                                                 <div className="bg-blue-50 px-4 py-3">
                                                   <div className="grid grid-cols-1 gap-3">
                                                     <div>
@@ -1772,58 +1557,7 @@ export default function HistoryPage() {
                                                   </div>
                                                 </div>
                                               ) : null}
-                                              {isItemEditing && (item.itemType === "meeting" || item.itemType === "teams_meeting") ? (
-                                                <div className="bg-violet-50 px-4 py-3">
-                                                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                                                    <div className="md:col-span-2">
-                                                      <label className="mb-1 block text-sm font-medium text-violet-950">To</label>
-                                                      <textarea
-                                                        rows={2}
-                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.to}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "to", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div className="md:col-span-2">
-                                                      <label className="mb-1 block text-sm font-medium text-violet-950">Subject</label>
-                                                      <input
-                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.subject}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "subject", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-violet-950">Date Disseminated</label>
-                                                      <input
-                                                        type="date"
-                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.date}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "date", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    {!item.isAllDay ? (
-                                                      <div>
-                                                        <label className="mb-1 block text-sm font-medium text-violet-950">Time</label>
-                                                        <input
-                                                          type="time"
-                                                          className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                          value={editDraft.time}
-                                                          onChange={(event) => handleEditDraftChange(item.id, "time", event.target.value)}
-                                                        />
-                                                      </div>
-                                                    ) : null}
-                                                    <div className="md:col-span-2">
-                                                      <label className="mb-1 block text-sm font-medium text-violet-950">Message</label>
-                                                      <textarea
-                                                        rows={6}
-                                                        className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.body}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "body", event.target.value)}
-                                                      />
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              ) : (item.itemType === "meeting" || item.itemType === "teams_meeting") && meetingDetails ? (
+                                              {(item.itemType === "meeting" || item.itemType === "teams_meeting") && meetingDetails ? (
                                                 <div className="bg-violet-50 px-4 py-3">
                                                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                                                     <div className="md:col-span-2">
@@ -1855,78 +1589,7 @@ export default function HistoryPage() {
                                                   </div>
                                                 </div>
                                               ) : null}
-                                              {isItemEditing && item.itemType === "email" ? (
-                                                <div className="bg-amber-50 px-4 py-3">
-                                                  <div className="grid grid-cols-1 gap-3">
-                                                    {itemAction === "email_scheduled" ? (
-                                                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                                                        <div>
-                                                          <label className="mb-1 block text-sm font-medium text-amber-950">Date Disseminated</label>
-                                                          <input
-                                                            type="date"
-                                                            className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                            value={editDraft.date}
-                                                            onChange={(event) => handleEditDraftChange(item.id, "date", event.target.value)}
-                                                          />
-                                                        </div>
-                                                        <div>
-                                                          <label className="mb-1 block text-sm font-medium text-amber-950">Time</label>
-                                                          <input
-                                                            type="time"
-                                                            className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                            value={editDraft.time}
-                                                            onChange={(event) => handleEditDraftChange(item.id, "time", event.target.value)}
-                                                          />
-                                                        </div>
-                                                      </div>
-                                                    ) : null}
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-amber-950">To</label>
-                                                      <textarea
-                                                        rows={2}
-                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.to}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "to", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Cc</label>
-                                                      <textarea
-                                                        rows={2}
-                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.cc}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "cc", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Bcc</label>
-                                                      <textarea
-                                                        rows={2}
-                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.bcc}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "bcc", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Subject</label>
-                                                      <input
-                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.subject}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "subject", event.target.value)}
-                                                      />
-                                                    </div>
-                                                    <div>
-                                                      <label className="mb-1 block text-sm font-medium text-amber-950">Message</label>
-                                                      <textarea
-                                                        rows={8}
-                                                        className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm text-gray-900"
-                                                        value={editDraft.body}
-                                                        onChange={(event) => handleEditDraftChange(item.id, "body", event.target.value)}
-                                                      />
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              ) : item.itemType === "email" && emailDraft ? (
+                                              {item.itemType === "email" && emailDraft ? (
                                                 <div className="bg-amber-50 px-4 py-3">
                                                   <div className="grid grid-cols-1 gap-3">
                                                     <div>
@@ -1974,28 +1637,6 @@ export default function HistoryPage() {
                                                       />
                                                     </div>
                                                   </div>
-                                                </div>
-                                              ) : null}
-                                              {isItemEditing ? (
-                                                <div className="flex justify-end gap-2">
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                      setEditDrafts((current) => ({ ...current, [item.id]: createEditDraft(item) }));
-                                                      setEditingItems((current) => ({ ...current, [item.id]: false }));
-                                                    }}
-                                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
-                                                  >
-                                                    Cancel
-                                                  </button>
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => void handleModifyItem(item)}
-                                                    disabled={pendingItemModifies[item.id]}
-                                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                                  >
-                                                    {pendingItemModifies[item.id] ? "Saving..." : "Save Changes"}
-                                                  </button>
                                                 </div>
                                               ) : null}
                                             </div>
