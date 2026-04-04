@@ -140,6 +140,19 @@ type OutlookExecutionResult = {
   joinUrl?: string;
 };
 
+type ExecutionSnapshotRowDefinition = {
+  id: string;
+  title: string;
+  body: string;
+  offsetDays: number;
+  dateBasis: PlanDateBasis;
+  rowType: PlanRowType;
+  reminderTime: string;
+  emailDraft: ReturnType<typeof normalizeEmailDraft> | null;
+  durationDraft: BuilderRow["durationDraft"] | null;
+  meetingDraft: ReturnType<typeof normalizeMeetingDraft> | null;
+};
+
 type ExecutionNotice = {
   tone: "success" | "mixed" | "warning";
   title: string;
@@ -876,6 +889,34 @@ function buildTemplateItemsFromRows(rows: BuilderRow[]): TemplateItem[] {
     durationDraft: row.durationDraft,
     meetingDraft: row.meetingDraft ? normalizeMeetingDraft(row.meetingDraft) : undefined,
   }));
+}
+
+function hasAnchorToken(value: unknown): boolean {
+  if (typeof value === "string") {
+    return /\[[^\]]+\]/.test(value);
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasAnchorToken(entry));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).some((entry) => hasAnchorToken(entry));
+  }
+  return false;
+}
+
+function normalizeExecutionSnapshotRow(row: BuilderRow): ExecutionSnapshotRowDefinition {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body ?? "",
+    offsetDays: row.offsetDays ?? 0,
+    dateBasis: row.dateBasis ?? "event",
+    rowType: row.rowType ?? "reminder",
+    reminderTime: row.reminderTime ?? "",
+    emailDraft: row.rowType === "email" ? normalizeEmailDraft(row.emailDraft) : null,
+    durationDraft: row.durationDraft ?? null,
+    meetingDraft: row.meetingDraft ? normalizeMeetingDraft(row.meetingDraft) : null,
+  };
 }
 
 function buildAnchorStateForType(type: PlanType, previous: BuilderAnchor[]) {
@@ -1625,6 +1666,83 @@ export default function PlansPage() {
     };
   }
 
+  function getExecutionHistoryRowLinkage(item: Plan["items"][number]) {
+    const sourceRow = rows.find((row) => row.id === item.id);
+    const normalizedSourceRow = sourceRow ? normalizeExecutionSnapshotRow(sourceRow) : null;
+    const rowKind = classifyPlanRow(item);
+    return {
+      sourceRowId: item.id,
+      rowType: sourceRow?.rowType ?? item.rowType ?? "reminder",
+      rowKind,
+      dateBasis: sourceRow?.dateBasis ?? item.dateBasis ?? "event",
+      offsetDays: sourceRow?.offsetDays ?? item.offsetDays ?? 0,
+      reminderTimeMode: sourceRow?.reminderTime?.trim().startsWith("[") ? "anchor" : "fixed",
+      anchorDerivedContent: {
+        title: hasAnchorToken(sourceRow?.title),
+        body: hasAnchorToken(sourceRow?.body),
+        reminderTime: hasAnchorToken(sourceRow?.reminderTime),
+        emailRecipients: hasAnchorToken(sourceRow?.emailDraft?.to) || hasAnchorToken(sourceRow?.emailDraft?.cc) || hasAnchorToken(sourceRow?.emailDraft?.bcc),
+        emailSubject: hasAnchorToken(sourceRow?.emailDraft?.subject),
+        emailBody: hasAnchorToken(sourceRow?.emailDraft?.body),
+        meetingAttendees: hasAnchorToken(sourceRow?.meetingDraft?.attendees),
+        meetingLocation: hasAnchorToken(sourceRow?.meetingDraft?.location),
+      },
+      originalRowDefinition: normalizedSourceRow,
+      resolvedRowAtExecution: {
+        title: item.title,
+        customTitle: item.customTitle ?? "",
+        body: item.body ?? "",
+        dueDate: item.dueDate,
+        rawDueDate: item.rawDueDate,
+        customDueDate: item.customDueDate ?? null,
+        reminderTime: item.reminderTime ?? "",
+        emailDraft: item.emailDraft ?? null,
+        durationDraft: item.durationDraft ?? null,
+        meetingDraft: item.meetingDraft ?? null,
+      },
+    };
+  }
+
+  function getExecutionPlanSnapshot() {
+    return {
+      executionGroupPlanName: previewPlan.name,
+      templateBaseType: planType,
+      templateMode: effectiveTemplateMode,
+      templateId: selectedTemplateId,
+      templateName,
+      eventName: effectivePlanName,
+      anchorDate: previewPlan.anchorDate,
+      noEventDate,
+      weekendRule,
+      anchorValues: resolvedAnchors.map((anchor) => ({
+        id: anchor.id,
+        key: anchor.key,
+        value: anchor.value,
+        displayValue: anchor.displayValue,
+        locked: Boolean(anchor.locked),
+      })),
+      originalRowDefinitions: rows.map((row) => normalizeExecutionSnapshotRow(row)),
+      resolvedItemsAtExecution: previewPlan.items.map((previewItem) => ({
+        sourceRowId: previewItem.id,
+        rowType: previewItem.rowType ?? "reminder",
+        rowKind: classifyPlanRow(previewItem),
+        offsetDays: previewItem.offsetDays,
+        dateBasis: previewItem.dateBasis ?? "event",
+        dueDate: previewItem.dueDate,
+        rawDueDate: previewItem.rawDueDate,
+        customDueDate: previewItem.customDueDate ?? null,
+        reminderTime: previewItem.reminderTime ?? "",
+        title: previewItem.title,
+        customTitle: previewItem.customTitle ?? "",
+        body: previewItem.body ?? "",
+        emailDraft: previewItem.emailDraft ?? null,
+        durationDraft: previewItem.durationDraft ?? null,
+        meetingDraft: previewItem.meetingDraft ?? null,
+        wasAdjusted: previewItem.wasAdjusted,
+      })),
+    };
+  }
+
   function getExecutionHistoryCapabilities(options: {
     item: Plan["items"][number];
     status: "success" | "fallback" | "failed";
@@ -1672,9 +1790,9 @@ export default function PlansPage() {
         canRecall: true,
         canModify: true,
         recallImplemented: true,
-        modifyImplemented: false,
+        modifyImplemented: true,
         recallReason: null,
-        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+        modifyReason: null,
       };
     }
 
@@ -1686,9 +1804,9 @@ export default function PlansPage() {
         canRecall: true,
         canModify: true,
         recallImplemented: true,
-        modifyImplemented: false,
+        modifyImplemented: true,
         recallReason: null,
-        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+        modifyReason: null,
       };
     }
 
@@ -1714,9 +1832,9 @@ export default function PlansPage() {
         canRecall: false,
         canModify: true,
         recallImplemented: false,
-        modifyImplemented: false,
+        modifyImplemented: true,
         recallReason: "Scheduled emails are only recallable when provider cancel support is implemented.",
-        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+        modifyReason: null,
       };
     }
 
@@ -1725,11 +1843,11 @@ export default function PlansPage() {
       providerObjectType,
       providerObjectId,
       canRecall: false,
-      canModify: true,
+      canModify: false,
       recallImplemented: false,
       modifyImplemented: false,
       recallReason: "This item is not recallable from History.",
-      modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+      modifyReason: "This item cannot be modified from History.",
     };
   }
 
@@ -1747,6 +1865,8 @@ export default function PlansPage() {
       const timing = getExecutionHistoryTiming(options.item);
       const capabilities = getExecutionHistoryCapabilities(options);
       const detailFields = getExecutionHistoryDetailFields(options.item);
+      const rowLinkage = getExecutionHistoryRowLinkage(options.item);
+      const executionPlanSnapshot = getExecutionPlanSnapshot();
       await writeExecutionHistory({
         executionGroupId: options.executionGroupId ?? null,
         planName: previewPlan.name,
@@ -1778,6 +1898,7 @@ export default function PlansPage() {
           reason: options.reason ?? null,
           rowType: classifyPlanRow(options.item),
           itemId: options.item.id,
+          sourceRowId: rowLinkage.sourceRowId,
           scheduledSendAt:
             classifyPlanRow(options.item) === "email" && appSettings.emailHandlingMode === "schedule"
               ? getEmailScheduledSendISO(options.item)
@@ -1785,6 +1906,14 @@ export default function PlansPage() {
           reminderTime: options.item.reminderTime ?? null,
           teamsMeeting: Boolean(options.item.meetingDraft?.teamsMeeting),
           emailHandlingMode: classifyPlanRow(options.item) === "email" ? appSettings.emailHandlingMode : null,
+          executionPlanSnapshot,
+          rowLinkage,
+          overrideTracking: {
+            isOverridden: false,
+            overriddenAt: null,
+            overrideSource: null,
+            changedFields: [],
+          },
           ...detailFields,
         },
       });
