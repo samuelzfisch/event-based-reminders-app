@@ -14,6 +14,7 @@ import {
 } from "../../lib/appSettings";
 import { todayYYYYMMDD } from "../../lib/dateUtils";
 import { writeExecutionHistory } from "../../lib/executionHistory";
+import type { ExecutionHistoryProviderObjectType } from "../../lib/executionHistory";
 import { buildICSForPlan, downloadICS } from "../../lib/ics";
 import {
   createOutlookCalendarEvent,
@@ -1646,7 +1647,7 @@ export default function PlansPage() {
 
     const action = options.result?.action ?? null;
     const rowKind = classifyPlanRow(options.item);
-    const providerObjectType = rowKind === "email" ? "message" : "event";
+    const providerObjectType: ExecutionHistoryProviderObjectType = rowKind === "email" ? "message" : "event";
     const providerObjectId = options.result?.providerObjectId ?? null;
 
     if (options.status !== "success" || !providerObjectId) {
