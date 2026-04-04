@@ -17,6 +17,7 @@ import {
   createOutlookCalendarEvent,
   replaceOutlookScheduledEmail,
   updateOutlookCalendarEvent,
+  updateOutlookMessageDraft,
   type OutlookRecallResult,
 } from "../../lib/outlookClient";
 import { createPlan, type TemplateItem } from "../../lib/planEngine";
