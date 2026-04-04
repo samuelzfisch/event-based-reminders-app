@@ -6,6 +6,8 @@ export type ExecutionHistoryStatus =
   | "success"
   | "fallback"
   | "failed"
+  | "modified"
+  | "modify_failed"
   | "recalled"
   | "recall_failed"
   | "already_removed"
@@ -70,6 +72,8 @@ function normalizeStringArray(value: unknown) {
 function normalizeHistoryStatus(value: unknown): ExecutionHistoryStatus {
   return value === "fallback" ||
     value === "failed" ||
+    value === "modified" ||
+    value === "modify_failed" ||
     value === "recalled" ||
     value === "recall_failed" ||
     value === "already_removed" ||
@@ -182,6 +186,67 @@ export function getExecutionHistoryRecallState(record: Pick<
   };
 }
 
+export function getExecutionHistoryModifyState(record: Pick<
+  ExecutionHistoryRecord,
+  "provider" | "providerObjectId" | "providerObjectType" | "status" | "details"
+>) {
+  const action = typeof record.details.action === "string" ? record.details.action : "";
+  const scheduledEmailState = typeof record.details.scheduledEmailState === "string" ? record.details.scheduledEmailState : "";
+
+  if (record.provider !== "outlook" || !record.providerObjectId) {
+    return {
+      canModify: false,
+      modifyImplemented: false,
+      modifyReason: "This item cannot be modified.",
+    };
+  }
+
+  if (record.providerObjectType === "event") {
+    return {
+      canModify: true,
+      modifyImplemented: true,
+      modifyReason: null,
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "draft_created") {
+    return {
+      canModify: true,
+      modifyImplemented: true,
+      modifyReason: null,
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "email_scheduled") {
+    if (scheduledEmailState === "sent") {
+      return {
+        canModify: false,
+        modifyImplemented: true,
+        modifyReason: "This scheduled email has already been sent and can't be changed.",
+      };
+    }
+    return {
+      canModify: true,
+      modifyImplemented: true,
+      modifyReason: null,
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "email_sent") {
+    return {
+      canModify: false,
+      modifyImplemented: false,
+      modifyReason: "Sent emails cannot be modified from History.",
+    };
+  }
+
+  return {
+    canModify: false,
+    modifyImplemented: false,
+    modifyReason: record.status === "modify_failed" ? "Last edit attempt failed. You can try again." : "This item cannot be modified.",
+  };
+}
+
 function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
   if (!isObject(value) || typeof value.id !== "string") return null;
 
@@ -221,11 +286,15 @@ function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
   };
 
   const recallState = getExecutionHistoryRecallState(record);
+  const modifyState = getExecutionHistoryModifyState(record);
   return {
     ...record,
     canRecall: recallState.canRecall,
     recallImplemented: recallState.recallImplemented,
     recallReason: recallState.recallReason,
+    canModify: modifyState.canModify,
+    modifyImplemented: modifyState.modifyImplemented,
+    modifyReason: modifyState.modifyReason,
   };
 }
 
