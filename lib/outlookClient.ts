@@ -91,10 +91,28 @@ export type OutlookCalendarEventResult = {
 };
 
 export type OutlookRecallResult = "recalled" | "already_removed" | "already_canceled";
+export type OutlookModifyResult = "modified";
+export type OutlookScheduledEmailReplaceResult = {
+  id: string;
+  webLink: string;
+};
 
 type OutlookEventLookupResult = {
   exists: boolean;
   hasAttendees: boolean;
+};
+
+type OutlookEventUpdateInput = {
+  eventId: string;
+  subject: string;
+  bodyText?: string;
+  startISO: string;
+  endISO: string;
+  timeZone: string;
+  isAllDay?: boolean;
+  location?: string;
+  attendees?: string[];
+  expectedEmail?: string;
 };
 
 const OUTLOOK_SESSION_STORAGE_KEY = "event_based_reminders_app_outlook_session_v1";
@@ -861,6 +879,103 @@ export async function deleteOutlookMessage(input: {
   return "recalled";
 }
 
+export async function updateOutlookMessageDraft(input: {
+  messageId: string;
+  draft: OutlookEmailDraft;
+  fallbackSubject: string;
+  expectedEmail?: string;
+}): Promise<OutlookModifyResult> {
+  const accessToken = await requireStoredOutlookAccessToken({
+    requiredScopes: ["Mail.ReadWrite"],
+    expectedEmail: input.expectedEmail,
+  });
+
+  const payload = buildGraphMessagePayload(input);
+
+  const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${input.messageId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(errorPayload?.error?.message || "Could not update this draft.");
+  }
+
+  return "modified";
+}
+
+async function lookupOutlookMessageState(input: {
+  messageId: string;
+  accessToken: string;
+}) {
+  const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${input.messageId}?$select=id,isDraft`, {
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`,
+    },
+  });
+
+  if (response.status === 404 || response.status === 410) {
+    return { exists: false, isDraft: false };
+  }
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(errorPayload?.error?.message || "Could not check this scheduled email.");
+  }
+
+  const payload = (await response.json().catch(() => null)) as { isDraft?: boolean } | null;
+  return {
+    exists: true,
+    isDraft: Boolean(payload?.isDraft),
+  };
+}
+
+export async function replaceOutlookScheduledEmail(input: {
+  messageId: string;
+  draft: OutlookEmailDraft;
+  fallbackSubject: string;
+  scheduledSendISO: string;
+  expectedEmail?: string;
+}): Promise<OutlookScheduledEmailReplaceResult> {
+  const accessToken = await requireStoredOutlookAccessToken({
+    requiredScopes: ["Mail.ReadWrite", "Mail.Send"],
+    expectedEmail: input.expectedEmail,
+  });
+
+  const existingState = await lookupOutlookMessageState({
+    messageId: input.messageId,
+    accessToken,
+  });
+
+  if (!existingState.exists || !existingState.isDraft) {
+    throw new Error("This scheduled email has already been sent and can't be changed.");
+  }
+
+  const deleteResponse = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${input.messageId}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!deleteResponse.ok && deleteResponse.status !== 404 && deleteResponse.status !== 410) {
+    const errorPayload = (await deleteResponse.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(errorPayload?.error?.message || "Could not update this scheduled email.");
+  }
+
+  return await scheduleOutlookEmailFromEmailDraft({
+    draft: input.draft,
+    fallbackSubject: input.fallbackSubject,
+    scheduledSendISO: input.scheduledSendISO,
+    expectedEmail: input.expectedEmail,
+  });
+}
+
 export async function createOutlookCalendarEvent(
   input: MeetingEventInput
 ): Promise<OutlookCalendarEventResult> {
@@ -1031,4 +1146,50 @@ export async function deleteOutlookCalendarEvent(input: {
   }
 
   throw new Error("The meeting is still on the calendar.");
+}
+
+export async function updateOutlookCalendarEvent(input: OutlookEventUpdateInput): Promise<OutlookModifyResult> {
+  const accessToken = await requireStoredOutlookAccessToken({
+    requiredScopes: ["Calendars.ReadWrite"],
+    expectedEmail: input.expectedEmail,
+  });
+
+  const attendees = parseEventAttendees(input.attendees);
+  const trimmedBody = getMeaningfulBody(input.bodyText);
+  const payload = {
+    subject: input.subject,
+    body: {
+      contentType: "text",
+      content: trimmedBody,
+    },
+    start: {
+      dateTime: input.startISO,
+      timeZone: input.timeZone,
+    },
+    end: {
+      dateTime: input.endISO,
+      timeZone: input.timeZone,
+    },
+    isAllDay: Boolean(input.isAllDay),
+    location: {
+      displayName: input.location?.trim() || "",
+    },
+    attendees,
+  };
+
+  const response = await fetch(`https://graph.microsoft.com/v1.0/me/events/${input.eventId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(errorPayload?.error?.message || "Could not update this event.");
+  }
+
+  return "modified";
 }
