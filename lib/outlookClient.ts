@@ -90,6 +90,13 @@ export type OutlookCalendarEventResult = {
   hasOnlineMeeting: boolean;
 };
 
+export type OutlookRecallResult = "recalled" | "already_removed" | "already_canceled";
+
+type OutlookEventLookupResult = {
+  exists: boolean;
+  hasAttendees: boolean;
+};
+
 const OUTLOOK_SESSION_STORAGE_KEY = "event_based_reminders_app_outlook_session_v1";
 const LEGACY_OUTLOOK_SESSION_STORAGE_KEYS = ["standalone_plans_outlook_session_v1"];
 const OUTLOOK_IDENTITY_STORAGE_KEY = "event_based_reminders_app_outlook_identity_v1";
@@ -826,6 +833,34 @@ export async function scheduleOutlookEmailFromEmailDraft(input: {
   };
 }
 
+export async function deleteOutlookMessage(input: {
+  messageId: string;
+  expectedEmail?: string;
+}): Promise<OutlookRecallResult> {
+  const accessToken = await requireStoredOutlookAccessToken({
+    requiredScopes: ["Mail.ReadWrite"],
+    expectedEmail: input.expectedEmail,
+  });
+
+  const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${input.messageId}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    const message = String(errorPayload?.error?.message || "").toLowerCase();
+    if (response.status === 404 || response.status === 410 || message.includes("couldn't be found") || message.includes("not found")) {
+      return "already_removed";
+    }
+    throw new Error("Could not remove this draft.");
+  }
+
+  return "recalled";
+}
+
 export async function createOutlookCalendarEvent(
   input: MeetingEventInput
 ): Promise<OutlookCalendarEventResult> {
@@ -920,4 +955,80 @@ export async function createOutlookCalendarEvent(
     joinUrl: resolvedJoinUrl,
     hasOnlineMeeting: resolvedHasOnlineMeeting,
   };
+}
+
+export async function deleteOutlookCalendarEvent(input: {
+  eventId: string;
+  expectedEmail?: string;
+  sendCancellation?: boolean;
+}): Promise<OutlookRecallResult> {
+  const accessToken = await requireStoredOutlookAccessToken({
+    requiredScopes: ["Calendars.ReadWrite"],
+    expectedEmail: input.expectedEmail,
+  });
+
+  async function lookupEvent(): Promise<OutlookEventLookupResult> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/me/events/${input.eventId}?$select=id,attendees`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (response.status === 404 || response.status === 410) {
+      return { exists: false, hasAttendees: false };
+    }
+
+    if (!response.ok) {
+      const errorPayload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+      throw new Error(errorPayload?.error?.message || "Could not check this event.");
+    }
+
+    const payload = (await response.json().catch(() => null)) as { attendees?: unknown[] } | null;
+    return {
+      exists: true,
+      hasAttendees: Array.isArray(payload?.attendees) && payload.attendees.length > 0,
+    };
+  }
+
+  const beforeState = await lookupEvent();
+  if (!beforeState.exists) {
+    return "already_canceled";
+  }
+
+  if (input.sendCancellation && beforeState.hasAttendees) {
+    const cancelResponse = await fetch(`https://graph.microsoft.com/v1.0/me/events/${input.eventId}/cancel`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        Comment: "",
+      }),
+    });
+
+    if (!cancelResponse.ok && cancelResponse.status !== 404 && cancelResponse.status !== 410) {
+      const errorPayload = (await cancelResponse.json().catch(() => null)) as { error?: { message?: string } } | null;
+      throw new Error(errorPayload?.error?.message || "Could not cancel this meeting.");
+    }
+  }
+
+  const deleteResponse = await fetch(`https://graph.microsoft.com/v1.0/me/events/${input.eventId}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!deleteResponse.ok && deleteResponse.status !== 404 && deleteResponse.status !== 410) {
+    const errorPayload = (await deleteResponse.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(errorPayload?.error?.message || "Could not remove this event.");
+  }
+
+  const afterState = await lookupEvent();
+  if (!afterState.exists) {
+    return deleteResponse.status === 404 || deleteResponse.status === 410 ? "already_canceled" : "recalled";
+  }
+
+  throw new Error("The meeting is still on the calendar.");
 }

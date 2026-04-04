@@ -1664,6 +1664,34 @@ export default function PlansPage() {
       };
     }
 
+    if (action === "draft_created") {
+      return {
+        provider: "outlook" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: true,
+        canModify: true,
+        recallImplemented: true,
+        modifyImplemented: false,
+        recallReason: null,
+        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+      };
+    }
+
+    if (providerObjectType === "event") {
+      return {
+        provider: "outlook" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: true,
+        canModify: true,
+        recallImplemented: true,
+        modifyImplemented: false,
+        recallReason: null,
+        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+      };
+    }
+
     if (action === "email_sent") {
       return {
         provider: "outlook" as const,
@@ -1678,15 +1706,29 @@ export default function PlansPage() {
       };
     }
 
+    if (action === "email_scheduled") {
+      return {
+        provider: "outlook" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: false,
+        canModify: true,
+        recallImplemented: false,
+        modifyImplemented: false,
+        recallReason: "Scheduled emails are only recallable when provider cancel support is implemented.",
+        modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
+      };
+    }
+
     return {
       provider: "outlook" as const,
       providerObjectType,
       providerObjectId,
-      canRecall: true,
+      canRecall: false,
       canModify: true,
       recallImplemented: false,
       modifyImplemented: false,
-      recallReason: "Outlook object metadata is stored, but provider recall is not implemented yet.",
+      recallReason: "This item is not recallable from History.",
       modifyReason: "Outlook object metadata is stored, but provider modify is not implemented yet.",
     };
   }

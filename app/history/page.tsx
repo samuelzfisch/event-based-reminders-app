@@ -5,9 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   EXECUTION_HISTORY_UPDATED_EVENT,
+  getExecutionHistoryRecallState,
   listExecutionHistory,
+  updateExecutionHistoryRecord,
   type ExecutionHistoryRecord,
 } from "../../lib/executionHistory";
+import { deleteOutlookCalendarEvent, deleteOutlookMessage, type OutlookRecallResult } from "../../lib/outlookClient";
 
 type PlanExecutionGroup = {
   key: string;
@@ -46,6 +49,12 @@ function formatDayLabel(value: string) {
   }).format(new Date(value));
 }
 
+function getLocalDayKey(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.slice(0, 10);
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
 function formatDateTime(value: string | null) {
   if (!value) return "Not available";
   const parsed = new Date(value);
@@ -80,12 +89,12 @@ function formatTimeOnly(value: string | null) {
 }
 
 function formatItemTypeLabel(type: ExecutionHistoryRecord["itemType"]) {
-  if (type === "teams_meeting") return "Teams meeting";
+  if (type === "teams_meeting") return "Meeting";
   return type.charAt(0).toUpperCase() + type.slice(1);
 }
 
 function formatTimelineItemType(record: ExecutionHistoryRecord) {
-  if (record.itemType === "teams_meeting") return "Teams Meeting";
+  if (record.itemType === "teams_meeting") return "Meeting";
   if (record.itemType === "meeting") return "Meeting";
   if (record.itemType === "reminder") return "Reminder";
   if (record.itemType === "email") {
@@ -97,6 +106,14 @@ function formatTimelineItemType(record: ExecutionHistoryRecord) {
     return "Email";
   }
   return formatItemTypeLabel(record.itemType);
+}
+
+function getItemTypeDisplayLabel(record: ExecutionHistoryRecord) {
+  const primaryLabel = formatTimelineItemType(record);
+  if (record.itemType === "teams_meeting") {
+    return `${primaryLabel} • Teams`;
+  }
+  return primaryLabel;
 }
 
 function getViewFullLabel(record: ExecutionHistoryRecord) {
@@ -150,6 +167,10 @@ export default function HistoryPage() {
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
   const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
+  const [pendingPlanRecalls, setPendingPlanRecalls] = useState<Record<string, boolean>>({});
+  const [pendingItemRecalls, setPendingItemRecalls] = useState<Record<string, boolean>>({});
+  const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string }>>({});
+  const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error"; text: string }>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -159,7 +180,7 @@ export default function HistoryPage() {
       const nextRecords = await listExecutionHistory();
       console.info("[historyPage] loaded records", {
         count: nextRecords.length,
-        days: Array.from(new Set(nextRecords.map((record) => record.executedAt.slice(0, 10)))),
+        days: Array.from(new Set(nextRecords.map((record) => getLocalDayKey(record.executedAt)))),
         firstRecord: nextRecords[0]
           ? {
               id: nextRecords[0].id,
@@ -174,7 +195,7 @@ export default function HistoryPage() {
       setRecords(nextRecords);
       setExpandedDays((current) => {
         if (Object.keys(current).length > 0) return current;
-        return Object.fromEntries(nextRecords.map((record) => [record.executedAt.slice(0, 10), true]));
+        return Object.fromEntries(nextRecords.map((record) => [getLocalDayKey(record.executedAt), true]));
       });
       setExpandedPlans((current) => {
         if (Object.keys(current).length > 0) return current;
@@ -201,7 +222,7 @@ export default function HistoryPage() {
     const dayMap = new Map<string, Map<string, PlanExecutionGroup>>();
 
     for (const record of records) {
-      const day = record.executedAt.slice(0, 10);
+      const day = getLocalDayKey(record.executedAt);
       const dayGroup = dayMap.get(day) ?? new Map<string, PlanExecutionGroup>();
       if (!dayMap.has(day)) dayMap.set(day, dayGroup);
 
@@ -230,6 +251,152 @@ export default function HistoryPage() {
       plans: Array.from(planMap.values()).sort((left, right) => right.latestExecutedAt.localeCompare(left.latestExecutedAt)),
     }));
   }, [records]);
+
+  async function recallHistoryItem(record: ExecutionHistoryRecord): Promise<OutlookRecallResult> {
+    const recallState = getExecutionHistoryRecallState(record);
+    if (!recallState.canRecall || !recallState.recallImplemented || !record.providerObjectId) {
+      throw new Error(recallState.recallReason || "This item cannot be recalled.");
+    }
+
+    if (record.providerObjectType === "message") {
+      return await deleteOutlookMessage({
+        messageId: record.providerObjectId,
+      });
+    } else if (record.providerObjectType === "event") {
+      return await deleteOutlookCalendarEvent({
+        eventId: record.providerObjectId,
+        sendCancellation: record.itemType === "meeting" || record.itemType === "teams_meeting",
+      });
+    } else {
+      throw new Error("This item cannot be recalled.");
+    }
+  }
+
+  function getRecallStatusMessage(result: OutlookRecallResult) {
+    if (result === "already_removed") {
+      return { status: "already_removed" as const, text: "Already removed." };
+    }
+    if (result === "already_canceled") {
+      return { status: "already_canceled" as const, text: "Already canceled." };
+    }
+    return { status: "recalled" as const, text: "Recalled." };
+  }
+
+  async function handleRecallItem(record: ExecutionHistoryRecord) {
+    const recallState = getExecutionHistoryRecallState(record);
+    if (!recallState.canRecall || !recallState.recallImplemented) return;
+    const confirmed = window.confirm(`Recall "${record.subject || record.title || "this item"}"?`);
+    if (!confirmed) return;
+
+    setPendingItemRecalls((current) => ({ ...current, [record.id]: true }));
+    setItemMessages((current) => {
+      const next = { ...current };
+      delete next[record.id];
+      return next;
+    });
+
+    try {
+      const result = await recallHistoryItem(record);
+      const statusMessage = getRecallStatusMessage(result);
+      await updateExecutionHistoryRecord(record.id, {
+        status: statusMessage.status,
+        details: {
+          recalledAt: new Date().toISOString(),
+          recallError: null,
+        },
+      });
+      setItemMessages((current) => ({
+        ...current,
+        [record.id]: { tone: "success", text: statusMessage.text },
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Recall failed.";
+      await updateExecutionHistoryRecord(record.id, {
+        status: "recall_failed",
+        details: {
+          recallError: message,
+        },
+      });
+      setItemMessages((current) => ({
+        ...current,
+        [record.id]: { tone: "error", text: message },
+      }));
+    } finally {
+      setPendingItemRecalls((current) => ({ ...current, [record.id]: false }));
+    }
+  }
+
+  async function handleRecallPlan(planGroup: PlanExecutionGroup) {
+    const recallableItems = planGroup.items.filter((item) => {
+      const recallState = getExecutionHistoryRecallState(item);
+      return recallState.canRecall && recallState.recallImplemented;
+    });
+
+    if (recallableItems.length === 0) return;
+
+    const confirmed = window.confirm(`Recall all supported items for "${planGroup.planName}"?`);
+    if (!confirmed) return;
+
+    setPendingPlanRecalls((current) => ({ ...current, [planGroup.key]: true }));
+    setPlanMessages((current) => {
+      const next = { ...current };
+      delete next[planGroup.key];
+      return next;
+    });
+
+    let successCount = 0;
+    let alreadyHandledCount = 0;
+    let failedCount = 0;
+
+    for (const item of recallableItems) {
+      try {
+        const result = await recallHistoryItem(item);
+        const statusMessage = getRecallStatusMessage(result);
+        await updateExecutionHistoryRecord(item.id, {
+          status: statusMessage.status,
+          details: {
+            recalledAt: new Date().toISOString(),
+            recallError: null,
+          },
+        });
+        if (result === "recalled") {
+          successCount += 1;
+        } else {
+          alreadyHandledCount += 1;
+        }
+      } catch (error) {
+        failedCount += 1;
+        await updateExecutionHistoryRecord(item.id, {
+          status: "recall_failed",
+          details: {
+            recallError: error instanceof Error ? error.message : "Recall failed.",
+          },
+        });
+      }
+    }
+
+    setPendingPlanRecalls((current) => ({ ...current, [planGroup.key]: false }));
+    setPlanMessages((current) => ({
+      ...current,
+      [planGroup.key]:
+        failedCount === 0
+          ? {
+              tone: "success",
+              text:
+                alreadyHandledCount > 0 && successCount === 0
+                  ? "Everything was already gone."
+                  : alreadyHandledCount > 0
+                    ? `Event recalled. ${successCount} removed, ${alreadyHandledCount} already gone.`
+                    : "Event recalled.",
+            }
+          : successCount > 0 || alreadyHandledCount > 0
+            ? {
+                tone: "warning",
+                text: `Partially recalled. ${successCount + alreadyHandledCount} handled, ${failedCount} failed.`,
+              }
+            : { tone: "error", text: "Recall failed." },
+    }));
+  }
 
   return (
     <div className="space-y-8 text-gray-900">
@@ -274,22 +441,52 @@ export default function HistoryPage() {
                       <div className="space-y-4 border-t bg-gray-50/60 p-4">
                         {dayGroup.plans.map((planGroup) => {
                           const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
+                          const recallablePlanItems = planGroup.items.filter((item) => {
+                            const recallState = getExecutionHistoryRecallState(item);
+                            return recallState.canRecall && recallState.recallImplemented;
+                          });
+                          const planMessage = planMessages[planGroup.key] ?? null;
                           return (
                             <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
-                              <button
-                                type="button"
-                                onClick={() => setExpandedPlans((current) => ({ ...current, [planGroup.key]: !isPlanExpanded }))}
-                                className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left hover:bg-gray-50"
-                              >
+                              <div className="flex items-center justify-between gap-4 px-5 py-4">
                                 <div className="min-w-0">
                                   <div className="text-lg font-semibold text-gray-900">Event Name: {planGroup.planName}</div>
                                   <div className="mt-1 text-sm text-gray-600">
                                     {planGroup.items.length} created item{planGroup.items.length === 1 ? "" : "s"}
                                   </div>
                                   <div className="mt-1 text-sm text-gray-600">Created at: {formatDateTime(planGroup.latestExecutedAt)}</div>
+                                  {planMessage ? (
+                                    <div
+                                      className={`mt-2 text-sm ${
+                                        planMessage.tone === "success"
+                                          ? "text-green-700"
+                                          : planMessage.tone === "warning"
+                                            ? "text-amber-700"
+                                            : "text-red-700"
+                                      }`}
+                                    >
+                                      {planMessage.text}
+                                    </div>
+                                  ) : null}
                                 </div>
-                                <div className="text-sm font-medium text-gray-500">{isPlanExpanded ? "Collapse" : "Expand"}</div>
-                              </button>
+                                <div className="flex items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleRecallPlan(planGroup)}
+                                    disabled={recallablePlanItems.length === 0 || pendingPlanRecalls[planGroup.key]}
+                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                                  >
+                                    {pendingPlanRecalls[planGroup.key] ? "Recalling..." : "Recall Event"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedPlans((current) => ({ ...current, [planGroup.key]: !isPlanExpanded }))}
+                                    className="text-sm font-medium text-gray-500 hover:text-gray-700"
+                                  >
+                                    {isPlanExpanded ? "Collapse" : "Expand"}
+                                  </button>
+                                </div>
+                              </div>
 
                               {isPlanExpanded ? (
                                 <div className="border-t p-5">
@@ -303,15 +500,24 @@ export default function HistoryPage() {
                                   <div className="divide-y">
                                     {planGroup.items.map((item) => {
                                       const itemTypeLabel = formatTimelineItemType(item);
+                                      const itemTypeDisplayLabel = getItemTypeDisplayLabel(item);
                                       const itemDateTime = item.scheduledFor || item.executedAt;
                                       const isItemExpanded = expandedItems[item.id] ?? false;
                                       const reminderBody = getHistoryBody(item);
                                       const emailDraft = getHistoryEmailDraftDetails(item);
                                       const meetingDetails = getHistoryMeetingDetails(item);
+                                      const recallState = getExecutionHistoryRecallState(item);
+                                      const itemMessage = itemMessages[item.id] ?? null;
                                       return (
                                         <article key={item.id} className="py-4">
-                                          <div className="grid items-center gap-3 md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_170px]">
-                                            <div className={`text-sm font-medium ${getTypeAccentClasses(itemTypeLabel)}`}>{itemTypeLabel}</div>
+                                          <div className="grid items-center gap-3 md:grid-cols-[140px_minmax(0,1.25fr)_190px_130px_220px]">
+                                            <div className={`text-sm font-medium ${getTypeAccentClasses(itemTypeLabel)}`}>
+                                              {itemTypeDisplayLabel}
+                                              {item.status === "recalled" ? <div className="mt-1 text-xs text-green-700">Recalled</div> : null}
+                                              {item.status === "already_removed" ? <div className="mt-1 text-xs text-green-700">Already removed</div> : null}
+                                              {item.status === "already_canceled" ? <div className="mt-1 text-xs text-green-700">Already canceled</div> : null}
+                                              {item.status === "recall_failed" ? <div className="mt-1 text-xs text-red-700">Recall failed</div> : null}
+                                            </div>
                                             <div className="min-w-0 truncate text-base text-gray-900">{item.subject || item.title || "Untitled item"}</div>
                                             <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
                                               {formatDateOnly(itemDateTime)}
@@ -319,7 +525,15 @@ export default function HistoryPage() {
                                             <div className="rounded-xl border bg-white px-4 py-3 text-center text-sm text-gray-900">
                                               {formatTimeOnly(itemDateTime)}
                                             </div>
-                                            <div className="flex justify-end">
+                                            <div className="flex justify-end gap-2">
+                                              <button
+                                                type="button"
+                                                onClick={() => void handleRecallItem(item)}
+                                                disabled={!recallState.canRecall || !recallState.recallImplemented || pendingItemRecalls[item.id]}
+                                                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                                              >
+                                                {pendingItemRecalls[item.id] ? "Recalling..." : "Recall"}
+                                              </button>
                                               <button
                                                 type="button"
                                                 onClick={() => setExpandedItems((current) => ({ ...current, [item.id]: !isItemExpanded }))}
@@ -331,6 +545,14 @@ export default function HistoryPage() {
                                           </div>
                                           {isItemExpanded ? (
                                             <div className="mt-4 space-y-4 rounded-xl border bg-gray-50 p-4">
+                                              {itemMessage ? (
+                                                <div className={`text-sm ${itemMessage.tone === "success" ? "text-green-700" : "text-red-700"}`}>
+                                                  {itemMessage.text}
+                                                </div>
+                                              ) : null}
+                                              {!recallState.canRecall && recallState.recallReason ? (
+                                                <div className="text-sm text-gray-600">{recallState.recallReason}</div>
+                                              ) : null}
                                               <div className="text-sm text-gray-700">Event Name: {planGroup.planName}</div>
                                               {item.itemType === "reminder" ? (
                                                 <div className="bg-blue-50 px-4 py-3">

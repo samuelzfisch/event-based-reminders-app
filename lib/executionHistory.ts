@@ -2,7 +2,14 @@ import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } 
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
 
-export type ExecutionHistoryStatus = "success" | "fallback" | "failed";
+export type ExecutionHistoryStatus =
+  | "success"
+  | "fallback"
+  | "failed"
+  | "recalled"
+  | "recall_failed"
+  | "already_removed"
+  | "already_canceled";
 export type ExecutionHistoryPath = "graph" | "fallback";
 export type ExecutionHistoryItemType = "email" | "reminder" | "meeting" | "teams_meeting";
 export type ExecutionHistoryFallbackExportKind = "eml" | "ics" | null;
@@ -61,7 +68,14 @@ function normalizeStringArray(value: unknown) {
 }
 
 function normalizeHistoryStatus(value: unknown): ExecutionHistoryStatus {
-  return value === "fallback" || value === "failed" ? value : "success";
+  return value === "fallback" ||
+    value === "failed" ||
+    value === "recalled" ||
+    value === "recall_failed" ||
+    value === "already_removed" ||
+    value === "already_canceled"
+    ? value
+    : "success";
 }
 
 function normalizeHistoryPath(value: unknown): ExecutionHistoryPath {
@@ -102,12 +116,78 @@ function getLegacyDetails(value: Record<string, unknown>) {
   return isObject(value.details) ? value.details : {};
 }
 
+export function getExecutionHistoryRecallState(record: Pick<
+  ExecutionHistoryRecord,
+  "provider" | "providerObjectId" | "providerObjectType" | "status" | "details"
+>) {
+  const action = typeof record.details.action === "string" ? record.details.action : "";
+
+  if (record.status === "recalled" || record.status === "already_removed" || record.status === "already_canceled") {
+    return {
+      canRecall: false,
+      recallImplemented: true,
+      recallReason:
+        record.status === "already_removed"
+          ? "Already removed."
+          : record.status === "already_canceled"
+            ? "Already canceled."
+            : "Already recalled.",
+    };
+  }
+
+  if (record.provider !== "outlook" || !record.providerObjectId) {
+    return {
+      canRecall: false,
+      recallImplemented: false,
+      recallReason: "This item cannot be recalled.",
+    };
+  }
+
+  if (record.providerObjectType === "event") {
+    return {
+      canRecall: true,
+      recallImplemented: true,
+      recallReason: null,
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "draft_created") {
+    return {
+      canRecall: true,
+      recallImplemented: true,
+      recallReason: null,
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "email_scheduled") {
+    return {
+      canRecall: false,
+      recallImplemented: false,
+      recallReason: "Scheduled emails cannot be recalled from History.",
+    };
+  }
+
+  if (record.providerObjectType === "message" && action === "email_sent") {
+    return {
+      canRecall: false,
+      recallImplemented: false,
+      recallReason: "Sent emails cannot be recalled from History.",
+    };
+  }
+
+  return {
+    canRecall: false,
+    recallImplemented: false,
+    recallReason: record.status === "recall_failed" ? "Last recall attempt failed. You can try again." : "This item cannot be recalled.",
+  };
+}
+
 function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
   if (!isObject(value) || typeof value.id !== "string") return null;
 
   const details = getLegacyDetails(value);
 
-  return {
+  const record = {
     id: value.id,
     userKey: readString(value.user_key ?? value.userKey),
     executionGroupId: readNullableString(value.execution_group_id ?? value.executionGroupId),
@@ -138,6 +218,14 @@ function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
     endsAt: readNullableString(value.ends_at ?? value.endsAt ?? details.endsAt),
     isAllDay: readBoolean(value.is_all_day ?? value.isAllDay ?? details.isAllDay),
     details,
+  };
+
+  const recallState = getExecutionHistoryRecallState(record);
+  return {
+    ...record,
+    canRecall: recallState.canRecall,
+    recallImplemented: recallState.recallImplemented,
+    recallReason: recallState.recallReason,
   };
 }
 
@@ -182,6 +270,15 @@ function mergeExecutionHistoryRecords(records: ExecutionHistoryRecord[]) {
       return true;
     })
     .sort((left, right) => right.executedAt.localeCompare(left.executedAt));
+}
+
+function updateLocalExecutionHistoryRecord(
+  recordId: string,
+  updater: (record: ExecutionHistoryRecord) => ExecutionHistoryRecord
+) {
+  const nextRecords = loadLocalExecutionHistory().map((record) => (record.id === recordId ? updater(record) : record));
+  saveLocalExecutionHistory(nextRecords);
+  return nextRecords.find((record) => record.id === recordId) ?? null;
 }
 
 export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
@@ -248,6 +345,50 @@ export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
       isAllDay: record.isAllDay,
     },
   });
+}
+
+export async function updateExecutionHistoryRecord(
+  recordId: string,
+  updates: Partial<ExecutionHistoryRecord> & { details?: Record<string, unknown> }
+) {
+  const userKey = getLocalUserKey();
+  if (!userKey) return null;
+
+  const nextRecord = updateLocalExecutionHistoryRecord(recordId, (record) => ({
+    ...record,
+    ...updates,
+    details: updates.details ? { ...record.details, ...updates.details } : record.details,
+  }));
+
+  if (!nextRecord || !isSupabaseConfigured()) return nextRecord;
+
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return nextRecord;
+
+  await supabase
+    .from("execution_history")
+    .update({
+      status: nextRecord.status,
+      details: {
+        ...nextRecord.details,
+        provider: nextRecord.provider,
+        providerObjectId: nextRecord.providerObjectId,
+        providerObjectType: nextRecord.providerObjectType,
+        canRecall: nextRecord.canRecall,
+        canModify: nextRecord.canModify,
+        recallImplemented: nextRecord.recallImplemented,
+        modifyImplemented: nextRecord.modifyImplemented,
+        recallReason: nextRecord.recallReason,
+        modifyReason: nextRecord.modifyReason,
+        scheduledFor: nextRecord.scheduledFor,
+        endsAt: nextRecord.endsAt,
+        isAllDay: nextRecord.isAllDay,
+      },
+    })
+    .eq("id", recordId)
+    .eq("user_key", userKey);
+
+  return nextRecord;
 }
 
 export async function listExecutionHistory(limit = 200) {
