@@ -14,11 +14,16 @@ import {
 import {
   deleteOutlookCalendarEvent,
   deleteOutlookMessage,
+  createOutlookCalendarEvent,
   replaceOutlookScheduledEmail,
   updateOutlookCalendarEvent,
   updateOutlookMessageDraft,
   type OutlookRecallResult,
 } from "../../lib/outlookClient";
+import { createPlan, type TemplateItem } from "../../lib/planEngine";
+import { addDaysISO } from "../../lib/dateUtils";
+import { buildAnchorMap, classifyPlanRow, normalizeAnchorKey, resolvePlanAnchors } from "../../lib/plansRuntime";
+import type { PlanDateBasis, PlanItem, PlanRowType, PlanType, WeekendRule } from "../../types/plan";
 
 type PlanExecutionGroup = {
   key: string;
@@ -56,6 +61,72 @@ type HistoryEditDraft = {
   bcc: string;
   date: string;
   time: string;
+};
+
+type SnapshotAnchorValue = {
+  key: string;
+  value: string;
+  displayValue?: string;
+  locked?: boolean;
+};
+
+type SnapshotRowDefinition = {
+  id: string;
+  title: string;
+  body?: string;
+  offsetDays: number;
+  dateBasis?: PlanDateBasis;
+  rowType?: PlanRowType;
+  reminderTime?: string;
+  emailDraft?: {
+    to?: string[];
+    cc?: string[];
+    bcc?: string[];
+    subject?: string;
+    body?: string;
+  } | null;
+  durationDraft?: {
+    durationMinutes?: number;
+    useCustomEnd?: boolean;
+    endDate?: string;
+    endTime?: string;
+    isAllDay?: boolean;
+  } | null;
+  meetingDraft?: {
+    attendees?: string[];
+    location?: string;
+    durationMinutes?: number;
+    useCustomEnd?: boolean;
+    endDate?: string;
+    endTime?: string;
+    isAllDay?: boolean;
+    teamsMeeting?: boolean;
+  } | null;
+};
+
+type ExecutionPlanSnapshot = {
+  templateBaseType: PlanType;
+  templateMode?: string;
+  templateId?: string | null;
+  templateName?: string;
+  eventName?: string;
+  anchorDate: string;
+  noEventDate?: boolean;
+  weekendRule: WeekendRule;
+  anchorValues: SnapshotAnchorValue[];
+  originalRowDefinitions: SnapshotRowDefinition[];
+};
+
+type PlanReschedulePreviewAction = "Update" | "Replace" | "Unchanged" | "Locked" | "Unsupported";
+
+type PlanReschedulePreviewItem = {
+  record: ExecutionHistoryRecord;
+  nextItem: PlanItem | null;
+  action: PlanReschedulePreviewAction;
+  reason: string | null;
+  oldDateTime: string | null;
+  newDateTime: string | null;
+  isOverridden: boolean;
 };
 
 function formatDayLabel(value: string) {
@@ -168,6 +239,14 @@ function readStringArray(value: unknown) {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
 function joinAddresses(value: string[]) {
   return value.join(", ");
 }
@@ -177,6 +256,68 @@ function splitAddresses(value: string) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function normalizeReminderTimeInput(value: string) {
+  return value.trim();
+}
+
+function normalizeEmailDraftValue(value: SnapshotRowDefinition["emailDraft"]) {
+  if (!value) return undefined;
+  return {
+    to: readStringArray(value.to),
+    cc: readStringArray(value.cc),
+    bcc: readStringArray(value.bcc),
+    subject: readString(value.subject),
+    body: readString(value.body),
+  };
+}
+
+function normalizeMeetingDraftValue(value: SnapshotRowDefinition["meetingDraft"]) {
+  if (!value) return undefined;
+  return {
+    attendees: readStringArray(value.attendees),
+    location: readString(value.location),
+    durationMinutes: typeof value.durationMinutes === "number" && value.durationMinutes > 0 ? value.durationMinutes : 30,
+    useCustomEnd: Boolean(value.useCustomEnd),
+    endDate: readString(value.endDate),
+    endTime: readString(value.endTime),
+    isAllDay: Boolean(value.isAllDay),
+    teamsMeeting: Boolean(value.teamsMeeting),
+  };
+}
+
+function normalizeDurationDraftValue(value: SnapshotRowDefinition["durationDraft"]) {
+  if (!value) return undefined;
+  return {
+    durationMinutes: typeof value.durationMinutes === "number" && value.durationMinutes > 0 ? value.durationMinutes : 30,
+    useCustomEnd: Boolean(value.useCustomEnd),
+    endDate: readString(value.endDate),
+    endTime: readString(value.endTime),
+    isAllDay: Boolean(value.isAllDay),
+  };
+}
+
+function parseTimeInput(value: string) {
+  const normalized = value.trim().toUpperCase();
+  if (!normalized) return null;
+
+  const twelveHourMatch = normalized.match(/^(\d{1,2}):(\d{2})\s*([AP]M)$/);
+  if (twelveHourMatch) {
+    const hours = Number(twelveHourMatch[1]);
+    const minutes = Number(twelveHourMatch[2]);
+    const meridiem = twelveHourMatch[3];
+    if (hours < 1 || hours > 12 || minutes < 0 || minutes > 59) return null;
+    const normalizedHours = meridiem === "AM" ? (hours === 12 ? 0 : hours) : hours === 12 ? 12 : hours + 12;
+    return `${String(normalizedHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  const twentyFourHourMatch = normalized.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (twentyFourHourMatch) {
+    return `${String(Number(twentyFourHourMatch[1])).padStart(2, "0")}:${twentyFourHourMatch[2]}`;
+  }
+
+  return null;
 }
 
 function getHistoryBody(record: ExecutionHistoryRecord) {
@@ -292,6 +433,314 @@ function getOverrideChangedFields(record: ExecutionHistoryRecord, draft: History
   return Array.from(fields);
 }
 
+function formatPreviewDateTime(value: string | null) {
+  if (!value) return "Not available";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not available";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
+function getExecutionPlanSnapshot(record: ExecutionHistoryRecord): ExecutionPlanSnapshot | null {
+  const rawSnapshot = record.details.executionPlanSnapshot;
+  if (!isObject(rawSnapshot)) return null;
+  const anchorValues = Array.isArray(rawSnapshot.anchorValues)
+    ? rawSnapshot.anchorValues
+        .filter((entry): entry is Record<string, unknown> => isObject(entry))
+        .map((entry) => ({
+          key: readString(entry.key),
+          value: readString(entry.value),
+          displayValue: typeof entry.displayValue === "string" ? entry.displayValue : undefined,
+          locked: Boolean(entry.locked),
+        }))
+        .filter((entry) => entry.key)
+    : [];
+  const originalRowDefinitions = Array.isArray(rawSnapshot.originalRowDefinitions)
+    ? rawSnapshot.originalRowDefinitions
+        .filter((entry): entry is Record<string, unknown> => isObject(entry))
+        .map((entry) => {
+          const dateBasis: PlanDateBasis = entry.dateBasis === "today" ? "today" : "event";
+          const rowType: PlanRowType =
+            entry.rowType === "email" || entry.rowType === "calendar_event" ? entry.rowType : "reminder";
+          return {
+            id: readString(entry.id),
+            title: readString(entry.title),
+            body: typeof entry.body === "string" ? entry.body : "",
+            offsetDays: typeof entry.offsetDays === "number" ? entry.offsetDays : 0,
+            dateBasis,
+            rowType,
+            reminderTime: typeof entry.reminderTime === "string" ? entry.reminderTime : "",
+            emailDraft: isObject(entry.emailDraft) ? (entry.emailDraft as SnapshotRowDefinition["emailDraft"]) : null,
+            durationDraft: isObject(entry.durationDraft) ? (entry.durationDraft as SnapshotRowDefinition["durationDraft"]) : null,
+            meetingDraft: isObject(entry.meetingDraft) ? (entry.meetingDraft as SnapshotRowDefinition["meetingDraft"]) : null,
+          };
+        })
+        .filter((entry) => entry.id)
+    : [];
+
+  if (!rawSnapshot.templateBaseType || !rawSnapshot.anchorDate || !rawSnapshot.weekendRule || originalRowDefinitions.length === 0) {
+    return null;
+  }
+
+  return {
+    templateBaseType: rawSnapshot.templateBaseType as PlanType,
+    templateMode: typeof rawSnapshot.templateMode === "string" ? rawSnapshot.templateMode : undefined,
+    templateId: typeof rawSnapshot.templateId === "string" ? rawSnapshot.templateId : null,
+    templateName: typeof rawSnapshot.templateName === "string" ? rawSnapshot.templateName : undefined,
+    eventName: typeof rawSnapshot.eventName === "string" ? rawSnapshot.eventName : undefined,
+    anchorDate: readString(rawSnapshot.anchorDate),
+    noEventDate: Boolean(rawSnapshot.noEventDate),
+    weekendRule: rawSnapshot.weekendRule === "none" ? "none" : "prior_business_day",
+    anchorValues,
+    originalRowDefinitions,
+  };
+}
+
+function getOverrideState(record: ExecutionHistoryRecord) {
+  const rawOverride = record.details.overrideTracking;
+  if (!isObject(rawOverride)) {
+    return { isOverridden: false };
+  }
+  return {
+    isOverridden: Boolean(rawOverride.isOverridden),
+  };
+}
+
+function diffDays(fromDate: string, toDate: string) {
+  const [fromY, fromM, fromD] = fromDate.split("-").map(Number);
+  const [toY, toM, toD] = toDate.split("-").map(Number);
+  const from = new Date(fromY ?? 2000, (fromM ?? 1) - 1, fromD ?? 1);
+  const to = new Date(toY ?? 2000, (toM ?? 1) - 1, toD ?? 1);
+  return Math.round((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function buildUpdatedSnapshotAnchors(snapshot: ExecutionPlanSnapshot, nextEventDate: string) {
+  const deltaDays = diffDays(snapshot.anchorDate, nextEventDate);
+  return snapshot.anchorValues.map((anchor) => {
+    const normalizedKey = normalizeAnchorKey(anchor.key);
+    if (normalizedKey === normalizeAnchorKey("Event Date")) {
+      return { ...anchor, value: nextEventDate };
+    }
+    if (snapshot.templateBaseType === "press_release" && normalizedKey === normalizeAnchorKey("Dissemination Date")) {
+      return { ...anchor, value: nextEventDate };
+    }
+    if (snapshot.templateBaseType === "conference" && normalizedKey === normalizeAnchorKey("Conference Start Date")) {
+      return { ...anchor, value: nextEventDate };
+    }
+    if (snapshot.templateBaseType === "conference" && normalizedKey === normalizeAnchorKey("Conference End Date") && anchor.value) {
+      return { ...anchor, value: addDaysISO(anchor.value, deltaDays) };
+    }
+    if (snapshot.templateBaseType === "earnings" && normalizedKey === normalizeAnchorKey("Earnings Call Date")) {
+      return { ...anchor, value: nextEventDate };
+    }
+    return anchor;
+  });
+}
+
+function buildTemplateItemsFromSnapshot(snapshot: ExecutionPlanSnapshot): TemplateItem[] {
+  return snapshot.originalRowDefinitions.map((row) => ({
+    id: row.id,
+    title: row.title,
+    body: row.body || undefined,
+    offsetDays: row.offsetDays,
+    dateBasis: row.dateBasis ?? "event",
+    rowType: row.rowType ?? "reminder",
+    reminderTime: row.reminderTime ? normalizeReminderTimeInput(row.reminderTime) : undefined,
+    emailDraft: normalizeEmailDraftValue(row.emailDraft),
+    durationDraft: normalizeDurationDraftValue(row.durationDraft),
+    meetingDraft: normalizeMeetingDraftValue(row.meetingDraft),
+  }));
+}
+
+function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: string) {
+  const templateItems = buildTemplateItemsFromSnapshot(snapshot);
+  const plan = createPlan({
+    name: snapshot.eventName || snapshot.templateName || "Untitled plan",
+    type: snapshot.templateBaseType,
+    anchorDate: nextEventDate,
+    weekendRule: snapshot.weekendRule,
+    template: templateItems,
+  });
+  const anchorMap = buildAnchorMap(buildUpdatedSnapshotAnchors(snapshot, nextEventDate));
+  return resolvePlanAnchors(plan, anchorMap);
+}
+
+function getComputedPlanItemTiming(item: PlanItem) {
+  const rowKind = classifyPlanRow(item);
+  const isAllDay = Boolean(item.meetingDraft?.isAllDay || item.durationDraft?.isAllDay);
+  const resolvedTime = parseTimeInput(item.reminderTime ?? "");
+
+  if ((rowKind === "meeting" || rowKind === "reminder") && (isAllDay || !resolvedTime)) {
+    return {
+      scheduledFor: `${item.customDueDate ?? item.dueDate}T00:00:00`,
+      endsAt: `${addDaysISO(item.customDueDate ?? item.dueDate, 1)}T00:00:00`,
+      isAllDay: true,
+    };
+  }
+
+  const baseDate = item.customDueDate ?? item.dueDate;
+  const baseTime = resolvedTime ?? "09:00";
+  const scheduledFor = `${baseDate}T${baseTime}:00`;
+
+  if (rowKind === "meeting" || rowKind === "reminder") {
+    if ((item.meetingDraft?.useCustomEnd || item.durationDraft?.useCustomEnd) && (item.meetingDraft?.endDate || item.durationDraft?.endDate) && (item.meetingDraft?.endTime || item.durationDraft?.endTime)) {
+      const endDate = item.meetingDraft?.endDate || item.durationDraft?.endDate || baseDate;
+      const endTime = parseTimeInput(item.meetingDraft?.endTime || item.durationDraft?.endTime || "") || "09:30";
+      return {
+        scheduledFor,
+        endsAt: `${endDate}T${endTime}:00`,
+        isAllDay: false,
+      };
+    }
+
+    const durationMinutes = item.meetingDraft?.durationMinutes ?? item.durationDraft?.durationMinutes ?? 30;
+    return {
+      scheduledFor,
+      endsAt: addMinutesToIso(scheduledFor, durationMinutes),
+      isAllDay: false,
+    };
+  }
+
+  return {
+    scheduledFor,
+    endsAt: null,
+    isAllDay: false,
+  };
+}
+
+function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: string): { snapshot: ExecutionPlanSnapshot | null; items: PlanReschedulePreviewItem[] } {
+  const firstRecord = planGroup.items[0];
+  const snapshot = firstRecord ? getExecutionPlanSnapshot(firstRecord) : null;
+  if (!snapshot || !nextEventDate) {
+    return { snapshot, items: [] };
+  }
+
+  const rescheduledPlan = buildRescheduledPlan(snapshot, nextEventDate);
+  const nextItemsByRowId = new Map(rescheduledPlan.items.map((item) => [item.id, item]));
+
+  const items = planGroup.items.map((record) => {
+    const sourceRowId = typeof record.details.sourceRowId === "string" ? record.details.sourceRowId : record.id;
+    const nextItem = nextItemsByRowId.get(sourceRowId) ?? null;
+    const modifyState = getExecutionHistoryModifyState(record);
+    const overrideState = getOverrideState(record);
+    const oldDateTime = record.scheduledFor || record.executedAt;
+    const nextTiming = nextItem ? getComputedPlanItemTiming(nextItem) : null;
+    const newDateTime = nextTiming?.scheduledFor ?? oldDateTime;
+    const actionName = getHistoryAction(record);
+
+    if (overrideState.isOverridden) {
+      return {
+        record,
+        nextItem,
+        action: "Locked" as const,
+        reason: "Skipped because this item was edited separately.",
+        oldDateTime,
+        newDateTime,
+        isOverridden: true,
+      };
+    }
+
+    if (actionName === "email_sent") {
+      return {
+        record,
+        nextItem,
+        action: "Locked" as const,
+        reason: "Already sent.",
+        oldDateTime,
+        newDateTime,
+        isOverridden: false,
+      };
+    }
+
+    if (!nextItem) {
+      return {
+        record,
+        nextItem,
+        action: "Unsupported" as const,
+        reason: "Could not match this item back to the original plan row.",
+        oldDateTime,
+        newDateTime: oldDateTime,
+        isOverridden: false,
+      };
+    }
+
+    const contentChanged =
+      (record.subject || record.title) !== (nextItem.customTitle || nextItem.title) ||
+      getHistoryBody(record) !== (nextItem.body ?? "");
+    const timingChanged = oldDateTime !== newDateTime;
+    const recipientsChanged =
+      record.itemType === "email"
+        ? joinAddresses(record.recipients) !== joinAddresses([...(nextItem.emailDraft?.to ?? []), ...(nextItem.emailDraft?.cc ?? []), ...(nextItem.emailDraft?.bcc ?? [])])
+        : record.itemType === "meeting" || record.itemType === "teams_meeting"
+          ? joinAddresses(record.attendees) !== joinAddresses(nextItem.meetingDraft?.attendees ?? [])
+          : false;
+
+    if (!timingChanged && !contentChanged && !recipientsChanged) {
+      return {
+        record,
+        nextItem,
+        action: "Unchanged" as const,
+        reason: null,
+        oldDateTime,
+        newDateTime,
+        isOverridden: false,
+      };
+    }
+
+    if (record.itemType === "reminder") {
+      return {
+        record,
+        nextItem,
+        action: "Replace" as const,
+        reason: "Will recreate this reminder on the new timeline.",
+        oldDateTime,
+        newDateTime,
+        isOverridden: false,
+      };
+    }
+
+    if (record.itemType === "email" && actionName === "email_scheduled") {
+      return {
+        record,
+        nextItem,
+        action: "Replace" as const,
+        reason: "Will replace the unsent scheduled email.",
+        oldDateTime,
+        newDateTime,
+        isOverridden: false,
+      };
+    }
+
+    if (modifyState.canModify && modifyState.modifyImplemented) {
+      return {
+        record,
+        nextItem,
+        action: "Update" as const,
+        reason: null,
+        oldDateTime,
+        newDateTime,
+        isOverridden: false,
+      };
+    }
+
+    return {
+      record,
+      nextItem,
+      action: "Unsupported" as const,
+      reason: modifyState.modifyReason || "This item can't be changed from History.",
+      oldDateTime,
+      newDateTime,
+      isOverridden: false,
+    };
+  });
+
+  return { snapshot, items };
+}
+
 export default function HistoryPage() {
   const [records, setRecords] = useState<ExecutionHistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -300,9 +749,12 @@ export default function HistoryPage() {
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   const [editingItems, setEditingItems] = useState<Record<string, boolean>>({});
   const [editDrafts, setEditDrafts] = useState<Record<string, HistoryEditDraft>>({});
+  const [modifyingPlans, setModifyingPlans] = useState<Record<string, boolean>>({});
+  const [planModifyDates, setPlanModifyDates] = useState<Record<string, string>>({});
   const [pendingPlanRecalls, setPendingPlanRecalls] = useState<Record<string, boolean>>({});
   const [pendingItemRecalls, setPendingItemRecalls] = useState<Record<string, boolean>>({});
   const [pendingItemModifies, setPendingItemModifies] = useState<Record<string, boolean>>({});
+  const [pendingPlanModifies, setPendingPlanModifies] = useState<Record<string, boolean>>({});
   const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string }>>({});
   const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error"; text: string }>>({});
 
@@ -414,6 +866,19 @@ export default function HistoryPage() {
         [field]: value,
       },
     }));
+  }
+
+  function togglePlanModify(planGroup: PlanExecutionGroup, nextOpen?: boolean) {
+    const shouldOpen = nextOpen ?? !(modifyingPlans[planGroup.key] ?? false);
+    setExpandedPlans((current) => ({ ...current, [planGroup.key]: shouldOpen || current[planGroup.key] || false }));
+    setModifyingPlans((current) => ({ ...current, [planGroup.key]: shouldOpen }));
+    if (shouldOpen) {
+      const snapshot = getExecutionPlanSnapshot(planGroup.items[0]);
+      setPlanModifyDates((current) => ({
+        ...current,
+        [planGroup.key]: current[planGroup.key] ?? snapshot?.anchorDate ?? "",
+      }));
+    }
   }
 
   async function recallHistoryItem(record: ExecutionHistoryRecord): Promise<OutlookRecallResult> {
@@ -751,6 +1216,235 @@ export default function HistoryPage() {
     }
   }
 
+  async function handleModifyPlan(planGroup: PlanExecutionGroup) {
+    const nextEventDate = planModifyDates[planGroup.key] ?? "";
+    const { snapshot, items } = getPlanModifyPreview(planGroup, nextEventDate);
+    if (!snapshot || !nextEventDate) return;
+
+    setPendingPlanModifies((current) => ({ ...current, [planGroup.key]: true }));
+    setPlanMessages((current) => {
+      const next = { ...current };
+      delete next[planGroup.key];
+      return next;
+    });
+
+    let updatedCount = 0;
+    let replacedCount = 0;
+    let skippedCount = 0;
+    let failedCount = 0;
+
+    for (const previewItem of items) {
+      const { record, nextItem, action } = previewItem;
+      if (!nextItem || action === "Locked" || action === "Unsupported" || action === "Unchanged") {
+        skippedCount += 1;
+        continue;
+      }
+
+      try {
+        const nextTiming = getComputedPlanItemTiming(nextItem);
+        const rescheduleDetails = {
+          appliedAt: new Date().toISOString(),
+          fromEventDate: snapshot.anchorDate,
+          toEventDate: nextEventDate,
+          action,
+        };
+
+        if (record.itemType === "meeting" || record.itemType === "teams_meeting") {
+          await updateOutlookCalendarEvent({
+            eventId: record.providerObjectId || "",
+            subject: nextItem.customTitle || nextItem.title,
+            bodyText: nextItem.body ?? "",
+            startISO: nextTiming.scheduledFor,
+            endISO: nextTiming.endsAt || addMinutesToIso(nextTiming.scheduledFor, 30),
+            timeZone: "America/New_York",
+            isAllDay: nextTiming.isAllDay,
+            attendees: nextItem.meetingDraft?.attendees ?? [],
+          });
+
+          await updateExecutionHistoryRecord(record.id, {
+            status: "modified",
+            title: nextItem.customTitle || nextItem.title,
+            subject: nextItem.customTitle || nextItem.title,
+            attendees: nextItem.meetingDraft?.attendees ?? [],
+            scheduledFor: nextTiming.scheduledFor,
+            endsAt: nextTiming.endsAt,
+            isAllDay: nextTiming.isAllDay,
+            details: {
+              body: nextItem.body ?? "",
+              meetingDraft: {
+                attendees: nextItem.meetingDraft?.attendees ?? [],
+                location: nextItem.meetingDraft?.location ?? "",
+                title: nextItem.customTitle || nextItem.title,
+                body: nextItem.body ?? "",
+              },
+              latestPlanReschedule: rescheduleDetails,
+            },
+          });
+          updatedCount += 1;
+          continue;
+        }
+
+        if (record.itemType === "reminder") {
+          const createResult = await createOutlookCalendarEvent({
+            subject: nextItem.customTitle || nextItem.title,
+            bodyText: nextItem.body ?? "",
+            startISO: nextTiming.scheduledFor,
+            endISO: nextTiming.endsAt || addMinutesToIso(nextTiming.scheduledFor, 30),
+            timeZone: "America/New_York",
+            isAllDay: nextTiming.isAllDay,
+          });
+
+          if (record.providerObjectId) {
+            await deleteOutlookCalendarEvent({
+              eventId: record.providerObjectId,
+            });
+          }
+
+          const replacedProviderObjectId = record.providerObjectId;
+          await updateExecutionHistoryRecord(record.id, {
+            status: "modified",
+            title: nextItem.customTitle || nextItem.title,
+            subject: nextItem.customTitle || nextItem.title,
+            providerObjectId: createResult.id,
+            outlookWebLink: createResult.webLink,
+            teamsJoinLink: createResult.joinUrl || null,
+            scheduledFor: nextTiming.scheduledFor,
+            endsAt: nextTiming.endsAt,
+            isAllDay: nextTiming.isAllDay,
+            details: {
+              body: nextItem.body ?? "",
+              replacedProviderObjectId,
+              replacementHistory: [
+                ...(((Array.isArray(record.details.replacementHistory) ? record.details.replacementHistory : []) as unknown[]).filter(
+                  (entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
+                )),
+                {
+                  replacedProviderObjectId,
+                  replacementProviderObjectId: createResult.id,
+                  replacedAt: new Date().toISOString(),
+                  reason: "plan_reschedule",
+                },
+              ],
+              latestPlanReschedule: rescheduleDetails,
+            },
+          });
+          replacedCount += 1;
+          continue;
+        }
+
+        if (record.itemType === "email" && getHistoryAction(record) === "email_scheduled") {
+          const nextEmailDraft = {
+            to: nextItem.emailDraft?.to ?? [],
+            cc: nextItem.emailDraft?.cc ?? [],
+            bcc: nextItem.emailDraft?.bcc ?? [],
+            subject: nextItem.emailDraft?.subject ?? nextItem.customTitle ?? nextItem.title,
+            body: nextItem.emailDraft?.body ?? "",
+          };
+          const replacementResult = await replaceOutlookScheduledEmail({
+            messageId: record.providerObjectId || "",
+            draft: nextEmailDraft,
+            fallbackSubject: nextEmailDraft.subject,
+            scheduledSendISO: nextTiming.scheduledFor,
+          });
+          const replacedProviderObjectId = record.providerObjectId;
+          await updateExecutionHistoryRecord(record.id, {
+            status: "modified",
+            title: nextItem.customTitle || nextItem.title,
+            subject: nextEmailDraft.subject,
+            recipients: [...nextEmailDraft.to, ...nextEmailDraft.cc, ...nextEmailDraft.bcc],
+            providerObjectId: replacementResult.id,
+            outlookWebLink: replacementResult.webLink,
+            scheduledFor: nextTiming.scheduledFor,
+            details: {
+              body: nextEmailDraft.body,
+              emailDraft: nextEmailDraft,
+              scheduledSendAt: nextTiming.scheduledFor,
+              scheduledEmailState: "scheduled",
+              replacedProviderObjectId,
+              replacementHistory: [
+                ...(((Array.isArray(record.details.replacementHistory) ? record.details.replacementHistory : []) as unknown[]).filter(
+                  (entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
+                )),
+                {
+                  replacedProviderObjectId,
+                  replacementProviderObjectId: replacementResult.id,
+                  replacedAt: new Date().toISOString(),
+                  reason: "plan_reschedule",
+                },
+              ],
+              latestPlanReschedule: rescheduleDetails,
+            },
+          });
+          replacedCount += 1;
+          continue;
+        }
+
+        if (record.itemType === "email") {
+          const nextEmailDraft = {
+            to: nextItem.emailDraft?.to ?? [],
+            cc: nextItem.emailDraft?.cc ?? [],
+            bcc: nextItem.emailDraft?.bcc ?? [],
+            subject: nextItem.emailDraft?.subject ?? nextItem.customTitle ?? nextItem.title,
+            body: nextItem.emailDraft?.body ?? "",
+          };
+
+          await updateOutlookMessageDraft({
+            messageId: record.providerObjectId || "",
+            draft: nextEmailDraft,
+            fallbackSubject: nextEmailDraft.subject,
+          });
+
+          await updateExecutionHistoryRecord(record.id, {
+            status: "modified",
+            title: nextItem.customTitle || nextItem.title,
+            subject: nextEmailDraft.subject,
+            recipients: [...nextEmailDraft.to, ...nextEmailDraft.cc, ...nextEmailDraft.bcc],
+            scheduledFor: nextTiming.scheduledFor,
+            details: {
+              body: nextEmailDraft.body,
+              emailDraft: nextEmailDraft,
+              latestPlanReschedule: rescheduleDetails,
+            },
+          });
+          updatedCount += 1;
+          continue;
+        }
+
+        skippedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        await updateExecutionHistoryRecord(record.id, {
+          details: {
+            planRescheduleError: error instanceof Error ? error.message : "Could not update this item.",
+          },
+        });
+      }
+    }
+
+    setPendingPlanModifies((current) => ({ ...current, [planGroup.key]: false }));
+    setPlanMessages((current) => ({
+      ...current,
+      [planGroup.key]:
+        failedCount === 0 && updatedCount + replacedCount > 0
+          ? {
+              tone: skippedCount > 0 ? "warning" : "success",
+              text:
+                skippedCount > 0
+                  ? `Partially updated. ${updatedCount} updated, ${replacedCount} replaced, ${skippedCount} skipped.`
+                  : `Event updated. ${updatedCount} updated, ${replacedCount} replaced.`,
+            }
+          : updatedCount + replacedCount > 0
+            ? {
+                tone: "warning",
+                text: `Partially updated. ${updatedCount} updated, ${replacedCount} replaced, ${skippedCount} skipped, ${failedCount} failed.`,
+              }
+            : {
+                tone: failedCount > 0 ? "error" : "warning",
+                text: failedCount > 0 ? `Update failed for ${failedCount} item${failedCount === 1 ? "" : "s"}.` : "Nothing changed.",
+              },
+    }));
+  }
+
   return (
     <div className="space-y-8 text-gray-900">
       <section>
@@ -794,10 +1488,15 @@ export default function HistoryPage() {
                       <div className="space-y-4 border-t bg-gray-50/60 p-4">
                         {dayGroup.plans.map((planGroup) => {
                           const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
+                          const isPlanModifying = modifyingPlans[planGroup.key] ?? false;
+                          const planSnapshot = getExecutionPlanSnapshot(planGroup.items[0]);
+                          const planModifyDate = planModifyDates[planGroup.key] ?? planSnapshot?.anchorDate ?? "";
+                          const planModifyPreview = planModifyDate ? getPlanModifyPreview(planGroup, planModifyDate) : { snapshot: planSnapshot, items: [] };
                           const recallablePlanItems = planGroup.items.filter((item) => {
                             const recallState = getExecutionHistoryRecallState(item);
                             return recallState.canRecall && recallState.recallImplemented;
                           });
+                          const canModifyPlan = Boolean(planSnapshot && !planSnapshot.noEventDate);
                           const planMessage = planMessages[planGroup.key] ?? null;
                           return (
                             <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
@@ -825,6 +1524,14 @@ export default function HistoryPage() {
                                 <div className="flex items-center gap-3">
                                   <button
                                     type="button"
+                                    onClick={() => togglePlanModify(planGroup)}
+                                    disabled={!canModifyPlan || pendingPlanModifies[planGroup.key]}
+                                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                                  >
+                                    {pendingPlanModifies[planGroup.key] ? "Updating..." : "Modify Event"}
+                                  </button>
+                                  <button
+                                    type="button"
                                     onClick={() => void handleRecallPlan(planGroup)}
                                     disabled={recallablePlanItems.length === 0 || pendingPlanRecalls[planGroup.key]}
                                     className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
@@ -840,6 +1547,85 @@ export default function HistoryPage() {
                                   </button>
                                 </div>
                               </div>
+
+                              {isPlanModifying ? (
+                                <div className="border-t bg-gray-50/70 px-5 py-4">
+                                  <div className="grid gap-4 md:grid-cols-[220px_220px_auto] md:items-end">
+                                    <div>
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Date</div>
+                                      <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
+                                        {planSnapshot?.anchorDate ? formatDateOnly(`${planSnapshot.anchorDate}T00:00:00`) : "Not available"}
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Date</label>
+                                      <input
+                                        type="date"
+                                        value={planModifyDate}
+                                        onChange={(event) => setPlanModifyDates((current) => ({ ...current, [planGroup.key]: event.target.value }))}
+                                        className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
+                                      />
+                                    </div>
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setModifyingPlans((current) => ({ ...current, [planGroup.key]: false }))}
+                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                                      >
+                                        Close
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleModifyPlan(planGroup)}
+                                        disabled={!planModifyDate || planModifyPreview.items.every((item) => item.action === "Unchanged" || item.action === "Locked" || item.action === "Unsupported")}
+                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                                      >
+                                        Apply Changes
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 overflow-hidden rounded-xl border bg-white">
+                                    <div className="hidden grid-cols-[140px_minmax(0,1fr)_180px_180px_150px] gap-3 border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid">
+                                      <div>Type</div>
+                                      <div>Title</div>
+                                      <div>Old Date / Time</div>
+                                      <div>New Date / Time</div>
+                                      <div>Planned Action</div>
+                                    </div>
+                                    <div className="divide-y">
+                                      {planModifyPreview.items.map((previewItem) => (
+                                        <div key={`modify-preview:${planGroup.key}:${previewItem.record.id}`} className="grid gap-3 px-4 py-3 md:grid-cols-[140px_minmax(0,1fr)_180px_180px_150px] md:items-center">
+                                          <div className={`text-sm font-medium ${getTypeAccentClasses(formatTimelineItemType(previewItem.record))}`}>
+                                            {getItemTypeDisplayLabel(previewItem.record)}
+                                          </div>
+                                          <div className="text-sm text-gray-900">{previewItem.record.subject || previewItem.record.title}</div>
+                                          <div className="text-sm text-gray-600">{formatPreviewDateTime(previewItem.oldDateTime)}</div>
+                                          <div className="text-sm text-gray-900">{formatPreviewDateTime(previewItem.newDateTime)}</div>
+                                          <div className="text-sm">
+                                            <div
+                                              className={
+                                                previewItem.action === "Update"
+                                                  ? "text-blue-700"
+                                                  : previewItem.action === "Replace"
+                                                    ? "text-amber-700"
+                                                    : previewItem.action === "Locked"
+                                                      ? "text-gray-700"
+                                                      : previewItem.action === "Unsupported"
+                                                        ? "text-red-700"
+                                                        : "text-gray-500"
+                                              }
+                                            >
+                                              {previewItem.action}
+                                            </div>
+                                            {previewItem.reason ? <div className="mt-1 text-xs text-gray-500">{previewItem.reason}</div> : null}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
 
                               {isPlanExpanded ? (
                                 <div className="border-t p-5">
