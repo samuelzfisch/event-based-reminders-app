@@ -32,6 +32,7 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const AUTH_RESOLUTION_TIMEOUT_MS = 2000;
 const ORG_CONTEXT_RETRY_DELAY_MS = 750;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authEnabled] = useState(() => isSupabaseConfigured());
@@ -161,12 +162,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.info("[auth] loading cleared", { source });
         }
       }
-    })().finally(() => {
+    });
+
+    const guardedResolutionPromise = Promise.race([
+      resolutionPromise,
+      new Promise<void>((resolve) => {
+        window.setTimeout(() => {
+          console.warn("[auth] auth resolution timed out", { source });
+          if (mountedRef.current) {
+            setLoading(false);
+            console.info("[auth] loading cleared", { source });
+          }
+          resolve();
+        }, AUTH_RESOLUTION_TIMEOUT_MS);
+      }),
+    ]).finally(() => {
       authResolutionRef.current = null;
     });
 
-    authResolutionRef.current = resolutionPromise;
-    await resolutionPromise;
+    authResolutionRef.current = guardedResolutionPromise;
+    await guardedResolutionPromise;
   }
 
   async function refreshAuthContext() {
