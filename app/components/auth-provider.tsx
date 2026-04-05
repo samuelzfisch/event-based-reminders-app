@@ -27,37 +27,21 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const ORG_BOOTSTRAP_TIMEOUT_MS = 2000;
 
-async function resolveAuthState() {
-  if (!isSupabaseConfigured()) {
-    return {
-      session: null,
-      user: null,
-      orgContext: null,
-    };
-  }
+function hasAuthParamsInUrl() {
+  if (typeof window === "undefined") return false;
 
-  const supabase = getSupabaseBrowserClient();
-  if (!supabase) {
-    return {
-      session: null,
-      user: null,
-      orgContext: null,
-    };
-  }
+  const search = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
 
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
-  const orgContext = user
-    ? await bootstrapCurrentOrgForUser({
-        userId: user.id,
-        email: user.email,
-      })
-    : null;
-
-  return { session: session ?? null, user, orgContext };
+  return (
+    search.has("code") ||
+    search.has("access_token") ||
+    search.has("refresh_token") ||
+    hash.has("access_token") ||
+    hash.has("refresh_token")
+  );
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -67,6 +51,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [orgContext, setOrgContext] = useState<BootstrappedOrgContext | null>(null);
   const mountedRef = useRef(true);
+  const currentUserRef = useRef<User | null>(null);
+  const authResolutionRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  async function bootstrapOrgContextWithTimeout(user: User, source: string) {
+    return await Promise.race([
+      bootstrapCurrentOrgForUser({
+        userId: user.id,
+        email: user.email,
+      }),
+      new Promise<null>((resolve) => {
+        window.setTimeout(() => {
+          console.warn("[auth] org bootstrap timed out", { source, userId: user.id });
+          resolve(null);
+        }, ORG_BOOTSTRAP_TIMEOUT_MS);
+      }),
+    ]);
+  }
+
+  async function applyResolvedSession(session: Session | null, source: string) {
+    if (!mountedRef.current) return;
+
+    setCurrentSession(session ?? null);
+    setCurrentUser(session?.user ?? null);
+
+    if (!session?.user) {
+      console.info("[auth] signed out", { source });
+      clearCachedOrgContext();
+      setOrgContext(null);
+      setLoading(false);
+      return;
+    }
+
+    console.info("[auth] signed in", { source, userId: session.user.id });
+    setLoading(true);
+    try {
+      const nextOrgContext = await bootstrapOrgContextWithTimeout(session.user, source);
+      if (!mountedRef.current) return;
+      setOrgContext(nextOrgContext);
+    } finally {
+      if (mountedRef.current) {
+        setLoading(false);
+      }
+    }
+  }
 
   async function refreshAuthContext() {
     if (!authEnabled) {
@@ -79,22 +111,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    setLoading(true);
-    try {
-      const nextState = await resolveAuthState();
-      if (!mountedRef.current) return;
-      setCurrentSession(nextState.session);
-      setCurrentUser(nextState.user);
-      setOrgContext(nextState.orgContext);
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
+    const existingResolution = authResolutionRef.current;
+    if (existingResolution) {
+      console.info("[auth] auth resolution reused", { source: "refresh" });
+      await existingResolution;
+      return;
     }
+
+    const resolutionPromise = (async () => {
+      console.info("[auth] auth resolution start", { source: "refresh" });
+      setLoading(true);
+
+      try {
+        const supabase = getSupabaseBrowserClient();
+        if (!supabase) {
+          if (mountedRef.current) {
+            setCurrentSession(null);
+            setCurrentUser(null);
+            setOrgContext(null);
+            setLoading(false);
+          }
+          return;
+        }
+
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        await applyResolvedSession(session ?? null, "refresh");
+        console.info("[auth] auth resolution success", {
+          source: "refresh",
+          hasSession: Boolean(session),
+          userId: session?.user?.id ?? null,
+        });
+      } finally {
+        authResolutionRef.current = null;
+      }
+    })();
+
+    authResolutionRef.current = resolutionPromise;
+    await resolutionPromise;
+  }
+
+  async function resolveSessionFromEvent(source: string, session: Session | null) {
+    const existingResolution = authResolutionRef.current;
+    if (existingResolution) {
+      console.info("[auth] auth resolution reused", { source });
+      await existingResolution;
+      return;
+    }
+
+    const resolutionPromise = (async () => {
+      console.info("[auth] auth resolution start", { source });
+      await applyResolvedSession(session, source);
+      console.info("[auth] auth resolution success", {
+        source,
+        hasSession: Boolean(session),
+        userId: session?.user?.id ?? null,
+      });
+    })().finally(() => {
+      authResolutionRef.current = null;
+    });
+
+    authResolutionRef.current = resolutionPromise;
+    await resolutionPromise;
   }
 
   const refreshAuthContextEffect = useEffectEvent(async () => {
     await refreshAuthContext();
+  });
+
+  const resolveSessionFromEventEffect = useEffectEvent(async (source: string, session: Session | null) => {
+    await resolveSessionFromEvent(source, session);
   });
 
   useEffect(() => {
@@ -119,36 +207,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mountedRef.current) return;
 
-      setCurrentSession(session ?? null);
-      setCurrentUser(session?.user ?? null);
-
-      if (!session?.user) {
-        clearCachedOrgContext();
-        setOrgContext(null);
-        setLoading(false);
+      if (event === "INITIAL_SESSION") {
+        await resolveSessionFromEventEffect("INITIAL_SESSION", session ?? null);
         return;
       }
 
-      setLoading(true);
-      try {
-        const nextOrgContext = await bootstrapCurrentOrgForUser({
-          userId: session.user.id,
-          email: session.user.email,
-        });
-        if (!mountedRef.current) return;
-        setOrgContext(nextOrgContext);
-      } finally {
-        if (mountedRef.current) {
-          setLoading(false);
-        }
+      if (event === "SIGNED_IN") {
+        await resolveSessionFromEventEffect("SIGNED_IN", session ?? null);
+        return;
+      }
+
+      if (event === "SIGNED_OUT") {
+        await resolveSessionFromEventEffect("SIGNED_OUT", null);
+        return;
       }
     });
 
+    const shouldRetrySessionLoad = hasAuthParamsInUrl();
+    const retryTimer = shouldRetrySessionLoad
+      ? window.setTimeout(() => {
+          if (!authResolutionRef.current && !currentUserRef.current) {
+            void refreshAuthContextEffect();
+          }
+        }, 500)
+      : null;
+
     return () => {
       mountedRef.current = false;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
       subscription.unsubscribe();
     };
   }, [authEnabled]);
