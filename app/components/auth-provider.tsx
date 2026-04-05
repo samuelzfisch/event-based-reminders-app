@@ -164,24 +164,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    const guardedResolutionPromise = Promise.race([
-      resolutionPromise,
+    const guardedResolutionPromise: Promise<void> = Promise.race([
+      (async () => {
+        await resolutionPromise;
+      })(),
       new Promise<void>((resolve) => {
-        window.setTimeout(() => {
-          console.warn("[auth] auth resolution timed out", { source });
+        setTimeout(() => {
+          console.warn("[auth] auth resolution timed out");
           if (mountedRef.current) {
             setLoading(false);
-            console.info("[auth] loading cleared", { source });
+            console.log("[auth] loading cleared");
           }
           resolve();
         }, AUTH_RESOLUTION_TIMEOUT_MS);
       }),
-    ]).finally(() => {
-      authResolutionRef.current = null;
-    });
+    ]);
 
     authResolutionRef.current = guardedResolutionPromise;
     await guardedResolutionPromise;
+    authResolutionRef.current = null;
   }
 
   async function refreshAuthContext() {
