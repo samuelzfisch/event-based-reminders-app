@@ -17,10 +17,12 @@ import {
   type BootstrappedOrgContext,
   bootstrapCurrentOrgForUser,
 } from "../../lib/orgBootstrap";
+import { isAuthBypassEnabled } from "../../lib/authBypass";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
 type AuthContextValue = {
   authEnabled: boolean;
+  authBypassEnabled: boolean;
   loading: boolean;
   currentSession: Session | null;
   currentUser: User | null;
@@ -36,6 +38,7 @@ const AUTH_RESOLUTION_TIMEOUT_MS = 2000;
 const ORG_CONTEXT_RETRY_DELAY_MS = 750;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authEnabled] = useState(() => isSupabaseConfigured());
+  const [authBypassEnabled] = useState(() => isAuthBypassEnabled());
   const [loading, setLoading] = useState(true);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -186,6 +189,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function refreshAuthContext() {
+    if (authBypassEnabled) {
+      if (mountedRef.current) {
+        setCurrentSession(null);
+        setCurrentUser(null);
+        setOrgContext(null);
+        setLoading(false);
+      }
+      return;
+    }
+
     if (!authEnabled) {
       if (mountedRef.current) {
         setCurrentSession(null);
@@ -230,6 +243,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
+
+    if (authBypassEnabled) {
+      setLoading(false);
+      console.info("[auth] auth bypass enabled");
+      return () => {
+        mountedRef.current = false;
+      };
+    }
 
     if (!authEnabled) {
       setLoading(false);
@@ -287,7 +308,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mountedRef.current = false;
       subscription.unsubscribe();
     };
-  }, [authEnabled]);
+  }, [authBypassEnabled, authEnabled]);
 
   async function sendMagicLink(email: string) {
     const supabase = getSupabaseBrowserClient();
@@ -331,6 +352,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         authEnabled,
+        authBypassEnabled,
         loading,
         currentSession,
         currentUser,

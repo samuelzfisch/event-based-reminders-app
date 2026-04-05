@@ -27,7 +27,7 @@ function areOutlookConnectionStatesEqual(left: OutlookConnectionState | null, ri
 }
 
 export default function SettingsPage() {
-  const { authEnabled, currentUser, currentOrgId, signOut } = useAuthContext();
+  const { authEnabled, authBypassEnabled, currentUser, currentOrgId, signOut } = useAuthContext();
   const [settings, setSettings] = useState<AppSettings>(() => loadAppSettings());
   const [savedSettings, setSavedSettings] = useState<AppSettings>(() => loadAppSettings());
   const [planBuilderSaveMessage, setPlanBuilderSaveMessage] = useState<string | null>(null);
@@ -392,6 +392,13 @@ export default function SettingsPage() {
                   {signingOut ? "Signing out..." : "Sign out"}
                 </button>
               </div>
+            </div>
+          </div>
+        ) : authBypassEnabled ? (
+          <div className="rounded-2xl border bg-white shadow-sm lg:col-span-2">
+            <div className="space-y-2 p-6">
+              <h2 className="text-base font-semibold text-gray-900">Account</h2>
+              <div className="text-sm text-gray-600">Auth bypass enabled for this environment.</div>
             </div>
           </div>
         ) : null}

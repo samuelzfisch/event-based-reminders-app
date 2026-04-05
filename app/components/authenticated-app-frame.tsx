@@ -17,11 +17,12 @@ function LoadingScreen({ label }: { label: string }) {
 export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { authEnabled, loading, currentUser, currentOrgId } = useAuthContext();
+  const { authEnabled, authBypassEnabled, loading, currentUser, currentOrgId } = useAuthContext();
 
   const isLoginRoute = pathname === "/login";
 
   useEffect(() => {
+    if (authBypassEnabled) return;
     if (!authEnabled) return;
 
     if (!currentUser && !isLoginRoute) {
@@ -33,7 +34,7 @@ export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
     if (currentUser && isLoginRoute) {
       router.replace("/");
     }
-  }, [authEnabled, currentUser, isLoginRoute, loading, router]);
+  }, [authBypassEnabled, authEnabled, currentUser, isLoginRoute, loading, router]);
 
   useEffect(() => {
     if (authEnabled && currentUser && !currentOrgId) {
@@ -44,15 +45,15 @@ export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
     }
   }, [authEnabled, currentOrgId, currentUser, pathname]);
 
-  if (authEnabled && loading && !currentUser) {
+  if (!authBypassEnabled && authEnabled && loading && !currentUser) {
     return <LoadingScreen label="Loading workspace…" />;
   }
 
-  if (authEnabled && !currentUser && !isLoginRoute) {
+  if (!authBypassEnabled && authEnabled && !currentUser && !isLoginRoute) {
     return <LoadingScreen label="Redirecting to login…" />;
   }
 
-  if (authEnabled && currentUser && isLoginRoute) {
+  if (!authBypassEnabled && authEnabled && currentUser && isLoginRoute) {
     return <LoadingScreen label="Redirecting to your workspace…" />;
   }
 
