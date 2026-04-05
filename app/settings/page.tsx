@@ -20,12 +20,14 @@ import {
   OUTLOOK_CONNECTION_UPDATED_EVENT,
   type OutlookConnectionState,
 } from "../../lib/outlookClient";
+import { useAuthContext } from "../components/auth-provider";
 
 function areOutlookConnectionStatesEqual(left: OutlookConnectionState | null, right: OutlookConnectionState | null) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export default function SettingsPage() {
+  const { authEnabled, currentUser, currentOrgId, signOut } = useAuthContext();
   const [settings, setSettings] = useState<AppSettings>(() => loadAppSettings());
   const [savedSettings, setSavedSettings] = useState<AppSettings>(() => loadAppSettings());
   const [planBuilderSaveMessage, setPlanBuilderSaveMessage] = useState<string | null>(null);
@@ -34,6 +36,7 @@ export default function SettingsPage() {
   const [outlookMessage, setOutlookMessage] = useState<string | null>(null);
   const [outlookError, setOutlookError] = useState<string | null>(null);
   const [connectingOutlook, setConnectingOutlook] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
   const savedSettingsRef = useRef(savedSettings);
 
@@ -192,6 +195,15 @@ export default function SettingsPage() {
     setOutlookConnection((current) => (areOutlookConnectionStatesEqual(current, connection) ? current : connection));
     syncPersistedOutlookSettings(connection);
     setOutlookMessage("Outlook disconnected.");
+  }
+
+  async function onSignOut() {
+    try {
+      setSigningOut(true);
+      await signOut();
+    } finally {
+      setSigningOut(false);
+    }
   }
 
   const connectionStatusLabel = !hasMounted
@@ -355,6 +367,34 @@ export default function SettingsPage() {
             {emailSignatureSaveMessage ? <p className="text-xs text-green-700">{emailSignatureSaveMessage}</p> : null}
           </div>
         </div>
+
+        {authEnabled && currentUser ? (
+          <div className="rounded-2xl border bg-white shadow-sm lg:col-span-2">
+            <div className="space-y-4 p-6">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Account</h2>
+              </div>
+              <div className="space-y-2 text-sm text-gray-600">
+                <div>
+                  Signed in as: <span className="text-gray-900">{currentUser.email || "—"}</span>
+                </div>
+                <div>
+                  Org ID: <span className="text-gray-900">{currentOrgId || "—"}</span>
+                </div>
+              </div>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => void onSignOut()}
+                  disabled={signingOut}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  {signingOut ? "Signing out..." : "Sign out"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );
