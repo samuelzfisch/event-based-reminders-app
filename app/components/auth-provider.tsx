@@ -11,7 +11,12 @@ import {
 } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 
-import { clearCachedOrgContext, type BootstrappedOrgContext, bootstrapCurrentOrgForUser } from "../../lib/orgBootstrap";
+import {
+  clearCachedOrgContext,
+  getCachedOrgContext,
+  type BootstrappedOrgContext,
+  bootstrapCurrentOrgForUser,
+} from "../../lib/orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
 type AuthContextValue = {
@@ -27,30 +32,57 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-const ORG_BOOTSTRAP_TIMEOUT_MS = 2000;
-
+const AUTH_SESSION_TIMEOUT_MS = 2000;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authEnabled] = useState(() => isSupabaseConfigured());
   const [loading, setLoading] = useState(true);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [orgContext, setOrgContext] = useState<BootstrappedOrgContext | null>(null);
+  const [orgContext, setOrgContext] = useState<BootstrappedOrgContext | null>(() => getCachedOrgContext());
   const mountedRef = useRef(true);
   const authResolutionRef = useRef<Promise<void> | null>(null);
+  const orgBootstrapStartedRef = useRef<string | null>(null);
 
-  async function bootstrapOrgContextWithTimeout(user: User, source: string) {
-    return await Promise.race([
-      bootstrapCurrentOrgForUser({
+  async function resolveOrgContextInBackground(user: User, source: string) {
+    const cachedContext = getCachedOrgContext();
+    if (mountedRef.current) {
+      if (cachedContext?.userId === user.id) {
+        console.info("[auth] currentOrgId set from cache", { source, orgId: cachedContext.orgId });
+        setOrgContext(cachedContext);
+      } else {
+        setOrgContext(null);
+        console.info("[auth] currentOrgId is null", { source, reason: "no_matching_cached_org_context" });
+      }
+    }
+
+    if (orgBootstrapStartedRef.current === user.id) {
+      console.info("[auth] org bootstrap already in progress", { source, userId: user.id });
+      return;
+    }
+
+    orgBootstrapStartedRef.current = user.id;
+    try {
+      const nextOrgContext = await bootstrapCurrentOrgForUser({
         userId: user.id,
         email: user.email,
-      }),
-      new Promise<null>((resolve) => {
-        window.setTimeout(() => {
-          console.warn("[auth] org bootstrap timed out", { source, userId: user.id });
-          resolve(null);
-        }, ORG_BOOTSTRAP_TIMEOUT_MS);
-      }),
-    ]);
+      });
+      if (!mountedRef.current) return;
+      setOrgContext(nextOrgContext);
+      if (nextOrgContext?.orgId) {
+        console.info("[auth] currentOrgId set", { source, orgId: nextOrgContext.orgId });
+      } else {
+        console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_returned_null" });
+      }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setOrgContext(null);
+      console.error("[auth] background org bootstrap failed", { source, error });
+      console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_failed" });
+    } finally {
+      if (orgBootstrapStartedRef.current === user.id) {
+        orgBootstrapStartedRef.current = null;
+      }
+    }
   }
 
   async function applyResolvedSession(session: Session | null, source: string) {
@@ -69,22 +101,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.info("[auth] signed-out state applied", { source });
       clearCachedOrgContext();
       setOrgContext(null);
+      orgBootstrapStartedRef.current = null;
       setLoading(false);
       console.info("[auth] loading cleared", { source });
       return;
     }
 
-    setLoading(true);
-    try {
-      const nextOrgContext = await bootstrapOrgContextWithTimeout(session.user, source);
-      if (!mountedRef.current) return;
-      setOrgContext(nextOrgContext);
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-        console.info("[auth] loading cleared", { source });
-      }
-    }
+    setLoading(false);
+    console.info("[auth] loading cleared", { source });
+    void resolveOrgContextInBackground(session.user, source);
   }
 
   async function resolveWithSingleFlight(source: string, resolver: () => Promise<Session | null>) {
@@ -139,11 +164,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const supabase = getSupabaseBrowserClient();
       if (!supabase) return null;
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const { data } = await Promise.race([
+        supabase.auth.getSession(),
+        new Promise<{ data: { session: null } }>((resolve) => {
+          window.setTimeout(() => {
+            console.warn("[auth] getSession timed out during mount auth check");
+            resolve({ data: { session: null } });
+          }, AUTH_SESSION_TIMEOUT_MS);
+        }),
+      ]);
 
-      return session ?? null;
+      return data.session ?? null;
     });
   }
 
@@ -174,6 +205,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       };
     }
 
+    console.info("[auth] mount auth check start");
     void refreshAuthContextEffect();
 
     const {

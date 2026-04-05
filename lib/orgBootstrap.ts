@@ -108,6 +108,7 @@ async function runBootstrapCurrentOrgForUser(input: {
         role: normalizeString(membershipQuery.data.role) || "member",
       } satisfies BootstrappedOrgContext;
       cacheOrgContext(context);
+      console.info("[orgBootstrap] bootstrap success from membership", { userId: input.userId, orgId: context.orgId });
       return context;
     }
 
@@ -147,6 +148,7 @@ async function runBootstrapCurrentOrgForUser(input: {
       role: "owner",
     } satisfies BootstrappedOrgContext;
     cacheOrgContext(context);
+    console.info("[orgBootstrap] bootstrap success from creation", { userId: input.userId, orgId: context.orgId });
     return context;
   } catch (error) {
     console.error("[orgBootstrap] bootstrap failed", error);

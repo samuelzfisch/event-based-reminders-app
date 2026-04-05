@@ -24,6 +24,7 @@ import { createPlan, type TemplateItem } from "../../lib/planEngine";
 import { addDaysISO } from "../../lib/dateUtils";
 import { buildAnchorMap, classifyPlanRow, normalizeAnchorKey, resolvePlanAnchors } from "../../lib/plansRuntime";
 import type { PlanDateBasis, PlanItem, PlanRowType, PlanType, WeekendRule } from "../../types/plan";
+import { useAuthContext } from "../components/auth-provider";
 
 type PlanExecutionGroup = {
   key: string;
@@ -797,6 +798,7 @@ function getPlanModifyEligibility(planGroup: PlanExecutionGroup) {
 
 export default function HistoryPage() {
   const exposeModifyUI = true;
+  const { authEnabled, currentUser, currentOrgId } = useAuthContext();
   const [records, setRecords] = useState<ExecutionHistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
@@ -820,32 +822,48 @@ export default function HistoryPage() {
     let cancelled = false;
 
     async function load() {
+      console.info("[historyPage] fetch start", {
+        authEnabled,
+        userId: currentUser?.id ?? null,
+        orgId: currentOrgId ?? null,
+      });
       setLoading(true);
-      const nextRecords = await listExecutionHistory();
-      console.info("[historyPage] loaded records", {
-        count: nextRecords.length,
-        days: Array.from(new Set(nextRecords.map((record) => getLocalDayKey(record.executedAt)))),
-        firstRecord: nextRecords[0]
-          ? {
-              id: nextRecords[0].id,
-              userKey: nextRecords[0].userKey,
-              executionGroupId: nextRecords[0].executionGroupId,
-              planName: nextRecords[0].planName,
-              executedAt: nextRecords[0].executedAt,
-            }
-          : null,
-      });
-      if (cancelled) return;
-      setRecords(nextRecords);
-      setExpandedDays((current) => {
-        if (Object.keys(current).length > 0) return current;
-        return Object.fromEntries(nextRecords.map((record) => [getLocalDayKey(record.executedAt), true]));
-      });
-      setExpandedPlans((current) => {
-        if (Object.keys(current).length > 0) return current;
-        return {};
-      });
-      setLoading(false);
+
+      try {
+        const nextRecords = await listExecutionHistory();
+        console.info("[historyPage] fetch success", {
+          count: nextRecords.length,
+          days: Array.from(new Set(nextRecords.map((record) => getLocalDayKey(record.executedAt)))),
+          orgId: currentOrgId ?? null,
+          firstRecord: nextRecords[0]
+            ? {
+                id: nextRecords[0].id,
+                userKey: nextRecords[0].userKey,
+                executionGroupId: nextRecords[0].executionGroupId,
+                planName: nextRecords[0].planName,
+                executedAt: nextRecords[0].executedAt,
+              }
+            : null,
+        });
+        if (cancelled) return;
+        setRecords(nextRecords);
+        setExpandedDays((current) => {
+          if (Object.keys(current).length > 0) return current;
+          return Object.fromEntries(nextRecords.map((record) => [getLocalDayKey(record.executedAt), true]));
+        });
+        setExpandedPlans((current) => {
+          if (Object.keys(current).length > 0) return current;
+          return {};
+        });
+      } catch (error) {
+        console.error("[historyPage] fetch failed", error);
+        if (cancelled) return;
+        setRecords([]);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }
 
     void load();
@@ -860,7 +878,7 @@ export default function HistoryPage() {
       cancelled = true;
       window.removeEventListener(EXECUTION_HISTORY_UPDATED_EVENT, refresh as EventListener);
     };
-  }, []);
+  }, [authEnabled, currentUser?.id, currentOrgId]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
