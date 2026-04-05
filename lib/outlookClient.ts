@@ -6,6 +6,8 @@ import {
   removePersistedValue,
   writePersistedValue,
 } from "./browserStorage";
+import { getCachedOrgContext } from "./orgBootstrap";
+import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 
 export type OutlookConnectionStatus = "connected" | "reconnect_required" | "not_connected";
 export type OutlookEmailExecutionMode = "draft" | "schedule" | "send";
@@ -128,6 +130,7 @@ const OUTLOOK_LOCAL_REDIRECT_URI = "http://localhost:8664/api/auth/microsoft/cal
 const OUTLOOK_HOSTED_REDIRECT_URI = "https://event-based-reminders-app.vercel.app/api/auth/microsoft/callback";
 export const OUTLOOK_CONNECTION_UPDATED_EVENT = "event-based-reminders-app:outlook-connection-updated";
 export const OUTLOOK_OAUTH_MESSAGE_TYPE = "event_based_reminders_app_outlook_oauth_result";
+const OUTLOOK_PROVIDER_NAME = "microsoft_outlook";
 
 export const OUTLOOK_SCOPES = [
   "User.Read",
@@ -345,6 +348,193 @@ function clearStoredOutlookState() {
   emitOutlookConnectionUpdated();
 }
 
+type CanonicalOutlookIntegrationRecord = {
+  org_id: string;
+  provider: string;
+  connection_status: OutlookConnectionStatus;
+  access_token: string | null;
+  refresh_token: string | null;
+  expires_at: string | null;
+  scope: string | null;
+  provider_account_id: string | null;
+  provider_account_email: string | null;
+  provider_display_name: string | null;
+  identity: OutlookConnectedIdentity | null;
+};
+
+function getCanonicalIntegrationContext() {
+  const cachedOrgContext = getCachedOrgContext();
+  if (!cachedOrgContext?.orgId || !cachedOrgContext.userId || !isSupabaseConfigured()) {
+    return null;
+  }
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return null;
+  return {
+    supabase,
+    orgId: cachedOrgContext.orgId,
+    userId: cachedOrgContext.userId,
+  };
+}
+
+function buildCanonicalOutlookPayload(input: {
+  orgId: string;
+  userId: string;
+  session: OutlookSession | null;
+  identity: OutlookConnectedIdentity | null;
+  status: OutlookConnectionStatus;
+}) {
+  return {
+    org_id: input.orgId,
+    provider: OUTLOOK_PROVIDER_NAME,
+    connection_status: input.status,
+    provider_account_id: input.identity?.id ?? null,
+    provider_account_email: getConnectedOutlookMailboxEmail(input.identity) || null,
+    provider_display_name: input.identity?.displayName ?? null,
+    access_token: input.session?.accessToken ?? null,
+    refresh_token: input.session?.refreshToken ?? null,
+    expires_at: input.session?.expiresAt ? new Date(input.session.expiresAt).toISOString() : null,
+    scope: input.session?.scope ?? null,
+    identity: input.identity ?? null,
+    created_by: input.userId,
+    updated_by: input.userId,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function loadCanonicalOutlookIntegration() {
+  const context = getCanonicalIntegrationContext();
+  if (!context) return null;
+
+  const { data, error } = await context.supabase
+    .from("provider_integrations")
+    .select(
+      "org_id,provider,connection_status,access_token,refresh_token,expires_at,scope,provider_account_id,provider_account_email,provider_display_name,identity"
+    )
+    .eq("org_id", context.orgId)
+    .eq("provider", OUTLOOK_PROVIDER_NAME)
+    .maybeSingle();
+
+  if (error || !data) return null;
+
+  return {
+    org_id: String(data.org_id),
+    provider: String(data.provider),
+    connection_status:
+      data.connection_status === "connected" || data.connection_status === "reconnect_required"
+        ? data.connection_status
+        : "not_connected",
+    access_token: typeof data.access_token === "string" ? data.access_token : null,
+    refresh_token: typeof data.refresh_token === "string" ? data.refresh_token : null,
+    expires_at: typeof data.expires_at === "string" ? data.expires_at : null,
+    scope: typeof data.scope === "string" ? data.scope : null,
+    provider_account_id: typeof data.provider_account_id === "string" ? data.provider_account_id : null,
+    provider_account_email: typeof data.provider_account_email === "string" ? data.provider_account_email : null,
+    provider_display_name: typeof data.provider_display_name === "string" ? data.provider_display_name : null,
+    identity:
+      data.identity && typeof data.identity === "object"
+        ? ({
+            ...(data.identity as OutlookConnectedIdentity),
+            normalizedEmail: normalizeOutlookEmail(
+              (data.identity as OutlookConnectedIdentity).normalizedEmail ||
+                (data.identity as OutlookConnectedIdentity).mail ||
+                (data.identity as OutlookConnectedIdentity).userPrincipalName
+            ),
+          } satisfies OutlookConnectedIdentity)
+        : null,
+  } satisfies CanonicalOutlookIntegrationRecord;
+}
+
+async function persistCanonicalOutlookIntegration(input: {
+  session: OutlookSession | null;
+  identity: OutlookConnectedIdentity | null;
+  status: OutlookConnectionStatus;
+}) {
+  const context = getCanonicalIntegrationContext();
+  if (!context) return;
+
+  await context.supabase.from("provider_integrations").upsert(buildCanonicalOutlookPayload({
+    orgId: context.orgId,
+    userId: context.userId,
+    session: input.session,
+    identity: input.identity,
+    status: input.status,
+  }), {
+    onConflict: "org_id,provider",
+  });
+}
+
+async function clearCanonicalOutlookIntegration() {
+  const context = getCanonicalIntegrationContext();
+  if (!context) return;
+
+  await context.supabase
+    .from("provider_integrations")
+    .upsert(
+      buildCanonicalOutlookPayload({
+        orgId: context.orgId,
+        userId: context.userId,
+        session: null,
+        identity: null,
+        status: "not_connected",
+      }),
+      { onConflict: "org_id,provider" }
+    );
+}
+
+function hydrateLocalOutlookStateFromCanonical(record: CanonicalOutlookIntegrationRecord) {
+  if (record.connection_status === "not_connected") {
+    clearStoredOutlookState();
+    return;
+  }
+
+  if (record.access_token) {
+    saveStoredOutlookSession({
+      accessToken: record.access_token,
+      refreshToken: record.refresh_token ?? undefined,
+      expiresAt: record.expires_at ? Date.parse(record.expires_at) : Date.now() + 3600 * 1000,
+      scope: record.scope ?? undefined,
+      obtainedAt: new Date().toISOString(),
+    });
+  }
+
+  if (record.identity) {
+    saveStoredOutlookIdentity(record.identity);
+  }
+}
+
+async function syncCanonicalOutlookIntegrationFromLocal() {
+  const context = getCanonicalIntegrationContext();
+  if (!context) return;
+
+  const canonicalRecord = await loadCanonicalOutlookIntegration();
+  if (canonicalRecord) return;
+
+  const session = loadStoredOutlookSession();
+  const identity = loadStoredOutlookIdentity();
+  const localState = getOutlookConnectionState();
+
+  if (!session && !identity && localState.status === "not_connected") return;
+
+  await persistCanonicalOutlookIntegration({
+    session,
+    identity,
+    status: localState.status,
+  });
+}
+
+async function ensureCanonicalOutlookIntegrationSynchronized() {
+  const context = getCanonicalIntegrationContext();
+  if (!context) return;
+
+  const canonicalRecord = await loadCanonicalOutlookIntegration();
+  if (canonicalRecord) {
+    hydrateLocalOutlookStateFromCanonical(canonicalRecord);
+    return;
+  }
+
+  await syncCanonicalOutlookIntegrationFromLocal();
+}
+
 function parseRecipients(raw: string[] | undefined) {
   return (raw ?? [])
     .map((value) => value.trim())
@@ -546,6 +736,11 @@ async function refreshStoredOutlookSession(requiredScopes: string[] = []) {
     ...payload,
     refresh_token: payload.refresh_token || refreshToken,
   });
+  await persistCanonicalOutlookIntegration({
+    session,
+    identity: loadStoredOutlookIdentity(),
+    status: loadStoredOutlookIdentity() ? "connected" : "reconnect_required",
+  });
   if (requiredScopes.length > 0 && !hasRequiredScopes(session, requiredScopes)) {
     return null;
   }
@@ -553,6 +748,7 @@ async function refreshStoredOutlookSession(requiredScopes: string[] = []) {
 }
 
 export async function resolveOutlookConnectionState(expectedEmail?: string, requiredScopes: string[] = []) {
+  await ensureCanonicalOutlookIntegrationSynchronized();
   let state = getOutlookConnectionState(expectedEmail);
   let refreshAttempted = false;
   let refreshSucceeded = false;
@@ -712,11 +908,17 @@ export async function connectOutlook(expectedEmail?: string) {
   const session = await connectOutlookInteractively();
   const identity = await fetchOutlookIdentity(session.accessToken);
   saveStoredOutlookIdentity(identity);
+  await persistCanonicalOutlookIntegration({
+    session,
+    identity,
+    status: "connected",
+  });
   return getOutlookConnectionState(expectedEmail || identity.normalizedEmail);
 }
 
 export function disconnectOutlook() {
   clearStoredOutlookState();
+  void clearCanonicalOutlookIntegration();
 }
 
 export async function createOutlookDraftFromEmailDraft(input: {
@@ -854,11 +1056,27 @@ export async function scheduleOutlookEmailFromEmailDraft(input: {
 export async function deleteOutlookMessage(input: {
   messageId: string;
   expectedEmail?: string;
+  requireDraft?: boolean;
 }): Promise<OutlookRecallResult> {
   const accessToken = await requireStoredOutlookAccessToken({
     requiredScopes: ["Mail.ReadWrite"],
     expectedEmail: input.expectedEmail,
   });
+
+  if (input.requireDraft) {
+    const existingState = await lookupOutlookMessageState({
+      messageId: input.messageId,
+      accessToken,
+    });
+
+    if (!existingState.exists) {
+      return "already_removed";
+    }
+
+    if (!existingState.isDraft) {
+      throw new Error("This email has already been sent and can't be recalled.");
+    }
+  }
 
   const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${input.messageId}`, {
     method: "DELETE",

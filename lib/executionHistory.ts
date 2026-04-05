@@ -1,4 +1,5 @@
 import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
+import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
 
@@ -120,22 +121,38 @@ function getLegacyDetails(value: Record<string, unknown>) {
   return isObject(value.details) ? value.details : {};
 }
 
+function isPastMeetingRecord(record: Pick<ExecutionHistoryRecord, "itemType" | "scheduledFor" | "endsAt">) {
+  if (record.itemType !== "meeting" && record.itemType !== "teams_meeting") return false;
+
+  const comparisonValue = record.endsAt || record.scheduledFor;
+  if (!comparisonValue) return false;
+
+  const parsed = new Date(comparisonValue);
+  if (Number.isNaN(parsed.getTime())) return false;
+
+  return parsed.getTime() < Date.now();
+}
+
 export function getExecutionHistoryRecallState(record: Pick<
   ExecutionHistoryRecord,
-  "provider" | "providerObjectId" | "providerObjectType" | "status" | "details"
+  "provider" | "providerObjectId" | "providerObjectType" | "status" | "details" | "itemType" | "scheduledFor" | "endsAt"
 >) {
   const action = typeof record.details.action === "string" ? record.details.action : "";
+  const scheduledEmailState = typeof record.details.scheduledEmailState === "string" ? record.details.scheduledEmailState : "";
+
+  if (isPastMeetingRecord(record)) {
+    return {
+      canRecall: false,
+      recallImplemented: true,
+      recallReason: "This meeting has already happened and can't be recalled from History.",
+    };
+  }
 
   if (record.status === "recalled" || record.status === "already_removed" || record.status === "already_canceled") {
     return {
       canRecall: false,
       recallImplemented: true,
-      recallReason:
-        record.status === "already_removed"
-          ? "Already removed."
-          : record.status === "already_canceled"
-            ? "Already canceled."
-            : "Already recalled.",
+      recallReason: record.status === "recalled" ? "Recalled." : "This item is no longer available.",
     };
   }
 
@@ -164,18 +181,25 @@ export function getExecutionHistoryRecallState(record: Pick<
   }
 
   if (record.providerObjectType === "message" && action === "email_scheduled") {
+    if (scheduledEmailState === "sent") {
+      return {
+        canRecall: false,
+        recallImplemented: true,
+        recallReason: "This email has already been sent and can't be recalled.",
+      };
+    }
     return {
-      canRecall: false,
-      recallImplemented: false,
-      recallReason: "Scheduled emails cannot be recalled from History.",
+      canRecall: true,
+      recallImplemented: true,
+      recallReason: null,
     };
   }
 
   if (record.providerObjectType === "message" && action === "email_sent") {
     return {
       canRecall: false,
-      recallImplemented: false,
-      recallReason: "Sent emails cannot be recalled from History.",
+      recallImplemented: true,
+      recallReason: "This email has already been sent and can't be recalled.",
     };
   }
 
@@ -192,6 +216,14 @@ export function getExecutionHistoryModifyState(record: Pick<
 >) {
   const action = typeof record.details.action === "string" ? record.details.action : "";
   const scheduledEmailState = typeof record.details.scheduledEmailState === "string" ? record.details.scheduledEmailState : "";
+
+  if (record.status === "recalled" || record.status === "already_removed" || record.status === "already_canceled") {
+    return {
+      canModify: false,
+      modifyImplemented: true,
+      modifyReason: "This item is no longer available.",
+    };
+  }
 
   if (record.provider !== "outlook" || !record.providerObjectId) {
     return {
@@ -222,7 +254,7 @@ export function getExecutionHistoryModifyState(record: Pick<
       return {
         canModify: false,
         modifyImplemented: true,
-        modifyReason: "This scheduled email has already been sent and can't be changed.",
+        modifyReason: "This email has already been sent and can't be modified.",
       };
     }
     return {
@@ -235,8 +267,8 @@ export function getExecutionHistoryModifyState(record: Pick<
   if (record.providerObjectType === "message" && action === "email_sent") {
     return {
       canModify: false,
-      modifyImplemented: false,
-      modifyReason: "Sent emails cannot be modified from History.",
+      modifyImplemented: true,
+      modifyReason: "This email has already been sent and can't be modified.",
     };
   }
 
@@ -350,9 +382,92 @@ function updateLocalExecutionHistoryRecord(
   return nextRecords.find((record) => record.id === recordId) ?? null;
 }
 
+function toSupabaseHistoryRow(record: ExecutionHistoryRecord) {
+  return {
+    id: record.id,
+    user_key: record.userKey,
+    execution_group_id: record.executionGroupId,
+    plan_name: record.planName,
+    item_type: record.itemType,
+    title: record.title,
+    subject: record.subject,
+    status: record.status,
+    path: record.path,
+    recipients: record.recipients,
+    attendees: record.attendees,
+    executed_at: record.executedAt,
+    outlook_web_link: record.outlookWebLink,
+    teams_join_link: record.teamsJoinLink,
+    fallback_export_kind: record.fallbackExportKind,
+    details: {
+      ...record.details,
+      provider: record.provider,
+      providerObjectId: record.providerObjectId,
+      providerObjectType: record.providerObjectType,
+      canRecall: record.canRecall,
+      canModify: record.canModify,
+      recallImplemented: record.recallImplemented,
+      modifyImplemented: record.modifyImplemented,
+      recallReason: record.recallReason,
+      modifyReason: record.modifyReason,
+      scheduledFor: record.scheduledFor,
+      endsAt: record.endsAt,
+      isAllDay: record.isAllDay,
+    },
+  };
+}
+
+async function loadLegacyRemoteExecutionHistory(userKey: string, limit: number) {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase || !userKey) return [];
+
+  const { data, error } = await supabase
+    .from("execution_history")
+    .select(
+      "id,user_key,execution_group_id,plan_name,item_type,title,subject,status,path,recipients,attendees,executed_at,outlook_web_link,teams_join_link,fallback_export_kind,details"
+    )
+    .eq("user_key", userKey)
+    .order("executed_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data) return [];
+  return data.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry));
+}
+
+async function migrateLegacyHistoryToCanonicalOrgHistory(input: {
+  orgId: string;
+  userKey: string;
+  localRecords: ExecutionHistoryRecord[];
+  limit: number;
+}) {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return [];
+
+  const legacyRemoteRecords = input.userKey ? await loadLegacyRemoteExecutionHistory(input.userKey, input.limit) : [];
+  const seedRecords = mergeExecutionHistoryRecords([...input.localRecords, ...legacyRemoteRecords]).slice(0, input.limit);
+  if (seedRecords.length === 0) return [];
+
+  const rows = seedRecords.map((record) => ({
+    org_id: input.orgId,
+    ...toSupabaseHistoryRow(record),
+  }));
+
+  const { error } = await supabase.from("org_execution_history").upsert(rows, {
+    onConflict: "id",
+  });
+
+  if (error) {
+    return [];
+  }
+
+  saveLocalExecutionHistory(seedRecords);
+  return seedRecords;
+}
+
 export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
   if (typeof window === "undefined") return;
 
+  const orgId = getCachedOrgContext()?.orgId ?? "";
   const userKey = getLocalUserKey();
   if (!userKey) return;
 
@@ -382,44 +497,22 @@ export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
   const supabase = getSupabaseBrowserClient();
   if (!supabase || !userKey) return;
 
-  await supabase.from("execution_history").insert({
-    id: record.id,
-    user_key: userKey,
-    execution_group_id: record.executionGroupId,
-    plan_name: record.planName,
-    item_type: record.itemType,
-    title: record.title,
-    subject: record.subject,
-    status: record.status,
-    path: record.path,
-    recipients: record.recipients,
-    attendees: record.attendees,
-    executed_at: record.executedAt,
-    outlook_web_link: record.outlookWebLink,
-    teams_join_link: record.teamsJoinLink,
-    fallback_export_kind: record.fallbackExportKind,
-    details: {
-      ...record.details,
-      provider: record.provider,
-      providerObjectId: record.providerObjectId,
-      providerObjectType: record.providerObjectType,
-      canRecall: record.canRecall,
-      canModify: record.canModify,
-      recallImplemented: record.recallImplemented,
-      modifyImplemented: record.modifyImplemented,
-      recallReason: record.recallReason,
-      modifyReason: record.modifyReason,
-      scheduledFor: record.scheduledFor,
-      endsAt: record.endsAt,
-      isAllDay: record.isAllDay,
-    },
-  });
+  if (orgId) {
+    await supabase.from("org_execution_history").insert({
+      org_id: orgId,
+      ...toSupabaseHistoryRow(record),
+    });
+    return;
+  }
+
+  await supabase.from("execution_history").insert(toSupabaseHistoryRow(record));
 }
 
 export async function updateExecutionHistoryRecord(
   recordId: string,
   updates: Partial<ExecutionHistoryRecord> & { details?: Record<string, unknown> }
 ) {
+  const orgId = getCachedOrgContext()?.orgId ?? "";
   const userKey = getLocalUserKey();
   if (!userKey) return null;
 
@@ -434,26 +527,30 @@ export async function updateExecutionHistoryRecord(
   const supabase = getSupabaseBrowserClient();
   if (!supabase) return nextRecord;
 
+  const updatePayload = {
+    title: nextRecord.title,
+    subject: nextRecord.subject,
+    status: nextRecord.status,
+    recipients: nextRecord.recipients,
+    attendees: nextRecord.attendees,
+    outlook_web_link: nextRecord.outlookWebLink,
+    teams_join_link: nextRecord.teamsJoinLink,
+    fallback_export_kind: nextRecord.fallbackExportKind,
+    details: toSupabaseHistoryRow(nextRecord).details,
+  };
+
+  if (orgId) {
+    await supabase
+      .from("org_execution_history")
+      .update(updatePayload)
+      .eq("id", recordId)
+      .eq("org_id", orgId);
+    return nextRecord;
+  }
+
   await supabase
     .from("execution_history")
-    .update({
-      status: nextRecord.status,
-      details: {
-        ...nextRecord.details,
-        provider: nextRecord.provider,
-        providerObjectId: nextRecord.providerObjectId,
-        providerObjectType: nextRecord.providerObjectType,
-        canRecall: nextRecord.canRecall,
-        canModify: nextRecord.canModify,
-        recallImplemented: nextRecord.recallImplemented,
-        modifyImplemented: nextRecord.modifyImplemented,
-        recallReason: nextRecord.recallReason,
-        modifyReason: nextRecord.modifyReason,
-        scheduledFor: nextRecord.scheduledFor,
-        endsAt: nextRecord.endsAt,
-        isAllDay: nextRecord.isAllDay,
-      },
-    })
+    .update(updatePayload)
     .eq("id", recordId)
     .eq("user_key", userKey);
 
@@ -462,6 +559,7 @@ export async function updateExecutionHistoryRecord(
 
 export async function listExecutionHistory(limit = 200) {
   const localRecords = loadLocalExecutionHistory();
+  const orgId = getCachedOrgContext()?.orgId ?? "";
   const userKey = getLocalUserKey();
   const matchingLocalRecords = localRecords.filter((record) => !record.userKey || record.userKey === userKey);
   console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory local load", {
@@ -474,7 +572,54 @@ export async function listExecutionHistory(limit = 200) {
 
   const supabase = getSupabaseBrowserClient();
 
-  if (!supabase || !userKey) return matchingLocalRecords.slice(0, limit);
+  if (!supabase) return matchingLocalRecords.slice(0, limit);
+
+  if (orgId) {
+    const { data, error } = await supabase
+      .from("org_execution_history")
+      .select(
+        "id,user_key,execution_group_id,plan_name,item_type,title,subject,status,path,recipients,attendees,executed_at,outlook_web_link,teams_join_link,fallback_export_kind,details"
+      )
+      .eq("org_id", orgId)
+      .order("executed_at", { ascending: false })
+      .limit(limit);
+
+    if (!error && data && data.length > 0) {
+      const canonicalRecords = data.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry)).slice(0, limit);
+      saveLocalExecutionHistory(canonicalRecords);
+      console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory canonical org load", {
+        orgId,
+        remoteCount: canonicalRecords.length,
+      });
+      return canonicalRecords;
+    }
+
+    if (!error && data && data.length === 0) {
+      const migrated = await migrateLegacyHistoryToCanonicalOrgHistory({
+        orgId,
+        userKey,
+        localRecords: matchingLocalRecords,
+        limit,
+      });
+      if (migrated.length > 0) {
+        console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory canonical org migration", {
+          orgId,
+          migratedCount: migrated.length,
+        });
+        return migrated;
+      }
+      return [];
+    }
+
+    console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory canonical org fallback", {
+      orgId,
+      hadError: Boolean(error),
+      localCount: matchingLocalRecords.length,
+    });
+    return matchingLocalRecords.slice(0, limit);
+  }
+
+  if (!userKey) return matchingLocalRecords.slice(0, limit);
 
   const { data, error } = await supabase
     .from("execution_history")

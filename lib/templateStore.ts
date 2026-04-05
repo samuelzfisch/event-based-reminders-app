@@ -1,5 +1,6 @@
 import { parseTemplateSnapshotFile } from "./templateSnapshots";
 import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
+import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
 import type { PlanType, WeekendRule } from "../types/plan";
@@ -330,13 +331,131 @@ export function mergeTemplateStates(
   };
 }
 
+function hasMeaningfulTemplateState(state: PersistedTemplateState | null, seedTemplates: PersistedPlanTemplate[]) {
+  if (!state) return false;
+  const normalizedCurrent = JSON.stringify(
+    state.templates.map((template) => ({
+      id: template.id,
+      name: template.name,
+      baseType: template.baseType,
+      templateMode: template.templateMode ?? null,
+      noEventDate: Boolean(template.noEventDate),
+      weekendRule: template.weekendRule,
+      anchors: template.anchors,
+      items: template.items,
+      isProtected: template.isProtected,
+      sortOrder: template.sortOrder,
+    }))
+  );
+  const normalizedSeed = JSON.stringify(
+    seedTemplates.map((template) => ({
+      id: template.id,
+      name: template.name,
+      baseType: template.baseType,
+      templateMode: template.templateMode ?? null,
+      noEventDate: Boolean(template.noEventDate),
+      weekendRule: template.weekendRule,
+      anchors: template.anchors,
+      items: template.items,
+      isProtected: template.isProtected,
+      sortOrder: template.sortOrder,
+    }))
+  );
+  return normalizedCurrent !== normalizedSeed || state.selectedTemplateId !== (seedTemplates[0]?.id ?? null);
+}
+
 export async function loadTemplateStateFromSupabase(seedTemplates: PersistedPlanTemplate[]) {
   if (!isSupabaseConfigured()) return null;
 
   const supabase = getSupabaseBrowserClient();
+  const orgId = getCachedOrgContext()?.orgId ?? "";
   const userKey = getLocalUserKey();
 
-  if (!supabase || !userKey) return null;
+  if (!supabase) return null;
+
+  const cachedState = loadCachedTemplateState(seedTemplates);
+
+  if (orgId) {
+    const { data, error } = await supabase
+      .from("org_plan_templates")
+      .select("id,name,base_type,template_mode,is_protected,weekend_rule,anchors,items,sort_order")
+      .eq("org_id", orgId)
+      .order("sort_order", { ascending: true });
+
+    if (!error && data && data.length > 0) {
+      const remoteTemplates = data
+        .map((row, index) =>
+          normalizePersistedTemplate(
+            {
+              id: row.id,
+              name: row.name,
+              baseType: row.base_type,
+              templateMode: row.template_mode,
+              isProtected: row.is_protected,
+              weekendRule: row.weekend_rule,
+              anchors: row.anchors,
+              items: row.items,
+              sortOrder: row.sort_order,
+            },
+            index
+          )
+        )
+        .filter((template): template is PersistedPlanTemplate => Boolean(template));
+
+      return mergeTemplateStates(seedTemplates, {
+        selectedTemplateId: cachedState.selectedTemplateId,
+        templates: remoteTemplates,
+      });
+    }
+
+    const legacyRemoteState = userKey
+      ? await (async () => {
+          const { data: legacyData, error: legacyError } = await supabase
+            .from("plan_templates")
+            .select("id,name,base_type,template_mode,is_protected,weekend_rule,anchors,items,sort_order")
+            .eq("user_key", userKey)
+            .order("sort_order", { ascending: true });
+
+          if (legacyError || !legacyData) return null;
+
+          const legacyTemplates = legacyData
+            .map((row, index) =>
+              normalizePersistedTemplate(
+                {
+                  id: row.id,
+                  name: row.name,
+                  baseType: row.base_type,
+                  templateMode: row.template_mode,
+                  isProtected: row.is_protected,
+                  weekendRule: row.weekend_rule,
+                  anchors: row.anchors,
+                  items: row.items,
+                  sortOrder: row.sort_order,
+                },
+                index
+              )
+            )
+            .filter((template): template is PersistedPlanTemplate => Boolean(template));
+
+          return mergeTemplateStates(seedTemplates, {
+            selectedTemplateId: cachedState.selectedTemplateId,
+            templates: legacyTemplates,
+          });
+        })()
+      : null;
+
+    const sourceState = hasMeaningfulTemplateState(cachedState, seedTemplates)
+      ? cachedState
+      : legacyRemoteState ?? cachedState;
+    if (sourceState) {
+      await saveTemplateStateToSupabase(sourceState);
+      return sourceState;
+    }
+
+    return mergeTemplateStates(seedTemplates, cachedState);
+  }
+
+  if (!userKey) return null;
 
   const { data, error } = await supabase
     .from("plan_templates")
@@ -366,7 +485,7 @@ export async function loadTemplateStateFromSupabase(seedTemplates: PersistedPlan
     .filter((template): template is PersistedPlanTemplate => Boolean(template));
 
   return mergeTemplateStates(seedTemplates, {
-    selectedTemplateId: loadCachedTemplateState(seedTemplates).selectedTemplateId,
+    selectedTemplateId: cachedState.selectedTemplateId,
     templates: remoteTemplates,
   });
 }
@@ -375,9 +494,50 @@ export async function saveTemplateStateToSupabase(state: PersistedTemplateState)
   if (!isSupabaseConfigured()) return;
 
   const supabase = getSupabaseBrowserClient();
+  const orgId = getCachedOrgContext()?.orgId ?? "";
   const userKey = getLocalUserKey();
 
-  if (!supabase || !userKey) return;
+  if (!supabase) return;
+
+  if (orgId) {
+    const rows = state.templates.map((template, index) => ({
+      id: template.id,
+      org_id: orgId,
+      name: template.name,
+      base_type: template.baseType,
+      template_mode: template.templateMode ?? null,
+      is_protected: template.isProtected,
+      weekend_rule: template.weekendRule,
+      anchors: serializeTemplateAnchors(template),
+      items: template.items,
+      sort_order: index,
+    }));
+
+    const { error: upsertError } = await supabase.from("org_plan_templates").upsert(rows, {
+      onConflict: "org_id,id",
+    });
+
+    if (upsertError) return;
+
+    const { data: existingRows, error: existingRowsError } = await supabase
+      .from("org_plan_templates")
+      .select("id")
+      .eq("org_id", orgId);
+
+    if (existingRowsError || !existingRows) return;
+
+    const currentIds = new Set(state.templates.map((template) => template.id));
+    const idsToDelete = existingRows
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string" && !currentIds.has(id));
+
+    if (idsToDelete.length === 0) return;
+
+    await supabase.from("org_plan_templates").delete().eq("org_id", orgId).in("id", idsToDelete);
+    return;
+  }
+
+  if (!userKey) return;
 
   const rows = state.templates.map((template, index) => ({
     id: template.id,

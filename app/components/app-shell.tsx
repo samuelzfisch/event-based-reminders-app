@@ -1,8 +1,13 @@
+"use client";
+
 import type { ReactNode } from "react";
 
 import { AppShellNav } from "./app-shell-nav";
+import { useAuthContext } from "./auth-provider";
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const { authEnabled, currentUser, signOut } = useAuthContext();
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto flex w-full max-w-7xl gap-6 px-4 py-8">
@@ -18,6 +23,19 @@ export function AppShell({ children }: { children: ReactNode }) {
                   </p>
                 </div>
                 <AppShellNav />
+                {authEnabled && currentUser ? (
+                  <div className="rounded-xl border bg-gray-50 p-3">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Signed In</div>
+                    <div className="mt-1 break-all text-sm font-medium text-gray-900">{currentUser.email || "Authenticated user"}</div>
+                    <button
+                      type="button"
+                      onClick={() => void signOut()}
+                      className="mt-3 inline-flex rounded-lg border px-3 py-2 text-sm font-medium text-gray-700 hover:bg-white"
+                    >
+                      Sign Out
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
