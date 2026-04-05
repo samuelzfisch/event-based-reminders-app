@@ -202,11 +202,7 @@ function formatTimelineItemType(record: ExecutionHistoryRecord) {
 }
 
 function getItemTypeDisplayLabel(record: ExecutionHistoryRecord) {
-  const primaryLabel = formatTimelineItemType(record);
-  if (record.itemType === "teams_meeting") {
-    return `${primaryLabel} • Teams`;
-  }
-  return primaryLabel;
+  return formatTimelineItemType(record);
 }
 
 function getHistoryAction(record: ExecutionHistoryRecord) {
@@ -439,10 +435,79 @@ function getCurrentEventTimeValue(planGroup: PlanExecutionGroup, snapshot: Execu
   return matchingEventDayRecord ? formatTimeInputValue(matchingEventDayRecord.scheduledFor || matchingEventDayRecord.executedAt) : "";
 }
 
-function getCurrentEventDisplay(planGroup: PlanExecutionGroup, snapshot: ExecutionPlanSnapshot | null) {
-  if (!snapshot?.anchorDate) return "Not available";
-  const eventTime = getCurrentEventTimeValue(planGroup, snapshot);
-  return `${formatDateOnly(`${snapshot.anchorDate}T00:00:00`)}${eventTime ? ` at ${formatTimeOnly(`${snapshot.anchorDate}T${eventTime}:00`)}` : ""}`;
+function isSentEmailRecord(record: ExecutionHistoryRecord) {
+  const action = getHistoryAction(record);
+  const scheduledEmailState = typeof record.details.scheduledEmailState === "string" ? record.details.scheduledEmailState : "";
+  return record.itemType === "email" && (action === "email_sent" || scheduledEmailState === "sent");
+}
+
+function getItemStatusLabels(record: ExecutionHistoryRecord) {
+  const labels: Array<{ text: string; tone: "success" | "warning" }> = [];
+
+  if (record.status === "modified") {
+    labels.push({ text: "Modified", tone: "success" });
+  }
+
+  if (record.status === "recalled") {
+    labels.push({ text: "Recalled", tone: "success" });
+  }
+
+  if (isSentEmailRecord(record)) {
+    labels.push({ text: "Sent", tone: "warning" });
+    labels.push({ text: "Cannot recall — already sent", tone: "warning" });
+    labels.push({ text: "Cannot modify — already sent", tone: "warning" });
+  }
+
+  return labels;
+}
+
+function getPlanStatusLabels(planGroup: PlanExecutionGroup) {
+  const labels: Array<{ text: string; tone: "success" | "warning" }> = [];
+  const hasRecallSuccess = planGroup.items.some((item) => item.status === "recalled");
+  const hasRecallFailures = planGroup.items.some((item) => item.status === "recall_failed" && !isSentEmailRecord(item));
+  if (planGroup.items.some((item) => item.status === "modified")) {
+    labels.push({ text: "Event updated", tone: "success" });
+  }
+  if (hasRecallSuccess && hasRecallFailures) {
+    labels.push({ text: "Partially recalled", tone: "warning" });
+  } else if (hasRecallSuccess) {
+    labels.push({ text: "Event recalled", tone: "success" });
+  }
+  if (planGroup.items.some((item) => isSentEmailRecord(item))) {
+    labels.push({ text: "Sent", tone: "warning" });
+  }
+  return labels;
+}
+
+function getCollapsedPlanStatusLabel(planStatusLabels: Array<{ text: string; tone: "success" | "warning" }>) {
+  if (planStatusLabels.some((label) => label.text === "Partially recalled")) return "Partially recalled";
+  if (planStatusLabels.some((label) => label.text === "Event recalled")) return "Recalled";
+  if (planStatusLabels.some((label) => label.text === "Event updated")) return "Modified";
+  if (planStatusLabels.some((label) => label.text === "Sent")) return "Sent";
+  return null;
+}
+
+function isUnavailableHistoryItem(record: ExecutionHistoryRecord) {
+  return record.status === "recalled" || record.status === "already_removed" || record.status === "already_canceled";
+}
+
+function shouldShowPlanMessage(
+  planMessage: { tone: "success" | "warning" | "error"; text: string; helperText?: string } | null,
+  collapsedStatusLabel: string | null
+) {
+  if (!planMessage) return false;
+  if (planMessage.tone === "error") return true;
+  if (planMessage.text === "Nothing to recall.") return true;
+  return !collapsedStatusLabel;
+}
+
+function shouldShowPlanHelperText(
+  planMessage: { tone: "success" | "warning" | "error"; text: string; helperText?: string } | null,
+  collapsedStatusLabel: string | null
+) {
+  if (!planMessage?.helperText) return false;
+  if (planMessage.text === "Nothing to recall.") return true;
+  return Boolean(collapsedStatusLabel);
 }
 
 function buildUpdatedSnapshotAnchors(snapshot: ExecutionPlanSnapshot, nextEventDate: string, nextEventTime?: string) {
@@ -489,13 +554,13 @@ function buildTemplateItemsFromSnapshot(snapshot: ExecutionPlanSnapshot): Templa
   }));
 }
 
-function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: string, nextEventTime?: string) {
+function buildRescheduledPlan(snapshot: ExecutionPlanSnapshot, nextEventDate: string, nextEventTime?: string, weekendRule?: WeekendRule) {
   const templateItems = buildTemplateItemsFromSnapshot(snapshot);
   const plan = createPlan({
     name: snapshot.eventName || snapshot.templateName || "Untitled plan",
     type: snapshot.templateBaseType,
     anchorDate: nextEventDate,
-    weekendRule: snapshot.weekendRule,
+    weekendRule: weekendRule ?? snapshot.weekendRule,
     template: templateItems,
   });
   const anchorMap = buildAnchorMap(buildUpdatedSnapshotAnchors(snapshot, nextEventDate, nextEventTime));
@@ -545,14 +610,19 @@ function getComputedPlanItemTiming(item: PlanItem) {
   };
 }
 
-function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: string, nextEventTime?: string): { snapshot: ExecutionPlanSnapshot | null; items: PlanReschedulePreviewItem[] } {
+function getPlanModifyPreview(
+  planGroup: PlanExecutionGroup,
+  nextEventDate: string,
+  nextEventTime?: string,
+  weekendRule?: WeekendRule
+): { snapshot: ExecutionPlanSnapshot | null; items: PlanReschedulePreviewItem[] } {
   const firstRecord = planGroup.items[0];
   const snapshot = firstRecord ? getExecutionPlanSnapshot(firstRecord) : null;
   if (!snapshot || !nextEventDate) {
     return { snapshot, items: [] };
   }
 
-  const rescheduledPlan = buildRescheduledPlan(snapshot, nextEventDate, nextEventTime);
+  const rescheduledPlan = buildRescheduledPlan(snapshot, nextEventDate, nextEventTime, weekendRule);
   const nextItemsByRowId = new Map(rescheduledPlan.items.map((item) => [item.id, item]));
 
   const items = planGroup.items.map((record) => {
@@ -577,8 +647,8 @@ function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: stri
       };
     }
 
-    if ((record.itemType === "meeting" || record.itemType === "teams_meeting") && record.endsAt) {
-      const meetingEnd = new Date(record.endsAt);
+    if (record.itemType === "meeting" || record.itemType === "teams_meeting") {
+      const meetingEnd = new Date(record.endsAt || record.scheduledFor || "");
       if (!Number.isNaN(meetingEnd.getTime()) && meetingEnd.getTime() < Date.now()) {
         return {
           record,
@@ -597,11 +667,26 @@ function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: stri
         record,
         nextItem,
         action: "Locked" as const,
-        reason: "Already sent.",
+        reason: "This email has already been sent, so it will stay as-is.",
         oldDateTime,
         newDateTime,
         isOverridden: false,
       };
+    }
+
+    if (record.itemType === "email" && actionName === "email_scheduled") {
+      const scheduledEmailState = typeof record.details.scheduledEmailState === "string" ? record.details.scheduledEmailState : "";
+      if (scheduledEmailState === "sent") {
+        return {
+          record,
+          nextItem,
+          action: "Locked" as const,
+          reason: "This email has already been sent, so it will stay as-is.",
+          oldDateTime,
+          newDateTime: oldDateTime,
+          isOverridden: false,
+        };
+      }
     }
 
     if (!nextItem) {
@@ -644,7 +729,7 @@ function getPlanModifyPreview(planGroup: PlanExecutionGroup, nextEventDate: stri
         record,
         nextItem,
         action: "Replace" as const,
-        reason: "Will recreate this reminder on the new timeline.",
+        reason: "Reminder will be moved to the new scheduled date.",
         oldDateTime,
         newDateTime,
         isOverridden: false,
@@ -700,7 +785,7 @@ function getPlanModifyEligibility(planGroup: PlanExecutionGroup) {
     };
   }
 
-  const baselinePreview = getPlanModifyPreview(planGroup, snapshot.anchorDate).items;
+  const baselinePreview = getPlanModifyPreview(planGroup, snapshot.anchorDate, getCurrentEventTimeValue(planGroup, snapshot), snapshot.weekendRule).items;
   const canModifyPlan = baselinePreview.some((item) => item.action === "Update" || item.action === "Replace" || item.action === "Unchanged");
 
   return {
@@ -722,11 +807,12 @@ export default function HistoryPage() {
   const [modifyingPlans, setModifyingPlans] = useState<Record<string, boolean>>({});
   const [planModifyDates, setPlanModifyDates] = useState<Record<string, string>>({});
   const [planModifyTimes, setPlanModifyTimes] = useState<Record<string, string>>({});
+  const [planModifyWeekendRules, setPlanModifyWeekendRules] = useState<Record<string, WeekendRule>>({});
   const [pendingPlanRecalls, setPendingPlanRecalls] = useState<Record<string, boolean>>({});
   const [pendingItemRecalls, setPendingItemRecalls] = useState<Record<string, boolean>>({});
   const [pendingPlanModifies, setPendingPlanModifies] = useState<Record<string, boolean>>({});
-  const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string }>>({});
-  const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error"; text: string }>>({});
+  const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string; helperText?: string }>>({});
+  const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error" | "neutral"; text: string }>>({});
   const itemMenuRef = useRef<HTMLDivElement | null>(null);
   const planMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -848,6 +934,10 @@ export default function HistoryPage() {
         ...current,
         [planGroup.key]: current[planGroup.key] ?? getCurrentEventTimeValue(planGroup, snapshot),
       }));
+      setPlanModifyWeekendRules((current) => ({
+        ...current,
+        [planGroup.key]: current[planGroup.key] ?? snapshot?.weekendRule ?? "prior_business_day",
+      }));
     }
   }
 
@@ -860,6 +950,7 @@ export default function HistoryPage() {
     if (record.providerObjectType === "message") {
       return await deleteOutlookMessage({
         messageId: record.providerObjectId,
+        requireDraft: getHistoryAction(record) === "email_scheduled",
       });
     } else if (record.providerObjectType === "event") {
       return await deleteOutlookCalendarEvent({
@@ -871,14 +962,33 @@ export default function HistoryPage() {
     }
   }
 
+  function isAlreadySentEmailError(error: unknown) {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error || "").toLowerCase();
+    return (
+      message.includes("already been sent") ||
+      message.includes("can't be recalled") ||
+      message.includes("can't be changed")
+    );
+  }
+
+  async function persistScheduledEmailSentState(record: ExecutionHistoryRecord, error: unknown) {
+    await updateExecutionHistoryRecord(record.id, {
+      details: {
+        scheduledEmailState: "sent",
+        recallError: error instanceof Error ? error.message : null,
+        planRescheduleError: error instanceof Error ? error.message : null,
+      },
+    });
+  }
+
   function getRecallStatusMessage(result: OutlookRecallResult) {
     if (result === "already_removed") {
-      return { status: "already_removed" as const, text: "Already removed." };
+      return { status: "already_removed" as const, text: "This item is no longer available.", tone: "neutral" as const };
     }
     if (result === "already_canceled") {
-      return { status: "already_canceled" as const, text: "Already canceled." };
+      return { status: "already_canceled" as const, text: "This item is no longer available.", tone: "neutral" as const };
     }
-    return { status: "recalled" as const, text: "Recalled." };
+    return { status: "recalled" as const, text: "Recalled.", tone: "success" as const };
   }
 
   async function handleRecallItem(record: ExecutionHistoryRecord) {
@@ -906,9 +1016,17 @@ export default function HistoryPage() {
       });
       setItemMessages((current) => ({
         ...current,
-        [record.id]: { tone: "success", text: statusMessage.text },
+        [record.id]: { tone: statusMessage.tone, text: statusMessage.text },
       }));
     } catch (error) {
+      if (record.itemType === "email" && getHistoryAction(record) === "email_scheduled" && isAlreadySentEmailError(error)) {
+        await persistScheduledEmailSentState(record, error);
+        setItemMessages((current) => ({
+          ...current,
+          [record.id]: { tone: "neutral", text: "This email has already been sent and can't be recalled." },
+        }));
+        return;
+      }
       const message = error instanceof Error ? error.message : "Recall failed.";
       await updateExecutionHistoryRecord(record.id, {
         status: "recall_failed",
@@ -944,7 +1062,7 @@ export default function HistoryPage() {
     });
 
     let successCount = 0;
-    let alreadyHandledCount = 0;
+    let unavailableCount = 0;
     let failedCount = 0;
 
     for (const item of recallableItems) {
@@ -961,9 +1079,13 @@ export default function HistoryPage() {
         if (result === "recalled") {
           successCount += 1;
         } else {
-          alreadyHandledCount += 1;
+          unavailableCount += 1;
         }
       } catch (error) {
+        if (item.itemType === "email" && getHistoryAction(item) === "email_scheduled" && isAlreadySentEmailError(error)) {
+          await persistScheduledEmailSentState(item, error);
+          continue;
+        }
         failedCount += 1;
         await updateExecutionHistoryRecord(item.id, {
           status: "recall_failed",
@@ -978,20 +1100,23 @@ export default function HistoryPage() {
     setPlanMessages((current) => ({
       ...current,
       [planGroup.key]:
-        failedCount === 0
+        failedCount === 0 && successCount === 0 && unavailableCount > 0
+          ? {
+              tone: "warning",
+              text: "Nothing to recall.",
+              helperText: "Some items were already unavailable.",
+            }
+          : failedCount === 0
           ? {
               tone: "success",
-              text:
-                alreadyHandledCount > 0 && successCount === 0
-                  ? "Everything was already gone."
-                  : alreadyHandledCount > 0
-                    ? `Event recalled. ${successCount} removed, ${alreadyHandledCount} already gone.`
-                    : "Event recalled.",
+              text: "Event recalled.",
+              helperText: unavailableCount > 0 ? "Some items were already unavailable." : undefined,
             }
-          : successCount > 0 || alreadyHandledCount > 0
+          : successCount > 0
             ? {
                 tone: "warning",
-                text: `Partially recalled. ${successCount + alreadyHandledCount} handled, ${failedCount} failed.`,
+                text: "Partially recalled.",
+                helperText: unavailableCount > 0 ? "Some items were already unavailable." : undefined,
               }
             : { tone: "error", text: "Recall failed." },
     }));
@@ -1000,7 +1125,8 @@ export default function HistoryPage() {
   async function handleModifyPlan(planGroup: PlanExecutionGroup) {
     const nextEventDate = planModifyDates[planGroup.key] ?? "";
     const nextEventTime = planModifyTimes[planGroup.key] ?? "";
-    const { snapshot, items } = getPlanModifyPreview(planGroup, nextEventDate, nextEventTime);
+    const nextWeekendRule = planModifyWeekendRules[planGroup.key] ?? "prior_business_day";
+    const { snapshot, items } = getPlanModifyPreview(planGroup, nextEventDate, nextEventTime, nextWeekendRule);
     if (!snapshot || !nextEventDate) return;
 
     setPendingPlanModifies((current) => ({ ...current, [planGroup.key]: true }));
@@ -1029,6 +1155,7 @@ export default function HistoryPage() {
           fromEventDate: snapshot.anchorDate,
           toEventDate: nextEventDate,
           toEventTime: nextEventTime || null,
+          weekendRule: nextWeekendRule,
           action,
         };
 
@@ -1196,6 +1323,9 @@ export default function HistoryPage() {
         skippedCount += 1;
       } catch (error) {
         failedCount += 1;
+        if (record.itemType === "email" && getHistoryAction(record) === "email_scheduled" && isAlreadySentEmailError(error)) {
+          await persistScheduledEmailSentState(record, error);
+        }
         await updateExecutionHistoryRecord(record.id, {
           details: {
             planRescheduleError: error instanceof Error ? error.message : "Could not update this item.",
@@ -1211,15 +1341,12 @@ export default function HistoryPage() {
         failedCount === 0 && updatedCount + replacedCount > 0
           ? {
               tone: skippedCount > 0 ? "warning" : "success",
-              text:
-                skippedCount > 0
-                  ? `Partially updated. ${updatedCount} updated, ${replacedCount} replaced, ${skippedCount} skipped.`
-                  : `Event updated. ${updatedCount} updated, ${replacedCount} replaced.`,
+              text: "Event updated.",
             }
           : updatedCount + replacedCount > 0
             ? {
                 tone: "warning",
-                text: `Partially updated. ${updatedCount} updated, ${replacedCount} replaced, ${skippedCount} skipped, ${failedCount} failed.`,
+                text: "Event updated.",
               }
             : {
                 tone: failedCount > 0 ? "error" : "warning",
@@ -1246,7 +1373,7 @@ export default function HistoryPage() {
           ) : groupedRecords.length === 0 ? (
             <div className="space-y-3 rounded-2xl border border-dashed bg-gray-50 p-6 text-sm text-gray-600">
               <p>No execution history yet.</p>
-              <p>History now persists locally as well as to Supabase when configured, so newly exported plans should show up here right away.</p>
+              <p>Newly exported plans will show up here right away.</p>
               <Link href="/plans" className="inline-flex rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700">
                 Go to Plans
               </Link>
@@ -1273,22 +1400,44 @@ export default function HistoryPage() {
                           const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
                           const isPlanModifying = exposeModifyUI && (modifyingPlans[planGroup.key] ?? false);
                           const { canModifyPlan, snapshot: planSnapshot } = getPlanModifyEligibility(planGroup);
+                          const planStatusLabels = getPlanStatusLabels(planGroup);
                           const planModifyDate = planModifyDates[planGroup.key] ?? planSnapshot?.anchorDate ?? "";
                           const planModifyTime = planModifyTimes[planGroup.key] ?? "";
-                          const planModifyPreview = planModifyDate ? getPlanModifyPreview(planGroup, planModifyDate, planModifyTime) : { snapshot: planSnapshot, items: [] };
+                          const planModifyWeekendRule = planModifyWeekendRules[planGroup.key] ?? planSnapshot?.weekendRule ?? "prior_business_day";
+                          const planModifyPreview = planModifyDate
+                            ? getPlanModifyPreview(planGroup, planModifyDate, planModifyTime, planModifyWeekendRule)
+                            : { snapshot: planSnapshot, items: [] };
                           const recallablePlanItems = planGroup.items.filter((item) => {
                             const recallState = getExecutionHistoryRecallState(item);
                             return recallState.canRecall && recallState.recallImplemented;
                           });
                           const planMessage = planMessages[planGroup.key] ?? null;
+                          const collapsedStatusLabel = getCollapsedPlanStatusLabel(planStatusLabels);
                           return (
                             <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
                               <div className="flex items-center justify-between gap-4 px-5 py-4">
                                 <div className="min-w-0">
-                                  <div className="text-lg font-semibold text-gray-900">Plan Name: {planGroup.planName}</div>
+                                  <div className="text-lg font-semibold text-gray-900">Event Name: {planGroup.planName}</div>
                                   <div className="mt-1 text-sm text-gray-600">{planGroup.items.length} event{planGroup.items.length === 1 ? "" : "s"}</div>
-                                  <div className="mt-1 text-sm text-gray-600">Created at: {formatDateTime(planGroup.latestExecutedAt)}</div>
-                                  {planMessage ? (
+                                  <div className="mt-1 text-sm text-gray-600">
+                                    Created at: {formatDateTime(planGroup.latestExecutedAt)}
+                                    {collapsedStatusLabel ? ` (${collapsedStatusLabel})` : ""}
+                                  </div>
+                                  {planStatusLabels.length > 0 && !collapsedStatusLabel ? (
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      {planStatusLabels.map((label) => (
+                                        <span
+                                          key={`${planGroup.key}:${label.text}`}
+                                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                                            label.tone === "success" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"
+                                          }`}
+                                        >
+                                          {label.text}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  {shouldShowPlanMessage(planMessage, collapsedStatusLabel) ? (
                                     <div
                                       className={`mt-2 text-sm ${
                                         planMessage.tone === "success"
@@ -1300,6 +1449,9 @@ export default function HistoryPage() {
                                     >
                                       {planMessage.text}
                                     </div>
+                                  ) : null}
+                                  {shouldShowPlanHelperText(planMessage, collapsedStatusLabel) ? (
+                                    <div className="mt-1 text-xs text-gray-500">{planMessage.helperText}</div>
                                   ) : null}
                                 </div>
                                 <div className="flex items-center gap-3">
@@ -1354,8 +1506,23 @@ export default function HistoryPage() {
 
                               {isPlanModifying ? (
                                 <div className="border-t bg-gray-50/70 px-5 py-4">
-                                  <div className="mb-4 text-sm text-gray-700">Current Event: {getCurrentEventDisplay(planGroup, planSnapshot)}</div>
-                                  <div className="grid gap-4 md:grid-cols-[220px_220px_auto] md:items-end">
+                                  <div className="mb-4 grid gap-3 md:grid-cols-2">
+                                    <div>
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Date</div>
+                                      <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
+                                        {planSnapshot?.anchorDate ? formatDateOnly(`${planSnapshot.anchorDate}T00:00:00`) : "Not available"}
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Time</div>
+                                      <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
+                                        {planSnapshot?.anchorDate && getCurrentEventTimeValue(planGroup, planSnapshot)
+                                          ? formatTimeOnly(`${planSnapshot.anchorDate}T${getCurrentEventTimeValue(planGroup, planSnapshot)}:00`)
+                                          : "Not available"}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="grid gap-4 md:grid-cols-[220px_220px_minmax(0,260px)] md:items-end">
                                     <div>
                                       <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Date</label>
                                       <input
@@ -1374,24 +1541,24 @@ export default function HistoryPage() {
                                         className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
                                       />
                                     </div>
-                                    <div className="flex justify-end gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setModifyingPlans((current) => ({ ...current, [planGroup.key]: false }))}
-                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                                    <div>
+                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">Weekend Handling</label>
+                                      <select
+                                        value={planModifyWeekendRule}
+                                        onChange={(event) =>
+                                          setPlanModifyWeekendRules((current) => ({
+                                            ...current,
+                                            [planGroup.key]: event.target.value as WeekendRule,
+                                          }))
+                                        }
+                                        className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
                                       >
-                                        Close
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => void handleModifyPlan(planGroup)}
-                                        disabled={!planModifyDate || planModifyPreview.items.every((item) => item.action === "Unchanged" || item.action === "Locked" || item.action === "Unsupported")}
-                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
-                                      >
-                                        Apply Changes
-                                      </button>
+                                        <option value="prior_business_day">Adjust to prior business day (Fri)</option>
+                                        <option value="none">Allow weekends (no adjustment)</option>
+                                      </select>
                                     </div>
                                   </div>
+                                  <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">Preview</div>
                                   <div className="mt-4 overflow-hidden rounded-xl border bg-white">
                                     <div className="hidden grid-cols-[110px_minmax(0,1.35fr)_280px] gap-x-3 border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-600 md:grid">
                                       <div>Type</div>
@@ -1427,6 +1594,29 @@ export default function HistoryPage() {
                                       })}
                                     </div>
                                   </div>
+                                  <div className="mt-4">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Actions</div>
+                                    <div className="mt-2 flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setModifyingPlans((current) => ({ ...current, [planGroup.key]: false }))}
+                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                                      >
+                                        Close
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleModifyPlan(planGroup)}
+                                        disabled={
+                                          !planModifyDate ||
+                                          planModifyPreview.items.every((item) => item.action === "Unchanged" || item.action === "Locked" || item.action === "Unsupported")
+                                        }
+                                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                                      >
+                                        Apply Changes
+                                      </button>
+                                    </div>
+                                  </div>
                                 </div>
                               ) : null}
 
@@ -1436,6 +1626,7 @@ export default function HistoryPage() {
                                     {planGroup.items.map((item) => {
                                       const itemTypeLabel = formatTimelineItemType(item);
                                       const itemTypeDisplayLabel = getItemTypeDisplayLabel(item);
+                                      const itemStatusLabels = getItemStatusLabels(item);
                                       const itemDateTime = item.scheduledFor || item.executedAt;
                                       const isItemExpanded = expandedItems[item.id] ?? false;
                                       const reminderBody = getHistoryBody(item);
@@ -1453,12 +1644,27 @@ export default function HistoryPage() {
                                               <div className="flex min-h-[72px] items-center rounded-xl border bg-white px-4 py-3 text-base text-gray-900">
                                                 <div className="min-w-0 truncate">{item.subject || item.title || "Untitled item"}</div>
                                               </div>
-                                              {item.status === "modified" ? <div className="mt-2 text-xs text-green-700 md:text-center">Modified</div> : null}
-                                              {item.status === "recalled" ? <div className="mt-2 text-xs text-green-700 md:text-center">Recalled</div> : null}
-                                              {item.status === "already_removed" ? <div className="mt-2 text-xs text-green-700 md:text-center">Already removed</div> : null}
-                                              {item.status === "already_canceled" ? <div className="mt-2 text-xs text-green-700 md:text-center">Already canceled</div> : null}
+                                              {itemStatusLabels.length > 0 ? (
+                                                <div className="mt-2 flex flex-wrap gap-2 md:justify-center">
+                                                  {itemStatusLabels.map((label) => (
+                                                    <span
+                                                      key={`${item.id}:${label.text}`}
+                                                      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                                                        label.tone === "success" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"
+                                                      }`}
+                                                    >
+                                                      {label.text}
+                                                    </span>
+                                                  ))}
+                                                </div>
+                                              ) : null}
+                                              {item.status === "already_removed" || item.status === "already_canceled" ? (
+                                                <div className="mt-2 text-xs text-gray-600 md:text-center">This item is no longer available.</div>
+                                              ) : null}
                                               {item.status === "modify_failed" ? <div className="mt-2 text-xs text-red-700 md:text-center">Edit failed</div> : null}
-                                              {item.status === "recall_failed" ? <div className="mt-2 text-xs text-red-700 md:text-center">Recall failed</div> : null}
+                                              {item.status === "recall_failed" && !isSentEmailRecord(item) ? (
+                                                <div className="mt-2 text-xs text-red-700 md:text-center">Recall failed</div>
+                                              ) : null}
                                             </div>
                                             <div className="md:text-center">
                                               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Scheduled For</div>
@@ -1496,7 +1702,7 @@ export default function HistoryPage() {
                                                   >
                                                     {isItemExpanded ? "Hide Full" : "View Full"}
                                                   </button>
-                                                  {item.outlookWebLink ? (
+                                                  {item.outlookWebLink && !isUnavailableHistoryItem(item) ? (
                                                     <>
                                                       <div className="my-1 border-t-2 border-double border-gray-200" />
                                                       <button
@@ -1535,11 +1741,23 @@ export default function HistoryPage() {
                                           {isItemExpanded ? (
                                             <div className="mt-4 space-y-4 rounded-xl border bg-gray-50 p-4">
                                               {itemMessage ? (
-                                                <div className={`text-sm ${itemMessage.tone === "success" ? "text-green-700" : "text-red-700"}`}>
+                                                <div
+                                                  className={`text-sm ${
+                                                    itemMessage.tone === "success"
+                                                      ? "text-green-700"
+                                                      : itemMessage.tone === "neutral"
+                                                        ? "text-gray-600"
+                                                        : "text-red-700"
+                                                  }`}
+                                                >
                                                   {itemMessage.text}
                                                 </div>
                                               ) : null}
-                                              {!recallState.canRecall && recallState.recallReason ? (
+                                              {!recallState.canRecall &&
+                                              recallState.recallReason &&
+                                              item.status !== "recalled" &&
+                                              item.status !== "already_removed" &&
+                                              item.status !== "already_canceled" ? (
                                                 <div className="text-sm text-gray-600">{recallState.recallReason}</div>
                                               ) : null}
                                               <div className="text-sm text-gray-700">Event Name: {planGroup.planName}</div>

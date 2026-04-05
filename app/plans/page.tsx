@@ -6,7 +6,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   APP_SETTINGS_UPDATED_EVENT,
   areAppSettingsEqual,
-  DEFAULT_APP_SETTINGS,
   hydrateAppSettingsFromSupabase,
   loadAppSettings,
   type AppSettings,
@@ -974,12 +973,12 @@ function getBuilderEmailModeMessage(mode: EmailHandlingMode) {
 
 function getPreviewEmailModeMessage(mode: EmailHandlingMode) {
   if (mode === "schedule") {
-    return "*** Emails will be scheduled to send at the specified date and time. ***";
+    return "Emails will be scheduled to send at the specified date and time.";
   }
   if (mode === "send") {
-    return "*** Emails will be sent immediately ***";
+    return "Emails will be sent immediately.";
   }
-  return "*** Emails will be saved to Drafts ***";
+  return "Emails will be saved to Drafts.";
 }
 
 function getPreviewEmailActionLabel(mode: EmailHandlingMode) {
@@ -1075,7 +1074,7 @@ function areOutlookConnectionStatesEqual(left: OutlookConnectionState | null, ri
 }
 
 export default function PlansPage() {
-  const initialSettings = DEFAULT_APP_SETTINGS;
+  const initialSettings = loadAppSettings();
   const initialSeedTemplates = buildSeedTemplates(
     initialSettings.defaultReminderTime,
     initialSettings.defaultPressReleaseTime
@@ -1483,6 +1482,59 @@ export default function PlansPage() {
     return true;
   }
 
+  function getPastScheduledItemsMessage(itemIds?: string[]) {
+    const now = Date.now();
+    const scopedItems = itemIds ? previewPlan.items.filter((item) => itemIds.includes(item.id)) : previewPlan.items;
+
+    const pastItems = scopedItems
+      .map((item) => {
+        const rowKind = classifyPlanRow(item);
+
+        if (rowKind === "reminder") {
+          const dueDate = getEffectivePreviewItemDate(item);
+          const reminderTime = getUsableReminderTime(item.reminderTime, anchorMap);
+          const scheduledAtISO = dueDate && reminderTime ? buildLocalDateTimeIso(dueDate, reminderTime) : null;
+          const scheduledAt = scheduledAtISO ? new Date(scheduledAtISO) : null;
+          if (scheduledAt && !Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() < now) {
+            return `${item.customTitle ?? item.title ?? "Untitled reminder"} (reminder)`;
+          }
+        }
+
+        if (rowKind === "meeting") {
+          const timing = buildPreviewItemGraphTiming(item);
+          const scheduledAt = new Date(timing.startISO);
+          if (!Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() < now) {
+            return `${item.customTitle ?? item.title ?? "Untitled meeting"} (meeting)`;
+          }
+        }
+
+        if (rowKind === "email" && appSettings.emailHandlingMode === "schedule") {
+          const scheduledSendISO = getEmailScheduledSendISO(item);
+          if (scheduledSendISO) {
+            const scheduledAt = new Date(scheduledSendISO);
+            if (!Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() < now) {
+              return `${(normalizeEmailDraft(item.emailDraft).subject || item.customTitle || item.title || "Untitled email").trim()} (email)`;
+            }
+          }
+        }
+
+        return null;
+      })
+      .filter((entry): entry is string => Boolean(entry));
+
+    if (pastItems.length === 0) return null;
+    return `This item is scheduled in the past.\n\nPlease update the date/time before continuing.\n\n${pastItems.join("\n")}`;
+  }
+
+  function warnIfPastScheduledItems(options?: { usePopup?: boolean; itemIds?: string[] }) {
+    const message = getPastScheduledItemsMessage(options?.itemIds);
+    if (!message) return false;
+    if (options?.usePopup && typeof window !== "undefined") {
+      window.alert(message);
+    }
+    return true;
+  }
+
   function validateMeetingRowsForExport(itemIds?: string[], options?: { usePopup?: boolean }) {
     const message = getMeetingValidationMessage(itemIds);
     if (!message) return false;
@@ -1490,6 +1542,77 @@ export default function PlansPage() {
       window.alert(message);
     }
     return true;
+  }
+
+  function getEmailValidationMessage(itemIds?: string[]) {
+    const scopedItems = itemIds ? previewPlan.items.filter((item) => itemIds.includes(item.id)) : previewPlan.items;
+    const missingTimeRows: string[] = [];
+    const missingRecipientRows: string[] = [];
+
+    for (const item of scopedItems) {
+      if (classifyPlanRow(item) !== "email") continue;
+
+      const draft = normalizeEmailDraft(item.emailDraft);
+      const rowName = draft.subject.trim() || item.customTitle || item.title || "Untitled email";
+
+      if ((appSettings.emailHandlingMode === "send" || appSettings.emailHandlingMode === "schedule") && draft.to.length === 0) {
+        missingRecipientRows.push(rowName);
+      }
+
+      if (appSettings.emailHandlingMode === "schedule" && !getEmailScheduledSendISO(item)) {
+        missingTimeRows.push(rowName);
+      }
+    }
+
+    const sections: string[] = [];
+
+    if (missingTimeRows.length > 0) {
+      sections.push("Scheduled emails require a send time.");
+      sections.push("Please add a time before continuing.");
+      sections.push("");
+      sections.push(...missingTimeRows.map((entry) => `- ${entry}`));
+    }
+
+    if (missingRecipientRows.length > 0) {
+      if (sections.length > 0) sections.push("");
+      sections.push("Please add at least one recipient before continuing.");
+      sections.push("");
+      sections.push(...missingRecipientRows.map((entry) => `- ${entry}`));
+    }
+
+    return sections.length > 0 ? sections.join("\n") : null;
+  }
+
+  function validateEmailRowsForExport(itemIds?: string[], options?: { usePopup?: boolean }) {
+    const message = getEmailValidationMessage(itemIds);
+    if (!message) return false;
+    if (options?.usePopup && typeof window !== "undefined") {
+      window.alert(message);
+    }
+    return true;
+  }
+
+  function getUserFixableEmailExecutionMessage(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    const normalized = message.toLowerCase();
+
+    if (normalized.includes("scheduled emails require a send time") || normalized.includes("add a time before scheduling this email")) {
+      return "Scheduled emails require a send time.\n\nPlease add a time before continuing.";
+    }
+
+    if (
+      normalized.includes("please add at least one recipient") ||
+      normalized.includes("recipient") ||
+      normalized.includes("recipients") ||
+      normalized.includes("torecipients") ||
+      normalized.includes("email address") ||
+      normalized.includes("invalid address") ||
+      normalized.includes("malformed")
+    ) {
+      return "Please add at least one recipient before continuing.";
+    }
+
+    return null;
   }
 
   function buildEmailDraftFileContent(item: Plan["items"][number]) {
@@ -1829,11 +1952,11 @@ export default function PlansPage() {
         provider: "outlook" as const,
         providerObjectType,
         providerObjectId,
-        canRecall: false,
+        canRecall: true,
         canModify: true,
-        recallImplemented: false,
+        recallImplemented: true,
         modifyImplemented: true,
-        recallReason: "Scheduled emails are only recallable when provider cancel support is implemented.",
+        recallReason: null,
         modifyReason: null,
       };
     }
@@ -1903,6 +2026,8 @@ export default function PlansPage() {
             classifyPlanRow(options.item) === "email" && appSettings.emailHandlingMode === "schedule"
               ? getEmailScheduledSendISO(options.item)
               : null,
+          scheduledEmailState:
+            options.result?.action === "email_scheduled" ? "scheduled" : options.result?.action === "email_sent" ? "sent" : null,
           reminderTime: options.item.reminderTime ?? null,
           teamsMeeting: Boolean(options.item.meetingDraft?.teamsMeeting),
           emailHandlingMode: classifyPlanRow(options.item) === "email" ? appSettings.emailHandlingMode : null,
@@ -2184,7 +2309,9 @@ export default function PlansPage() {
   async function exportPreviewEmailItem(itemId: string) {
     const item = previewPlan.items.find((entry) => entry.id === itemId);
     if (!item) return;
+    if (validateEmailRowsForExport([itemId], { usePopup: true })) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
 
@@ -2202,6 +2329,13 @@ export default function PlansPage() {
         setExecutionNoticeForResult(result);
         return;
       } catch (error) {
+        const userFixableMessage = getUserFixableEmailExecutionMessage(error);
+        if (userFixableMessage) {
+          if (typeof window !== "undefined") {
+            window.alert(userFixableMessage);
+          }
+          return;
+        }
         const reason = error instanceof Error ? error.message : "Outlook email action failed.";
         downloadLocalEmailItem(item, {
           showAlert: false,
@@ -2246,6 +2380,7 @@ export default function PlansPage() {
     if (!item) return;
     if (validateMeetingRowsForExport([itemId], { usePopup: true })) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
 
@@ -2628,6 +2763,7 @@ export default function PlansPage() {
     const item = previewPlan.items.find((entry) => entry.id === itemId);
     if (!item) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
 
@@ -2686,6 +2822,7 @@ export default function PlansPage() {
 
   async function exportCurrentPlan(options?: { skipValidation?: boolean; skipConfirm?: boolean }) {
     if (!options?.skipValidation && validateExportBeforeRun()) return;
+    if (warnIfPastScheduledItems({ usePopup: true })) return;
     if (!options?.skipConfirm && !confirmExport()) return;
 
     const { emailItems, calendarItems } = partitionPlanItemsByKind(previewPlan.items);
@@ -2742,8 +2879,15 @@ export default function PlansPage() {
               reminderCount += 1;
             }
           }
-        } catch {
+        } catch (error) {
           if (rowKind === "email") {
+            const userFixableMessage = getUserFixableEmailExecutionMessage(error);
+            if (userFixableMessage) {
+              if (typeof window !== "undefined") {
+                window.alert(userFixableMessage);
+              }
+              return;
+            }
             failedEmailItems.push(item);
           } else {
             failedCalendarItems.push(item);
@@ -2829,8 +2973,10 @@ export default function PlansPage() {
       window.alert(`Preview is missing:\n\n${missingRequirements.join("\n")}`);
       return true;
     }
+    if (validateEmailRowsForExport(undefined, { usePopup: true })) return true;
     if (validateMeetingRowsForExport(undefined, { usePopup: true })) return true;
     if (warnIfMissingReminderTimes({ usePopup: true })) return true;
+    if (warnIfPastScheduledItems({ usePopup: true })) return true;
     return false;
   }
 
@@ -2840,6 +2986,7 @@ export default function PlansPage() {
       window.alert(`Export is missing:\n\n${missingRequirements.join("\n")}`);
       return true;
     }
+    if (validateEmailRowsForExport(undefined, { usePopup: true })) return true;
     if (validateMeetingRowsForExport(undefined, { usePopup: true })) return true;
     if (warnIfMissingReminderTimes({ usePopup: true })) return true;
     return false;
@@ -2949,7 +3096,7 @@ export default function PlansPage() {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold text-gray-900">Plans</h1>
             <p className="text-sm text-gray-600">
-              Build a plan from an event and export it as a calendar file for review.
+              Build an event timeline and export it to Outlook when you&apos;re ready.
             </p>
           </div>
           <div className="rounded-xl border bg-white px-4 py-3 text-sm shadow-sm md:min-w-[260px] md:max-w-[280px]">
@@ -3625,7 +3772,7 @@ export default function PlansPage() {
                                       }}
                                       className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
                                     >
-                                      Add Body
+                                      Edit Body
                                     </button>
                                     <div className="my-1 border-t-2 border-double border-gray-200" />
                                   </>
@@ -4088,9 +4235,15 @@ export default function PlansPage() {
                                   onChange={(e) =>
                                     e.target.value === "custom"
                                       ? (() => {
+                                          const previewMeetingItem = previewPlan.items.find((preview) => preview.id === row.id);
+                                          const effectiveStartDate = (previewMeetingItem ? getEffectivePreviewItemDate(previewMeetingItem) : null) || todayYYYYMMDD();
+                                          const effectiveStartTime =
+                                            getUsableReminderTime(previewMeetingItem?.reminderTime, anchorMap) ||
+                                            getUsableReminderTime(row.reminderTime, anchorMap) ||
+                                            "09:00";
                                           const defaultCustomEnd = addMinutesToLocalDateTime(
-                                            anchorDate,
-                                            getUsableReminderTime(row.reminderTime, anchorMap) || "09:00",
+                                            effectiveStartDate,
+                                            effectiveStartTime,
                                             normalizeMeetingDraft(row.meetingDraft)?.durationMinutes ?? 30
                                           );
                                           updateRow(row.id, (current) => ({
@@ -4953,7 +5106,7 @@ export default function PlansPage() {
                     <div className="flex flex-wrap items-center gap-3">
                       <button
                         onClick={() => {
-                          void exportCurrentPlan({ skipValidation: true, skipConfirm: true });
+                          void exportCurrentPlan({ skipConfirm: true });
                         }}
                         className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
                       >
