@@ -17,14 +17,15 @@ function LoadingScreen({ label }: { label: string }) {
 export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { authEnabled, loading, currentUser } = useAuthContext();
+  const { authEnabled, loading, currentUser, currentOrgId } = useAuthContext();
 
   const isLoginRoute = pathname === "/login";
 
   useEffect(() => {
-    if (!authEnabled || loading) return;
+    if (!authEnabled) return;
 
     if (!currentUser && !isLoginRoute) {
+      if (loading) return;
       router.replace("/login");
       return;
     }
@@ -34,7 +35,16 @@ export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
     }
   }, [authEnabled, currentUser, isLoginRoute, loading, router]);
 
-  if (authEnabled && loading) {
+  useEffect(() => {
+    if (authEnabled && currentUser && !currentOrgId) {
+      console.info("[appFrame] rendering with authenticated user and no currentOrgId yet", {
+        userId: currentUser.id,
+        pathname,
+      });
+    }
+  }, [authEnabled, currentOrgId, currentUser, pathname]);
+
+  if (authEnabled && loading && !currentUser) {
     return <LoadingScreen label="Loading workspace…" />;
   }
 
