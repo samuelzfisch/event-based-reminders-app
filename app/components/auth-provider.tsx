@@ -32,7 +32,7 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-const AUTH_SESSION_TIMEOUT_MS = 2000;
+const ORG_CONTEXT_RETRY_DELAY_MS = 750;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authEnabled] = useState(() => isSupabaseConfigured());
   const [loading, setLoading] = useState(true);
@@ -40,8 +40,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [orgContext, setOrgContext] = useState<BootstrappedOrgContext | null>(() => getCachedOrgContext());
   const mountedRef = useRef(true);
+  const currentSessionRef = useRef<Session | null>(null);
+  const currentUserIdRef = useRef<string | null>(null);
   const authResolutionRef = useRef<Promise<void> | null>(null);
   const orgBootstrapStartedRef = useRef<string | null>(null);
+  const orgBootstrapRetriedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    currentSessionRef.current = currentSession;
+  }, [currentSession]);
+
+  useEffect(() => {
+    currentUserIdRef.current = currentUser?.id ?? null;
+  }, [currentUser]);
 
   async function resolveOrgContextInBackground(user: User, source: string) {
     const cachedContext = getCachedOrgContext();
@@ -70,8 +81,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setOrgContext(nextOrgContext);
       if (nextOrgContext?.orgId) {
         console.info("[auth] currentOrgId set", { source, orgId: nextOrgContext.orgId });
+        orgBootstrapRetriedRef.current = null;
       } else {
         console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_returned_null" });
+        if (orgBootstrapRetriedRef.current !== user.id) {
+          orgBootstrapRetriedRef.current = user.id;
+          window.setTimeout(() => {
+            if (!mountedRef.current || currentUserIdRef.current !== user.id) return;
+            console.info("[auth] retrying org bootstrap", { source, userId: user.id });
+            void resolveOrgContextInBackground(user, `${source}:retry`);
+          }, ORG_CONTEXT_RETRY_DELAY_MS);
+        }
       }
     } catch (error) {
       if (!mountedRef.current) return;
@@ -164,17 +184,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const supabase = getSupabaseBrowserClient();
       if (!supabase) return null;
 
-      const { data } = await Promise.race([
-        supabase.auth.getSession(),
-        new Promise<{ data: { session: null } }>((resolve) => {
-          window.setTimeout(() => {
-            console.warn("[auth] getSession timed out during mount auth check");
-            resolve({ data: { session: null } });
-          }, AUTH_SESSION_TIMEOUT_MS);
-        }),
-      ]);
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.getSession();
 
-      return data.session ?? null;
+      if (error) {
+        console.error("[auth] session restore failed on mount", error);
+        return null;
+      }
+
+      if (session) {
+        console.info("[auth] session restored on mount", { userId: session.user.id });
+      } else {
+        console.info("[auth] no session found on mount");
+      }
+
+      return session ?? null;
     });
   }
 
@@ -215,11 +241,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.info("[auth] auth event received", { event });
 
       if (event === "INITIAL_SESSION") {
+        if (session && !currentSessionRef.current) {
+          await resolveWithSingleFlightEffect("INITIAL_SESSION", async () => session);
+        }
         return;
       }
 
       if (event === "SIGNED_IN") {
         await resolveWithSingleFlightEffect("SIGNED_IN", async () => session ?? null);
+        return;
+      }
+
+      if (event === "TOKEN_REFRESHED") {
+        if (session) {
+          console.info("[auth] session refresh success", { userId: session.user.id });
+        } else {
+          console.warn("[auth] session refresh returned no session");
+        }
         return;
       }
 

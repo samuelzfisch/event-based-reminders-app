@@ -66,18 +66,28 @@ async function runBootstrapCurrentOrgForUser(input: {
     if (!supabase) return null;
 
     const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const sessionUserId = session?.user?.id ?? null;
+    console.info("[orgBootstrap] auth.getSession result", {
+      expectedUserId: input.userId,
+      sessionUserId,
+    });
+
+    const {
       data: { user: authenticatedUser },
       error: getUserError,
     } = await supabase.auth.getUser();
 
     if (getUserError) {
       console.error("[orgBootstrap] auth.getUser failed", getUserError);
-      return null;
     }
 
-    if (!authenticatedUser?.id || authenticatedUser.id !== input.userId) {
+    const effectiveUserId = sessionUserId || authenticatedUser?.id || null;
+    if (!effectiveUserId || effectiveUserId !== input.userId) {
       console.error("[orgBootstrap] authenticated user mismatch", {
         expectedUserId: input.userId,
+        sessionUserId,
         actualUserId: authenticatedUser?.id ?? null,
       });
       return null;
@@ -100,6 +110,12 @@ async function runBootstrapCurrentOrgForUser(input: {
       console.error("[orgBootstrap] membership query failed", membershipQuery.error);
       return null;
     }
+
+    console.info("[orgBootstrap] membership query result", {
+      userId: input.userId,
+      hasRow: Boolean(membershipQuery.data?.org_id),
+      orgId: membershipQuery.data?.org_id ?? null,
+    });
 
     if (membershipQuery.data?.org_id) {
       const context = {
