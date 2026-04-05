@@ -247,9 +247,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       };
     }
 
-    console.info("[auth] mount auth check start");
-    void refreshAuthContextEffect();
-
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
@@ -282,6 +279,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
     });
+
+    console.info("[auth] mount auth check start");
+    void refreshAuthContextEffect();
 
     return () => {
       mountedRef.current = false;

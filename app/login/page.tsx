@@ -1,15 +1,35 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { useAuthContext } from "../components/auth-provider";
 
 export default function LoginPage() {
-  const { authEnabled, loading, sendMagicLink } = useAuthContext();
+  const { authEnabled, loading, currentUser, sendMagicLink } = useAuthContext();
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    console.info("[loginPage] mount", {
+      authEnabled,
+      loading,
+      hasCurrentUser: Boolean(currentUser),
+      userId: currentUser?.id ?? null,
+    });
+  }, [authEnabled, currentUser, loading]);
+
+  useEffect(() => {
+    console.info("[loginPage] auth state", {
+      loading,
+      hasCurrentUser: Boolean(currentUser),
+      userId: currentUser?.id ?? null,
+    });
+    if (currentUser) {
+      console.info("[loginPage] redirecting because authenticated", { userId: currentUser.id });
+    }
+  }, [currentUser, loading]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -46,6 +66,10 @@ export default function LoginPage() {
         {!authEnabled ? (
           <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             Supabase auth is not configured for this environment yet. The app will continue using legacy local mode.
+          </div>
+        ) : currentUser ? (
+          <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            Signed in. Redirecting to your workspace…
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
