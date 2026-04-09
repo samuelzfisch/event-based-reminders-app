@@ -81,6 +81,10 @@ export default function LoginPage() {
           <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
             Signed in. Redirecting to your workspace…
           </div>
+        ) : loading ? (
+          <div className="mt-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+            Checking your sign-in…
+          </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>

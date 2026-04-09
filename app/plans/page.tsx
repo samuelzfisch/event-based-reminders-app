@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   APP_SETTINGS_UPDATED_EVENT,
@@ -14,7 +14,6 @@ import {
 import { todayYYYYMMDD } from "../../lib/dateUtils";
 import { writeExecutionHistory } from "../../lib/executionHistory";
 import type { ExecutionHistoryProviderObjectType } from "../../lib/executionHistory";
-import { buildICSForPlan, downloadICS } from "../../lib/ics";
 import {
   createOutlookCalendarEvent,
   createOutlookDraftFromEmailDraft,
@@ -26,6 +25,20 @@ import {
   sendOutlookEmailFromEmailDraft,
   type OutlookConnectionState,
 } from "../../lib/outlookClient";
+import {
+  createGmailDraftFromEmailDraft,
+  createGoogleCalendarEvent,
+  GMAIL_COMPOSE_SCOPE,
+  GMAIL_CONNECTION_UPDATED_EVENT,
+  GOOGLE_CALENDAR_EVENTS_SCOPE,
+  getConnectedGmailMailboxEmail,
+  getGmailConnectionState,
+  getLastGmailAvailabilityDebugSnapshot,
+  sendGmailEmailFromEmailDraft,
+  type GmailAvailabilityDebugSnapshot,
+  type GmailConnectionState,
+  resolveGmailConnectionState,
+} from "../../lib/gmailClient";
 import { createPlan, type TemplateItem } from "../../lib/planEngine";
 import {
   loadCachedTemplateState,
@@ -43,7 +56,15 @@ import {
   resolvePlanAnchors,
   resolveReminderTimeValue,
 } from "../../lib/plansRuntime";
+import type {
+  AIChatMessage,
+  AIPlanBuilderContext,
+  AIPlanChatRequest,
+  AIPlanChatTurnResult,
+  AIPlanDraft,
+} from "../../lib/aiPlanGeneration";
 import type { Plan, PlanDateBasis, PlanRowType, PlanType, WeekendRule } from "../../types/plan";
+import { useAuthContext } from "../components/auth-provider";
 
 type BuilderEmailDraft = {
   to?: string[];
@@ -85,6 +106,7 @@ type BuilderRow = {
     endTime?: string;
     isAllDay?: boolean;
     teamsMeeting?: boolean;
+    addGoogleMeet?: boolean;
   };
 };
 
@@ -124,7 +146,8 @@ type MeetingValidationErrorState = Record<
   }
 >;
 
-type OutlookExecutionResult = {
+type ProviderExecutionResult = {
+  provider: "outlook" | "gmail";
   kind: "email" | "reminder" | "meeting";
   action:
     | "draft_created"
@@ -137,6 +160,14 @@ type OutlookExecutionResult = {
   providerObjectId?: string;
   webLink?: string;
   joinUrl?: string;
+};
+
+type ProviderExecutionAvailability = {
+  provider: "outlook" | "gmail";
+  canExecute: boolean;
+  reason?: string;
+  outlookAvailable: boolean;
+  gmailAvailable: boolean;
 };
 
 type ExecutionSnapshotRowDefinition = {
@@ -153,10 +184,90 @@ type ExecutionSnapshotRowDefinition = {
 };
 
 type ExecutionNotice = {
-  tone: "success" | "mixed" | "warning";
+  tone: "pending" | "success" | "mixed" | "warning";
   title: string;
   message?: string;
   details?: string[];
+};
+
+type ExportDebugSnapshot = {
+  rowType: string | null;
+  executionPath: "email" | "calendar" | null;
+  requestedEmailAction: "draft" | "send" | "schedule" | null;
+  authEnabled: boolean;
+  authLoading: boolean;
+  currentUserPresent: boolean;
+  currentOrgId: string | null;
+  outlookConnected: boolean;
+  outlookAvailable: boolean;
+  outlookUnavailableReason: string | null;
+  gmail: GmailAvailabilityDebugSnapshot;
+  chosenProvider: "outlook" | "gmail" | null;
+  fallbackTriggered: boolean;
+  fallbackReason: string | null;
+  gmailExecutionRan: boolean;
+  gmailExecutionThrew: boolean;
+  gmailExecutionError: string | null;
+};
+
+type AIConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  summary?: string;
+  status?: "needs_more_info" | "ready_to_apply";
+  followUpQuestions?: string[];
+  changeSummary?: string[];
+  confidenceNote?: string;
+  suggestedNextActions?: string[];
+  starterPrompts?: string[];
+  modeOptions?: Array<{ id: "refine_current" | "start_new"; label: string }>;
+};
+
+type AIPlanningSessionBackup = {
+  messages: AIConversationMessage[];
+  summary: string;
+  draft: AIPlanDraft | null;
+  status: "needs_more_info" | "ready_to_apply";
+  changeSummary: string[];
+  confidenceNote: string;
+  suggestedNextActions: string[];
+  builderContextMode: "refine_current" | "start_new" | null;
+  baseline: AIDraftBaseline | null;
+  sessionSource: AISessionSource | null;
+};
+
+type AIDraftBaseline = {
+  sourceLabel: string;
+  planType: PlanType;
+  noEventDate: boolean;
+  anchorDate: string;
+  eventTime: string;
+  weekendRule: WeekendRule;
+  totalRows: number;
+  reminderCount: number;
+  emailCount: number;
+  meetingCount: number;
+};
+
+type AISessionSource =
+  | { type: "new" }
+  | { type: "current_builder" }
+  | { type: "saved_template"; name: string }
+  | { type: "branched_draft" };
+
+type BuilderSourceProvenance = {
+  sourceType: "manual" | "saved_template" | "ai_draft";
+  sourceLabel: string;
+  loadedAt: string;
+  sourceSignature: string;
+  hadMissingDetails?: boolean;
+};
+
+type BuilderSourceSeed = {
+  sourceType: BuilderSourceProvenance["sourceType"];
+  sourceLabel: string;
+  hadMissingDetails?: boolean;
 };
 
 type GuidedFormState = {
@@ -193,6 +304,7 @@ const EARNINGS_PRESET_ANCHOR_KEYS = [
 ] as const;
 const GENERIC_PRESET_ANCHOR_KEYS = ["Event Name", "Event Date"] as const;
 const TEAMS_MEETING_LOCATION = "Microsoft Teams Meeting";
+const GOOGLE_MEET_LOCATION = "Google Meet";
 const MEETING_DURATION_OPTIONS = [
   { value: "30", label: "30 minutes" },
   { value: "60", label: "60 minutes" },
@@ -200,9 +312,254 @@ const MEETING_DURATION_OPTIONS = [
   { value: "120", label: "2 hours" },
   { value: "custom", label: "Custom" },
 ] as const;
+const AI_STARTER_PROMPTS = [
+  "I need a plan for an earnings call with prep reminders and follow-up emails.",
+  "Help me make a conference follow-up plan.",
+  "I want a press release timeline with internal review reminders.",
+  "Build a workflow for a board meeting with prep tasks, a draft email, and day-of reminders.",
+] as const;
+const AI_ENABLED = false;
 
 function makeId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getAiReadinessLabel(status: "needs_more_info" | "ready_to_apply") {
+  return status === "ready_to_apply" ? "Draft ready to apply" : "Needs a bit more information";
+}
+
+function getAiBuilderContextRowLabel(rowType: PlanRowType) {
+  if (rowType === "email") return "Email";
+  if (rowType === "calendar_event") return "Meeting";
+  return "Reminder";
+}
+
+function getBaselineDeltaLabel(delta: number) {
+  if (delta === 0) return "unchanged";
+  return delta > 0 ? `+${delta}` : `${delta}`;
+}
+
+function getAiSessionSourceDetails(source: AISessionSource | null) {
+  if (!source || source.type === "new") {
+    return {
+      label: "New AI draft",
+      note: "Nothing changes in the builder unless you click Apply to Builder or save a new template.",
+      classes: "border-gray-200 bg-gray-50 text-gray-900",
+    };
+  }
+  if (source.type === "current_builder") {
+    return {
+      label: "Current builder plan",
+      note: "Your builder stays unchanged until you review the draft and click Apply to Builder.",
+      classes: "border-blue-200 bg-blue-50 text-blue-900",
+    };
+  }
+  if (source.type === "saved_template") {
+    return {
+      label: `Saved template: ${source.name}`,
+      note: "The saved template stays unchanged unless you save a new template later.",
+      classes: "border-purple-200 bg-purple-50 text-purple-900",
+    };
+  }
+  return {
+    label: "Branched AI draft",
+    note: "This branch will not affect your earlier draft unless you restore, apply, or save it explicitly.",
+    classes: "border-amber-200 bg-amber-50 text-amber-900",
+  };
+}
+
+function getAiDraftIdentityDetails(source: AISessionSource | null) {
+  if (!source || source.type === "new") {
+    return {
+      source: "New AI draft",
+      currentDraft: "AI working draft",
+      applyDestination: "Current builder",
+      saveDestination: "New custom template",
+      note: "Applying updates the builder only. Saving creates a new reusable template.",
+    };
+  }
+  if (source.type === "current_builder") {
+    return {
+      source: "Current builder plan",
+      currentDraft: "AI working draft",
+      applyDestination: "Current builder",
+      saveDestination: "New custom template",
+      note: "Your builder stays unchanged until Apply to Builder. Saving creates a separate template.",
+    };
+  }
+  if (source.type === "saved_template") {
+    return {
+      source: `Saved template: ${source.name}`,
+      currentDraft: "AI working draft",
+      applyDestination: "Current builder",
+      saveDestination: "New custom template",
+      note: "The original template stays unchanged. Saving creates a new template from this draft.",
+    };
+  }
+  return {
+    source: "Branched AI draft",
+    currentDraft: "AI working draft",
+    applyDestination: "Current builder",
+    saveDestination: "New custom template",
+    note: "This branch is separate from the earlier draft unless you explicitly apply or save it.",
+  };
+}
+
+function getAiDraftStageDetails(options: {
+  hasDraft: boolean;
+  readiness: "needs_more_info" | "ready_to_apply";
+  hasFollowUpQuestions: boolean;
+  wasSavedAsTemplate: boolean;
+  source: AISessionSource | null;
+  rowCount: number;
+}) {
+  if (!options.hasDraft) {
+    return {
+      stage: "Exploring",
+      nextStep: "Tell the assistant what you want to plan so it can shape a first draft.",
+    };
+  }
+
+  if (options.hasFollowUpQuestions || options.readiness === "needs_more_info") {
+    return {
+      stage: "Needs clarification",
+      nextStep: "Answer the remaining questions so the draft can tighten up.",
+    };
+  }
+
+  if (!options.wasSavedAsTemplate && options.rowCount >= 2 && options.source?.type !== "saved_template") {
+    return {
+      stage: "Good template candidate",
+      nextStep: "Save this as a template if you expect to reuse this workflow.",
+    };
+  }
+
+  return {
+    stage: "Ready to apply",
+    nextStep: options.wasSavedAsTemplate
+      ? "Review the rows, then apply to builder if you want to use this version now."
+      : "Review the rows, then apply to builder when you’re ready.",
+  };
+}
+
+function getAiDraftMissingDetails(options: {
+  draft: AIPlanDraft | null;
+  confidenceNote: string;
+  hasFollowUpQuestions: boolean;
+  source: AISessionSource | null;
+}) {
+  if (!options.draft) return [];
+
+  const details = new Set<string>();
+  const draft = options.draft;
+
+  if (!draft.noEventDate && !(draft.anchorDate ?? "").trim()) {
+    details.add("Event date not specified.");
+  }
+
+  if (draft.rows.some((row) => (row.rowType === "reminder" || row.rowType === "calendar_event") && !row.reminderTime?.trim())) {
+    details.add("Reminder or meeting timing is still general.");
+  }
+
+  if (
+    draft.rows.some(
+      (row) =>
+        row.rowType === "email" &&
+        (!row.emailDraft || (row.emailDraft.to.length === 0 && row.emailDraft.cc.length === 0 && row.emailDraft.bcc.length === 0))
+    )
+  ) {
+    details.add("Email recipients still need confirmation.");
+  }
+
+  if (
+    draft.rows.some(
+      (row) =>
+        row.rowType === "calendar_event" &&
+        (!row.meetingDraft || row.meetingDraft.attendees.length === 0)
+    )
+  ) {
+    details.add("Meeting attendees may still need confirmation.");
+  }
+
+  if (draft.weekendRule === "prior_business_day" && options.source?.type !== "saved_template") {
+    details.add("Weekend handling may need review.");
+  }
+
+  if (options.hasFollowUpQuestions) {
+    details.add("A few details still need clarification from you.");
+  }
+
+  const normalizedConfidence = options.confidenceNote.toLowerCase();
+  if (normalizedConfidence.includes("assumed") || normalizedConfidence.includes("needs confirmation")) {
+    details.add(options.confidenceNote);
+  }
+
+  return Array.from(details).slice(0, 5);
+}
+
+function buildBuilderContentSignature(input: {
+  planType: PlanType;
+  templateName: string;
+  eventName: string;
+  anchorDate: string;
+  noEventDate: boolean;
+  weekendRule: WeekendRule;
+  anchors: BuilderAnchor[];
+  rows: BuilderRow[];
+}) {
+  return JSON.stringify({
+    planType: input.planType,
+    templateName: input.templateName.trim(),
+    eventName: input.eventName.trim(),
+    anchorDate: input.anchorDate,
+    noEventDate: input.noEventDate,
+    weekendRule: input.weekendRule,
+    anchors: input.anchors.map((anchor) => ({
+      key: anchor.key.trim(),
+      value: anchor.value,
+    })),
+    rows: input.rows.map((row) => {
+      const emailDraft = normalizeEmailDraft(row.emailDraft);
+      const meetingDraft = normalizeMeetingDraft(row.meetingDraft);
+      return {
+        title: row.title.trim(),
+        body: row.body ?? "",
+        offsetDays: row.offsetDays ?? 0,
+        dateBasis: row.dateBasis ?? "event",
+        rowType: row.rowType,
+        reminderTime: row.reminderTime ?? "",
+        emailDraft,
+        durationDraft: row.durationDraft ?? null,
+        meetingDraft: meetingDraft ?? null,
+      };
+    }),
+  });
+}
+
+function getBuilderSourceTimestamp() {
+  return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function buildBuilderSourceProvenance(
+  snapshot: Pick<BuilderStateSnapshot, "planType" | "templateName" | "eventName" | "anchorDate" | "noEventDate" | "weekendRule" | "anchors" | "rows">,
+  source: BuilderSourceSeed
+): BuilderSourceProvenance {
+  return {
+    sourceType: source.sourceType,
+    sourceLabel: source.sourceLabel,
+    loadedAt: getBuilderSourceTimestamp(),
+    sourceSignature: buildBuilderContentSignature({
+      planType: snapshot.planType,
+      templateName: snapshot.templateName,
+      eventName: snapshot.eventName,
+      anchorDate: snapshot.anchorDate,
+      noEventDate: snapshot.noEventDate,
+      weekendRule: snapshot.weekendRule,
+      anchors: snapshot.anchors,
+      rows: snapshot.rows,
+    }),
+    hadMissingDetails: source.hadMissingDetails,
+  };
 }
 
 function createEmptyAnchor(): BuilderAnchor {
@@ -251,7 +608,9 @@ function OutlookExecutionNoticeCard({
   onDismiss: () => void;
 }) {
   const toneClasses =
-    notice.tone === "success"
+    notice.tone === "pending"
+      ? "border-blue-200 bg-blue-50 text-blue-950"
+      : notice.tone === "success"
       ? "border-green-200 bg-green-50 text-green-950"
       : notice.tone === "mixed"
         ? "border-amber-200 bg-amber-50 text-amber-950"
@@ -297,6 +656,52 @@ function ExportDoneBadge() {
         />
       </svg>
       <span>Export Done</span>
+    </div>
+  );
+}
+
+function ExportDebugCard({ debug }: { debug: ExportDebugSnapshot }) {
+  return (
+    <div className="rounded-xl border border-dashed border-red-300 bg-red-50 p-4 text-xs text-red-950">
+      <div className="font-semibold uppercase tracking-wide">Temporary Export Debug</div>
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
+        <div className="space-y-1">
+          <div className="font-semibold">Auth / Org</div>
+          <div>auth enabled: {String(debug.authEnabled)}</div>
+          <div>auth loading: {String(debug.authLoading)}</div>
+          <div>current user present: {String(debug.currentUserPresent)}</div>
+          <div>currentOrgId: {debug.currentOrgId || "—"}</div>
+        </div>
+        <div className="space-y-1">
+          <div className="font-semibold">Outlook</div>
+          <div>connected: {String(debug.outlookConnected)}</div>
+          <div>available: {String(debug.outlookAvailable)}</div>
+          <div>reason unavailable: {debug.outlookUnavailableReason || "—"}</div>
+        </div>
+        <div className="space-y-1">
+          <div className="font-semibold">Gmail</div>
+          <div>provider row found: {String(debug.gmail.providerRowFound)}</div>
+          <div>provider value: {debug.gmail.providerValue || "—"}</div>
+          <div>connection_status: {debug.gmail.connectionStatus || "—"}</div>
+          <div>compose scope present: {String(debug.gmail.scopesPresent)}</div>
+          <div>token present: {String(debug.gmail.tokenPresent)}</div>
+          <div>identity present: {String(debug.gmail.identityPresent)}</div>
+          <div>final available: {String(debug.gmail.finalAvailable)}</div>
+          <div>reason unavailable: {debug.gmail.rejectionReason || "—"}</div>
+        </div>
+        <div className="space-y-1">
+          <div className="font-semibold">Decision / Execution</div>
+          <div>row type: {debug.rowType || "—"}</div>
+          <div>execution path: {debug.executionPath || "—"}</div>
+          <div>requested action: {debug.requestedEmailAction || "—"}</div>
+          <div>chosen provider: {debug.chosenProvider || "—"}</div>
+          <div>fallback triggered: {String(debug.fallbackTriggered)}</div>
+          <div>fallback reason: {debug.fallbackReason || "—"}</div>
+          <div>gmail helper ran: {String(debug.gmailExecutionRan)}</div>
+          <div>gmail helper threw: {String(debug.gmailExecutionThrew)}</div>
+          <div>gmail helper error: {debug.gmailExecutionError || "—"}</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -391,6 +796,7 @@ function normalizeMeetingDraft(draft?: BuilderRow["meetingDraft"] | null) {
     endTime: typeof draft.endTime === "string" ? draft.endTime : "",
     isAllDay: Boolean(draft.isAllDay),
     teamsMeeting: Boolean(draft.teamsMeeting),
+    addGoogleMeet: Boolean(draft.addGoogleMeet),
   };
 }
 
@@ -952,10 +1358,10 @@ function formatPreviewTime(time: string) {
   });
 }
 
-function buildFinalEmailBody(body: string, signatureSettings: { enabled: boolean; signature: string }) {
+function buildFinalEmailBody(body: string, signatureSettings: { signature: string }) {
   const normalizedBody = body.trim();
   const normalizedSignature = signatureSettings.signature.trim();
-  if (signatureSettings.enabled && normalizedSignature) {
+  if (normalizedSignature) {
     return normalizedBody ? `${normalizedBody}\n\n${normalizedSignature}` : normalizedSignature;
   }
   return normalizedBody;
@@ -963,7 +1369,7 @@ function buildFinalEmailBody(body: string, signatureSettings: { enabled: boolean
 
 function getBuilderEmailModeMessage(mode: EmailHandlingMode) {
   if (mode === "schedule") {
-    return "Emails will be scheduled to send at the specified date and time.";
+    return "Outlook emails will be scheduled to send at the specified date and time. Gmail will save a draft instead.";
   }
   if (mode === "send") {
     return "Email will be sent immediately";
@@ -973,7 +1379,7 @@ function getBuilderEmailModeMessage(mode: EmailHandlingMode) {
 
 function getPreviewEmailModeMessage(mode: EmailHandlingMode) {
   if (mode === "schedule") {
-    return "Emails will be scheduled to send at the specified date and time.";
+    return "Outlook emails will be scheduled to send at the specified date and time. Gmail will save a draft instead.";
   }
   if (mode === "send") {
     return "Emails will be sent immediately.";
@@ -982,7 +1388,7 @@ function getPreviewEmailModeMessage(mode: EmailHandlingMode) {
 }
 
 function getPreviewEmailActionLabel(mode: EmailHandlingMode) {
-  if (mode === "schedule") return "Schedule Email";
+  if (mode === "schedule") return "Schedule Email (Outlook only)";
   if (mode === "send") return "Send Email";
   return "Save to Drafts";
 }
@@ -1073,7 +1479,12 @@ function areOutlookConnectionStatesEqual(left: OutlookConnectionState | null, ri
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function areGmailConnectionStatesEqual(left: GmailConnectionState | null, right: GmailConnectionState | null) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export default function PlansPage() {
+  const { authEnabled, currentUser, currentOrgId, loading, refreshAuthContext } = useAuthContext();
   const initialSettings = loadAppSettings();
   const initialSeedTemplates = buildSeedTemplates(
     initialSettings.defaultReminderTime,
@@ -1087,6 +1498,7 @@ export default function PlansPage() {
   const [outlookConnection, setOutlookConnection] = useState<OutlookConnectionState | null>(() =>
     getOutlookConnectionState(initialSettings.outlookAccountEmail)
   );
+  const [gmailConnection, setGmailConnection] = useState<GmailConnectionState | null>(() => getGmailConnectionState());
   const [builderMode, setBuilderMode] = useState<BuilderMode>("template");
   const [planType, setPlanType] = useState<PlanType>(initialSelectedTemplate?.baseType ?? "press_release");
   const [templateName, setTemplateName] = useState(initialSelectedTemplate?.name ?? "Press Release");
@@ -1112,6 +1524,7 @@ export default function PlansPage() {
   const [savedTemplates, setSavedTemplates] = useState<SavedPlanTemplate[]>(() => initialTemplates);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(initialSelectedTemplateId);
   const [lastTemplateSnapshot, setLastTemplateSnapshot] = useState<BuilderStateSnapshot | null>(null);
+  const [lastBuilderSourceProvenance, setLastBuilderSourceProvenance] = useState<BuilderSourceProvenance | null>(null);
   const [guidedForm, setGuidedForm] = useState<GuidedFormState>(() => createEmptyGuidedForm());
   const [isTemplateManageMode, setIsTemplateManageMode] = useState(false);
   const [isTemplateCopyMode, setIsTemplateCopyMode] = useState(false);
@@ -1137,11 +1550,88 @@ export default function PlansPage() {
   const [expandedPreviewMeetingRowIds, setExpandedPreviewMeetingRowIds] = useState<string[]>([]);
   const [openPreviewRowMenuId, setOpenPreviewRowMenuId] = useState<string | null>(null);
   const [executionNotice, setExecutionNotice] = useState<ExecutionNotice | null>(null);
+  const [executionState, setExecutionState] = useState<"pending" | "success" | "failure" | null>(null);
+  const [providerLoading, setProviderLoading] = useState({ outlook: true, gmail: true });
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [exportDebug, setExportDebug] = useState<ExportDebugSnapshot>({
+    rowType: null,
+    executionPath: null,
+    requestedEmailAction: null,
+    authEnabled,
+    authLoading: loading,
+    currentUserPresent: Boolean(currentUser),
+    currentOrgId: currentOrgId ?? null,
+    outlookConnected: false,
+    outlookAvailable: false,
+    outlookUnavailableReason: null,
+    gmail: getLastGmailAvailabilityDebugSnapshot(),
+    chosenProvider: null,
+    fallbackTriggered: false,
+    fallbackReason: null,
+    gmailExecutionRan: false,
+    gmailExecutionThrew: false,
+    gmailExecutionError: null,
+  });
+  const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
+  const [aiComposer, setAiComposer] = useState("");
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiChatError, setAiChatError] = useState<string | null>(null);
+  const [aiChatMessages, setAiChatMessages] = useState<AIConversationMessage[]>([]);
+  const [aiChatSummary, setAiChatSummary] = useState("");
+  const [aiChatDraft, setAiChatDraft] = useState<AIPlanDraft | null>(null);
+  const [aiChatStatus, setAiChatStatus] = useState<"needs_more_info" | "ready_to_apply">("needs_more_info");
+  const [aiChatChangeSummary, setAiChatChangeSummary] = useState<string[]>([]);
+  const [aiChatConfidenceNote, setAiChatConfidenceNote] = useState("");
+  const [aiChatSuggestedNextActions, setAiChatSuggestedNextActions] = useState<string[]>([]);
+  const [aiBuilderContextMode, setAiBuilderContextMode] = useState<"refine_current" | "start_new" | null>(null);
+  const [aiSessionBackup, setAiSessionBackup] = useState<AIPlanningSessionBackup | null>(null);
+  const [aiDraftBaseline, setAiDraftBaseline] = useState<AIDraftBaseline | null>(null);
+  const [aiSessionSource, setAiSessionSource] = useState<AISessionSource | null>(null);
+  const [showAiTemplateSaveDialog, setShowAiTemplateSaveDialog] = useState(false);
+  const [aiTemplateNameDraft, setAiTemplateNameDraft] = useState("");
+  const [aiTemplateSaveMessage, setAiTemplateSaveMessage] = useState<string | null>(null);
+  const [aiSavedTemplateInfo, setAiSavedTemplateInfo] = useState<{ id: string; name: string } | null>(null);
+  const [showBuilderTemplateSaveDialog, setShowBuilderTemplateSaveDialog] = useState(false);
+  const [builderTemplateNameDraft, setBuilderTemplateNameDraft] = useState("");
+  const [builderTemplateSaveMessage, setBuilderTemplateSaveMessage] = useState<string | null>(null);
+  const [highlightedTemplateId, setHighlightedTemplateId] = useState<string | null>(null);
+  const [showAiApplyConfirm, setShowAiApplyConfirm] = useState(false);
+  const [aiApplySuccessMessage, setAiApplySuccessMessage] = useState<string | null>(null);
+  const [builderSourceProvenance, setBuilderSourceProvenance] = useState<BuilderSourceProvenance | null>(null);
   const [hasMounted, setHasMounted] = useState(false);
   const [hasHydratedTemplates, setHasHydratedTemplates] = useState(false);
   const hasLocalTemplateMutationRef = useRef(false);
   const kebabMenuRef = useRef<HTMLDivElement | null>(null);
   const builderTimeInputRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
+  const aiConversationRef = useRef<HTMLDivElement | null>(null);
+  const aiComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const builderSectionRef = useRef<HTMLElement | null>(null);
+  const rowsRef = useRef<BuilderRow[]>(rows);
+  const showExportDebugPanel = process.env.NODE_ENV === "development";
+
+  function updateExportDebug(patch: Partial<ExportDebugSnapshot>) {
+    setExportDebug((current) => ({
+      ...current,
+      authEnabled,
+      authLoading: loading,
+      currentUserPresent: Boolean(currentUser),
+      currentOrgId: currentOrgId ?? null,
+      ...patch,
+    }));
+  }
+
+  function getLatestPreviewPlan() {
+    return resolvePlanAnchors(
+      createPlan({
+        name: effectivePlanName,
+        type: planType,
+        anchorDate: previewAnchorDateForComputation,
+        weekendRule,
+        template: buildTemplateItemsFromRows(rowsRef.current),
+      }),
+      anchorMap
+    );
+  }
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -1158,6 +1648,44 @@ export default function PlansPage() {
   useEffect(() => {
     setHasMounted(true);
   }, []);
+
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+
+  useEffect(() => {
+    setExportDebug((current) => ({
+      ...current,
+      authEnabled,
+      authLoading: loading,
+      currentUserPresent: Boolean(currentUser),
+      currentOrgId: currentOrgId ?? null,
+    }));
+  }, [authEnabled, loading, currentUser, currentOrgId]);
+
+  useEffect(() => {
+    if (!isAiPanelOpen) return;
+    aiConversationRef.current?.scrollTo({
+      top: aiConversationRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [aiChatMessages, isAiPanelOpen]);
+
+  useEffect(() => {
+    if (!aiApplySuccessMessage) return;
+    const timeoutId = window.setTimeout(() => {
+      setAiApplySuccessMessage(null);
+    }, 5000);
+    return () => window.clearTimeout(timeoutId);
+  }, [aiApplySuccessMessage]);
+
+  useEffect(() => {
+    if (!highlightedTemplateId) return;
+    const timeoutId = window.setTimeout(() => {
+      setHighlightedTemplateId(null);
+    }, 5000);
+    return () => window.clearTimeout(timeoutId);
+  }, [highlightedTemplateId]);
 
   useEffect(() => {
     function handleSettingsRefresh() {
@@ -1195,6 +1723,7 @@ export default function PlansPage() {
     let active = true;
 
     async function hydrateTemplates() {
+      setPreviewLoading(true);
       const seedState = buildSeedTemplates(
         loadAppSettings().defaultReminderTime,
         loadAppSettings().defaultPressReleaseTime
@@ -1205,6 +1734,7 @@ export default function PlansPage() {
       if (!active) return;
       if (hasLocalTemplateMutationRef.current) {
         setHasHydratedTemplates(true);
+        setPreviewLoading(false);
         return;
       }
 
@@ -1219,6 +1749,7 @@ export default function PlansPage() {
       if (nextSelectedTemplate) {
         applyTemplateRecord(nextSelectedTemplate);
       }
+      setPreviewLoading(false);
     }
 
     void hydrateTemplates();
@@ -1253,9 +1784,13 @@ export default function PlansPage() {
     let active = true;
 
     async function refreshConnection() {
-      const connection = await resolveOutlookConnectionState(appSettings.outlookAccountEmail);
+      setProviderLoading((current) => ({ ...current, outlook: true }));
+      const outlookConnectionState = await resolveOutlookConnectionState(appSettings.outlookAccountEmail);
       if (!active) return;
-      setOutlookConnection((current) => (areOutlookConnectionStatesEqual(current, connection) ? current : connection));
+      setOutlookConnection((current) =>
+        areOutlookConnectionStatesEqual(current, outlookConnectionState) ? current : outlookConnectionState
+      );
+      setProviderLoading((current) => ({ ...current, outlook: false }));
     }
 
     void refreshConnection();
@@ -1264,60 +1799,98 @@ export default function PlansPage() {
       void refreshConnection();
     }
 
-    window.addEventListener("focus", handleConnectionRefresh);
     window.addEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, handleConnectionRefresh as EventListener);
     return () => {
       active = false;
-      window.removeEventListener("focus", handleConnectionRefresh);
       window.removeEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, handleConnectionRefresh as EventListener);
     };
   }, [appSettings.outlookAccountEmail]);
 
+  useEffect(() => {
+    let active = true;
+
+    async function refreshConnection() {
+      setProviderLoading((current) => ({ ...current, gmail: true }));
+      const gmailConnectionState = await resolveGmailConnectionState();
+      if (!active) return;
+      setGmailConnection((current) => (areGmailConnectionStatesEqual(current, gmailConnectionState) ? current : gmailConnectionState));
+      setProviderLoading((current) => ({ ...current, gmail: false }));
+    }
+
+    void refreshConnection();
+
+    function handleConnectionRefresh() {
+      void refreshConnection();
+    }
+
+    window.addEventListener(GMAIL_CONNECTION_UPDATED_EVENT, handleConnectionRefresh as EventListener);
+    return () => {
+      active = false;
+      window.removeEventListener(GMAIL_CONNECTION_UPDATED_EVENT, handleConnectionRefresh as EventListener);
+    };
+  }, []);
+
   const normalizedDefaultReminderTime = normalizeReminderTimeInput(appSettings.defaultReminderTime);
   const normalizedDefaultPressReleaseTime = normalizeReminderTimeInput(appSettings.defaultPressReleaseTime);
-  const currentSelectedTemplate = selectedTemplateId
-    ? savedTemplates.find((template) => template.id === selectedTemplateId) ?? null
-    : null;
-  const effectiveTemplateMode = currentSelectedTemplate ? inferTemplateMode(currentSelectedTemplate) : builderMode;
+  const currentSelectedTemplate = useMemo(
+    () => (selectedTemplateId ? savedTemplates.find((template) => template.id === selectedTemplateId) ?? null : null),
+    [savedTemplates, selectedTemplateId]
+  );
+  const effectiveTemplateMode = useMemo(
+    () => (currentSelectedTemplate ? inferTemplateMode(currentSelectedTemplate) : builderMode),
+    [builderMode, currentSelectedTemplate]
+  );
 
-  const effectivePlanName =
-    effectiveTemplateMode === "template" &&
-    (planType === "press_release" || planType === "earnings" || planType === "conference")
-      ? getGuidedTemplateDisplayName(planType, guidedForm) || eventName || templateName || getSeedTemplateName(planType)
-      : eventName || templateName || getSeedTemplateName(planType);
+  const effectivePlanName = useMemo(
+    () =>
+      effectiveTemplateMode === "template" &&
+      (planType === "press_release" || planType === "earnings" || planType === "conference")
+        ? getGuidedTemplateDisplayName(planType, guidedForm) || eventName || templateName || getSeedTemplateName(planType)
+        : eventName || templateName || getSeedTemplateName(planType),
+    [effectiveTemplateMode, eventName, guidedForm, planType, templateName]
+  );
   const previewEffectiveAnchorDate = noEventDate ? todayYYYYMMDD() : anchorDate;
   const previewAnchorDateForComputation = previewEffectiveAnchorDate || todayYYYYMMDD();
   const genericEventAnchorName = eventName.trim();
   const genericEventAnchorDate = noEventDate ? "" : anchorDate;
-  const resolvedAnchors = anchors.map((anchor) => ({
-    id: anchor.id,
-    key: anchor.key,
-    value:
-      getDerivedAnchorValue(planType, effectivePlanName, anchorDate, anchor.key, guidedForm, {
-        eventNameValue: genericEventAnchorName,
-        eventDateValue: genericEventAnchorDate,
-      }) ?? anchor.value,
-    displayValue: getAnchorDisplayValue(
-      anchor.key,
-      getDerivedAnchorValue(planType, effectivePlanName, anchorDate, anchor.key, guidedForm, {
-        eventNameValue: genericEventAnchorName,
-        eventDateValue: genericEventAnchorDate,
-      }) ?? anchor.value
-    ),
-    locked: anchor.locked,
-  }));
-  const anchorMap = buildAnchorMap(resolvedAnchors);
-  const previewPlan = resolvePlanAnchors(
-    createPlan({
-      name: effectivePlanName,
-      type: planType,
-      anchorDate: previewAnchorDateForComputation,
-      weekendRule,
-      template: buildTemplateItemsFromRows(rows),
-    }),
-    anchorMap
+  const resolvedAnchors = useMemo(
+    () =>
+      anchors.map((anchor) => {
+        const resolvedValue =
+          getDerivedAnchorValue(planType, effectivePlanName, anchorDate, anchor.key, guidedForm, {
+            eventNameValue: genericEventAnchorName,
+            eventDateValue: genericEventAnchorDate,
+          }) ?? anchor.value;
+        return {
+          id: anchor.id,
+          key: anchor.key,
+          value: resolvedValue,
+          displayValue: getAnchorDisplayValue(anchor.key, resolvedValue),
+          locked: anchor.locked,
+        };
+      }),
+    [anchorDate, anchors, effectivePlanName, genericEventAnchorDate, genericEventAnchorName, guidedForm, planType]
   );
-  const previewPlanForRender = previewEffectiveAnchorDate ? previewPlan : null;
+  const anchorMap = useMemo(() => buildAnchorMap(resolvedAnchors), [resolvedAnchors]);
+  const previewTemplate = useMemo(() => buildTemplateItemsFromRows(rows), [rows]);
+  const previewPlan = useMemo(
+    () =>
+      resolvePlanAnchors(
+        createPlan({
+          name: effectivePlanName,
+          type: planType,
+          anchorDate: previewAnchorDateForComputation,
+          weekendRule,
+          template: previewTemplate,
+        }),
+        anchorMap
+      ),
+    [anchorMap, effectivePlanName, planType, previewAnchorDateForComputation, previewTemplate, weekendRule]
+  );
+  const previewPlanForRender = useMemo(
+    () => (previewEffectiveAnchorDate ? previewPlan : null),
+    [previewEffectiveAnchorDate, previewPlan]
+  );
   const selectedEditableTemplate =
     currentSelectedTemplate && !isProtectedTemplate(currentSelectedTemplate) ? currentSelectedTemplate : null;
 
@@ -1332,6 +1905,7 @@ export default function PlansPage() {
   function updateRow(rowId: string, updater: (row: BuilderRow) => BuilderRow) {
     setRows((currentRows) => {
       const nextRows = currentRows.map((row) => (row.id === rowId ? updater(row) : row));
+      rowsRef.current = nextRows;
       if (meetingValidationErrors[rowId]) {
         const nextRow = nextRows.find((row) => row.id === rowId);
         const nextErrors = nextRow
@@ -1387,19 +1961,6 @@ export default function PlansPage() {
       activeElement.focus();
       activeElement.setSelectionRange(nextCursorPosition, nextCursorPosition);
     });
-  }
-
-  function downloadTextFile(filename: string, content: string) {
-    if (typeof window === "undefined") return;
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const objectUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(objectUrl);
   }
 
   function confirmExport() {
@@ -1615,29 +2176,11 @@ export default function PlansPage() {
     return null;
   }
 
-  function buildEmailDraftFileContent(item: Plan["items"][number]) {
-    const draft = normalizeEmailDraft(item.emailDraft);
-    const finalBody = buildFinalEmailBody(draft.body, {
-      enabled: appSettings.emailSignatureEnabled,
-      signature: appSettings.emailSignatureText,
-    });
-    return [
-      `To: ${draft.to.join(", ")}`,
-      `Cc: ${draft.cc.join(", ")}`,
-      `Bcc: ${draft.bcc.join(", ")}`,
-      `Subject: ${draft.subject.trim() || item.title || "Email draft"}`,
-      `X-Event-Based-Reminders-Mode: local-${appSettings.emailHandlingMode}`,
-      "",
-      finalBody || "(No body)",
-    ].join("\n");
-  }
-
   function getResolvedEmailDraftForExecution(item: Plan["items"][number]) {
     const draft = normalizeEmailDraft(item.emailDraft);
     return {
       ...draft,
       body: buildFinalEmailBody(draft.body, {
-        enabled: appSettings.emailSignatureEnabled,
         signature: appSettings.emailSignatureText,
       }),
     };
@@ -1870,7 +2413,7 @@ export default function PlansPage() {
     item: Plan["items"][number];
     status: "success" | "fallback" | "failed";
     path: "graph" | "fallback";
-    result?: OutlookExecutionResult;
+    result?: ProviderExecutionResult;
   }) {
     if (options.path !== "graph") {
       return {
@@ -1887,13 +2430,14 @@ export default function PlansPage() {
     }
 
     const action = options.result?.action ?? null;
+    const provider = options.result?.provider ?? "outlook";
     const rowKind = classifyPlanRow(options.item);
     const providerObjectType: ExecutionHistoryProviderObjectType = rowKind === "email" ? "message" : "event";
     const providerObjectId = options.result?.providerObjectId ?? null;
 
     if (options.status !== "success" || !providerObjectId) {
       return {
-        provider: "outlook" as const,
+        provider: provider as "outlook" | "gmail",
         providerObjectType,
         providerObjectId,
         canRecall: false,
@@ -1902,6 +2446,20 @@ export default function PlansPage() {
         modifyImplemented: false,
         recallReason: "This record does not include a provider object id, so recall is not available.",
         modifyReason: "This record does not include a provider object id, so modify is not available.",
+      };
+    }
+
+    if (provider === "gmail") {
+      return {
+        provider: "gmail" as const,
+        providerObjectType,
+        providerObjectId,
+        canRecall: false,
+        canModify: false,
+        recallImplemented: false,
+        modifyImplemented: false,
+        recallReason: "Google actions cannot be recalled from History yet.",
+        modifyReason: "Google actions cannot be modified from History yet.",
       };
     }
 
@@ -1979,7 +2537,7 @@ export default function PlansPage() {
     status: "success" | "fallback" | "failed";
     path: "graph" | "fallback";
     executionGroupId?: string;
-    result?: OutlookExecutionResult;
+    result?: ProviderExecutionResult;
     fallbackExportKind?: "eml" | "ics";
     reason?: string;
   }) {
@@ -2000,8 +2558,8 @@ export default function PlansPage() {
         path: options.path,
         recipients: getExecutionHistoryRecipients(options.item),
         attendees: getExecutionHistoryAttendees(options.item),
-        outlookWebLink: options.result?.webLink ?? null,
-        teamsJoinLink: options.result?.joinUrl ?? null,
+        outlookWebLink: options.result?.provider === "outlook" ? options.result?.webLink ?? null : null,
+        teamsJoinLink: options.result?.provider === "outlook" ? options.result?.joinUrl ?? null : null,
         fallbackExportKind: options.fallbackExportKind ?? null,
         provider: capabilities.provider,
         providerObjectId: capabilities.providerObjectId,
@@ -2054,92 +2612,276 @@ export default function PlansPage() {
     }
 
     const reason = connection.stale
-      ? "Your Outlook connection no longer matches the selected email. Falling back to local export."
+      ? "Your Outlook connection no longer matches the selected email."
       : !connection.supportedMailbox && connection.identity
-        ? `${connection.identity.mailboxEligibilityReason} Falling back to local export.`
+        ? `${connection.identity.mailboxEligibilityReason}`
         : connection.status === "reconnect_required"
-          ? "Reconnect Outlook in Settings to continue. Falling back to local export."
-          : "Outlook is not connected. Falling back to local export.";
+          ? "Reconnect Outlook in Settings to continue."
+          : "Connect Outlook to continue.";
 
     return { canUseGraph: false, connection, reason };
   }
 
-  function downloadLocalEmailItem(
-    item: Plan["items"][number],
-    options?: { showAlert?: boolean; alertMessage?: string }
-  ) {
-    downloadTextFile(
-      `${(normalizeEmailDraft(item.emailDraft).subject.trim() || item.title || "email-draft").toLowerCase().replace(/[^a-z0-9]+/g, "-") || "email-draft"}.eml`,
-      buildEmailDraftFileContent(item)
-    );
-    if (options?.showAlert === false || typeof window === "undefined") return;
-    window.alert(
-      options?.alertMessage ||
-        (appSettings.emailHandlingMode === "schedule"
-          ? "Downloaded a local scheduled-email draft file. Outlook schedule-send is not connected in the Event-Based Reminders app yet."
-          : appSettings.emailHandlingMode === "send"
-            ? "Downloaded a local email draft file. Live send is not connected in the Event-Based Reminders app yet."
-            : "Downloaded a local email draft file. Outlook draft creation is not connected in the Event-Based Reminders app yet.")
-    );
-  }
+  async function getEmailExecutionAvailability() {
+    const requestedEmailAction =
+      appSettings.emailHandlingMode === "send"
+        ? "send"
+        : appSettings.emailHandlingMode === "schedule"
+          ? "schedule"
+          : "draft";
+    const outlookConnected = Boolean(outlookConnection?.connected);
 
-  function downloadLocalMeetingItem(
-    item: Plan["items"][number],
-    options?: { showAlert?: boolean; alertMessage?: string }
-  ) {
-    downloadICS(
-      `${(item.title || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-") || "meeting"}.ics`,
-      buildICSForPlan({
-        ...previewPlan,
-        items: [item],
-      })
-    );
-    if (options?.showAlert === false || typeof window === "undefined") return;
-    window.alert(
-      options?.alertMessage ||
-        "Downloaded a local calendar file for this meeting. Outlook calendar creation is not connected in the Event-Based Reminders app yet."
-    );
-  }
+    console.info("[plans] checking email execution availability", {
+      requestedEmailAction,
+      outlookExpectedEmail: appSettings.outlookAccountEmail,
+    });
 
-  function downloadLocalReminderItem(
-    item: Plan["items"][number],
-    options?: { showAlert?: boolean; alertMessage?: string }
-  ) {
-    downloadICS(
-      `${(item.title || previewPlan.name).toLowerCase().replace(/[^a-z0-9]+/g, "-") || "plan-item"}.ics`,
-      buildICSForPlan({
-        ...previewPlan,
-        items: [item],
-      })
-    );
-    if (options?.showAlert === false || typeof window === "undefined") return;
-    window.alert(
-      options?.alertMessage ||
-        "Downloaded a local calendar file for this reminder. Outlook calendar creation is not connected in the Event-Based Reminders app yet."
-    );
-  }
-
-  function downloadLocalPlanCalendarItems(
-    items: Plan["items"],
-    options?: { showAlert?: boolean; alertMessage?: string }
-  ) {
-    if (items.length === 0) return;
-    downloadICS(
-      `${previewPlan.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "plan"}.ics`,
-      buildICSForPlan({
-        ...previewPlan,
-        items,
-      })
-    );
-    if (options?.showAlert === false || typeof window === "undefined") return;
-    if (options?.alertMessage) {
-      window.alert(options.alertMessage);
+    if (authEnabled && currentUser && !currentOrgId) {
+      console.info("[plans] refreshing org context before gmail availability check", {
+        requestedEmailAction,
+        userId: currentUser.id,
+      });
+      await refreshAuthContext();
     }
+
+    if (appSettings.emailHandlingMode === "schedule") {
+      const outlookAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
+      const gmailAvailability = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
+      const gmailConnected = gmailAvailability.connected && !gmailAvailability.stale;
+      console.info("[plans] outlook availability result", {
+        requestedEmailAction,
+        canUseGraph: outlookAvailability.canUseGraph,
+        reason: outlookAvailability.reason ?? null,
+      });
+      console.info("[plans] final chosen email provider", {
+        requestedEmailAction,
+        provider: outlookAvailability.canUseGraph ? "outlook" : gmailConnected ? "gmail" : "outlook",
+        canExecute: outlookAvailability.canUseGraph || gmailConnected,
+        outlookAvailable: outlookAvailability.canUseGraph,
+        gmailAvailable: gmailConnected,
+        reason: outlookAvailability.canUseGraph ? null : gmailConnected ? null : outlookAvailability.reason ?? "Connect Outlook or Gmail to continue.",
+      });
+      updateExportDebug({
+        executionPath: "email",
+        requestedEmailAction,
+        outlookConnected,
+        outlookAvailable: outlookAvailability.canUseGraph,
+        outlookUnavailableReason: outlookAvailability.canUseGraph ? null : outlookAvailability.reason ?? null,
+        gmail: getLastGmailAvailabilityDebugSnapshot(),
+        chosenProvider: outlookAvailability.canUseGraph ? "outlook" : gmailConnected ? "gmail" : "outlook",
+        fallbackTriggered: false,
+        fallbackReason: null,
+        gmailExecutionRan: false,
+        gmailExecutionThrew: false,
+        gmailExecutionError: null,
+      });
+      const chosenProvider: "outlook" | "gmail" = outlookAvailability.canUseGraph
+        ? "outlook"
+        : gmailConnected
+          ? "gmail"
+          : "outlook";
+      return {
+        provider: chosenProvider,
+        canExecute: outlookAvailability.canUseGraph || gmailConnected,
+        reason: outlookAvailability.canUseGraph || gmailConnected ? undefined : "Connect Outlook or Gmail to continue.",
+        outlookAvailable: outlookAvailability.canUseGraph,
+        gmailAvailable: gmailConnected,
+      };
+    }
+
+    const outlookAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
+    console.info("[plans] outlook availability result", {
+      requestedEmailAction,
+      canUseGraph: outlookAvailability.canUseGraph,
+      reason: outlookAvailability.reason ?? null,
+    });
+    if (outlookAvailability.canUseGraph) {
+      console.info("[plans] final chosen email provider", {
+        requestedEmailAction,
+        provider: "outlook",
+        canExecute: true,
+        outlookAvailable: true,
+        gmailAvailable: false,
+        reason: null,
+      });
+      updateExportDebug({
+        executionPath: "email",
+        requestedEmailAction,
+        outlookConnected,
+        outlookAvailable: true,
+        outlookUnavailableReason: null,
+        gmail: {
+          ...getLastGmailAvailabilityDebugSnapshot(),
+          finalAvailable: false,
+        },
+        chosenProvider: "outlook",
+        fallbackTriggered: false,
+        fallbackReason: null,
+        gmailExecutionRan: false,
+        gmailExecutionThrew: false,
+        gmailExecutionError: null,
+      });
+      return {
+        provider: "outlook" as const,
+        canExecute: true,
+        outlookAvailable: true,
+        gmailAvailable: false,
+      };
+    }
+
+    const gmailAvailability = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
+    console.info("[plans] gmail availability result", {
+      requestedEmailAction,
+      status: gmailAvailability.status,
+      connected: gmailAvailability.connected,
+      stale: gmailAvailability.stale,
+      connectedEmail: gmailAvailability.normalizedConnectedEmail,
+    });
+    if (gmailAvailability.connected && !gmailAvailability.stale) {
+      const gmailDebugSnapshot = getLastGmailAvailabilityDebugSnapshot();
+      console.info("[plans] final chosen email provider", {
+        requestedEmailAction,
+        provider: "gmail",
+        canExecute: true,
+        outlookAvailable: false,
+        gmailAvailable: true,
+        reason: null,
+      });
+      updateExportDebug({
+        executionPath: "email",
+        requestedEmailAction,
+        outlookConnected,
+        outlookAvailable: false,
+        outlookUnavailableReason: outlookAvailability.reason ?? null,
+        gmail: gmailDebugSnapshot,
+        chosenProvider: "gmail",
+        fallbackTriggered: false,
+        fallbackReason: null,
+        gmailExecutionRan: false,
+        gmailExecutionThrew: false,
+        gmailExecutionError: null,
+      });
+      return {
+        provider: "gmail" as const,
+        canExecute: true,
+        outlookAvailable: false,
+        gmailAvailable: true,
+      };
+    }
+
+    const reason =
+      gmailAvailability.status === "reconnect_required"
+        ? "Reconnect Gmail in Settings to continue."
+        : outlookAvailability.connection?.status === "reconnect_required"
+          ? "Reconnect Outlook or Gmail in Settings to continue."
+          : "Connect Outlook or Gmail to continue.";
+
+    console.info("[plans] final chosen email provider", {
+      requestedEmailAction,
+      provider: "outlook",
+      canExecute: false,
+      outlookAvailable: false,
+      gmailAvailable: false,
+      reason,
+    });
+    updateExportDebug({
+      executionPath: "email",
+      requestedEmailAction,
+      outlookConnected,
+      outlookAvailable: false,
+      outlookUnavailableReason: outlookAvailability.reason ?? null,
+      gmail: getLastGmailAvailabilityDebugSnapshot(),
+      chosenProvider: "outlook",
+      fallbackTriggered: false,
+      fallbackReason: null,
+      gmailExecutionRan: false,
+      gmailExecutionThrew: false,
+      gmailExecutionError: null,
+    });
+
+    return {
+      provider: "outlook" as const,
+      canExecute: false,
+      reason,
+      outlookAvailable: false,
+      gmailAvailable: false,
+    };
   }
 
-  function setExecutionNoticeForResult(result: OutlookExecutionResult) {
+  async function getCalendarExecutionAvailability(): Promise<ProviderExecutionAvailability> {
+    const outlookAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
+    if (outlookAvailability.canUseGraph) {
+      console.info("[plans] calendar availability result", {
+        outlookAvailable: true,
+        gmailAvailable: false,
+        provider: "outlook",
+        reason: null,
+      });
+      updateExportDebug({
+        executionPath: "calendar",
+        outlookConnected: Boolean(outlookConnection?.connected),
+        outlookAvailable: true,
+        outlookUnavailableReason: null,
+        gmail: {
+          ...getLastGmailAvailabilityDebugSnapshot(),
+          finalAvailable: false,
+        },
+        chosenProvider: "outlook",
+        fallbackTriggered: false,
+        fallbackReason: null,
+      });
+      return {
+        provider: "outlook" as const,
+        canExecute: true,
+        reason: undefined,
+        outlookAvailable: true,
+        gmailAvailable: false,
+      };
+    }
+
+    if (authEnabled && currentUser && !currentOrgId) {
+      await refreshAuthContext();
+    }
+
+    const gmailAvailability = await resolveGmailConnectionState(undefined, [GOOGLE_CALENDAR_EVENTS_SCOPE]);
+    const gmailConnected = gmailAvailability.connected && !gmailAvailability.stale;
+    const gmailNeedsReconnect = gmailAvailability.status === "reconnect_required";
+    const reason = gmailConnected
+      ? undefined
+      : gmailNeedsReconnect
+        ? "Reconnect Google in Settings to enable Google Calendar, or connect Outlook to continue."
+        : "Connect Outlook to continue.";
+
+    console.info("[plans] calendar availability result", {
+      outlookAvailable: false,
+      gmailAvailable: gmailConnected,
+      provider: gmailConnected ? "gmail" : "outlook",
+      reason: reason ?? null,
+    });
+    updateExportDebug({
+      executionPath: "calendar",
+      outlookConnected: Boolean(outlookConnection?.connected),
+      outlookAvailable: false,
+      outlookUnavailableReason: outlookAvailability.reason ?? null,
+      gmail: getLastGmailAvailabilityDebugSnapshot(),
+      chosenProvider: gmailConnected ? "gmail" : "outlook",
+      fallbackTriggered: false,
+      fallbackReason: null,
+    });
+
+    return {
+      provider: gmailConnected ? ("gmail" as const) : ("outlook" as const),
+      canExecute: gmailConnected,
+      reason,
+      outlookAvailable: false,
+      gmailAvailable: gmailConnected,
+    };
+  }
+
+  function setExecutionNoticeForResult(result: ProviderExecutionResult) {
     const details = [result.title];
 
+    setExecutionState("success");
     setExecutionNotice({
       tone: "success",
       title: result.message,
@@ -2147,22 +2889,23 @@ export default function PlansPage() {
     });
   }
 
-  function setExecutionNoticeForFallback(options: {
+  function setExecutionNoticeForUnavailable(options: {
     title: string;
     reason: string;
-    fallbackMessage: string;
+    detail?: string;
   }) {
+    setExecutionState("failure");
     setExecutionNotice({
-      tone: "mixed",
+      tone: "warning",
       title: options.title,
       message: options.reason,
-      details: [options.fallbackMessage],
+      details: options.detail ? [options.detail] : undefined,
     });
   }
 
   function setExecutionNoticeForExportSummary(options: {
     graphUnavailableReason?: string;
-    graphResults: OutlookExecutionResult[];
+    graphResults: ProviderExecutionResult[];
     failedEmailItems: Plan["items"];
     failedCalendarItems: Plan["items"];
     draftCount: number;
@@ -2170,11 +2913,12 @@ export default function PlansPage() {
     sentCount: number;
     reminderCount: number;
     meetingCount: number;
+    gmailScheduledDraftCount: number;
   }) {
     const details: string[] = [];
 
     if (options.draftCount > 0) {
-      details.push(`${options.draftCount} Outlook draft${options.draftCount === 1 ? "" : "s"} created`);
+      details.push(`${options.draftCount} email draft${options.draftCount === 1 ? "" : "s"} created`);
     }
     if (options.scheduledCount > 0) {
       details.push(`${options.scheduledCount} Outlook email${options.scheduledCount === 1 ? "" : "s"} scheduled`);
@@ -2188,12 +2932,17 @@ export default function PlansPage() {
     if (options.meetingCount > 0) {
       details.push(`${options.meetingCount} Outlook meeting${options.meetingCount === 1 ? "" : "s"} created`);
     }
+    if (options.gmailScheduledDraftCount > 0) {
+      details.push(
+        `${options.gmailScheduledDraftCount} Gmail email${options.gmailScheduledDraftCount === 1 ? "" : "s"} saved as draft because scheduled send is not supported yet`
+      );
+    }
     if (options.failedEmailItems.length > 0) {
       details.push(
-        `${options.failedEmailItems.length} email fallback file${options.failedEmailItems.length === 1 ? "" : "s"} downloaded`
+        `${options.failedEmailItems.length} email action${options.failedEmailItems.length === 1 ? "" : "s"} could not be completed`
       );
       details.push(
-        `Email fallback: ${options.failedEmailItems
+        `Email issue: ${options.failedEmailItems
           .slice(0, 3)
           .map((item) => item.customTitle ?? item.title)
           .join(", ")}${options.failedEmailItems.length > 3 ? ", ..." : ""}`
@@ -2201,10 +2950,10 @@ export default function PlansPage() {
     }
     if (options.failedCalendarItems.length > 0) {
       details.push(
-        `${options.failedCalendarItems.length} calendar item${options.failedCalendarItems.length === 1 ? "" : "s"} exported to ICS`
+        `${options.failedCalendarItems.length} calendar action${options.failedCalendarItems.length === 1 ? "" : "s"} could not be completed`
       );
       details.push(
-        `Calendar fallback: ${options.failedCalendarItems
+        `Calendar issue: ${options.failedCalendarItems
           .slice(0, 3)
           .map((item) => item.customTitle ?? item.title)
           .join(", ")}${options.failedCalendarItems.length > 3 ? ", ..." : ""}`
@@ -2213,22 +2962,92 @@ export default function PlansPage() {
     const hasFallbacks = options.failedEmailItems.length > 0 || options.failedCalendarItems.length > 0;
     const hasGraphSuccesses = options.graphResults.length > 0;
 
+    setExecutionState(hasFallbacks ? (hasGraphSuccesses ? "success" : "failure") : "success");
     setExecutionNotice({
       tone: !hasGraphSuccesses && hasFallbacks ? "warning" : hasFallbacks ? "mixed" : "success",
       title: hasFallbacks
         ? hasGraphSuccesses
-          ? "Some Outlook actions fell back to local export"
-          : "Exported locally"
-        : "Outlook export completed",
+          ? "Some actions could not be completed"
+          : "Export could not be completed"
+        : "Export completed",
       message: options.graphUnavailableReason,
       details,
     });
   }
 
-  async function executePreviewEmailViaGraph(item: Plan["items"][number]) {
+  function setExecutionNoticePending(options: {
+    title: string;
+    message: string;
+    details?: string[];
+  }) {
+    setExecutionState("pending");
+    setExecutionNotice({
+      tone: "pending",
+      title: options.title,
+      message: options.message,
+      details: options.details,
+    });
+  }
+
+  async function executePreviewEmailViaProvider(item: Plan["items"][number], provider: "outlook" | "gmail") {
     const draft = getResolvedEmailDraftForExecution(item);
     const fallbackSubject = draft.subject.trim() || item.title || "Email draft";
     const title = fallbackSubject;
+
+    if (provider === "gmail") {
+      console.info("[gmail] payload from plans", {
+        action: appSettings.emailHandlingMode,
+        subject: draft.subject,
+        bodyPreview: draft.body.slice(0, 120),
+        to: draft.to,
+        cc: draft.cc,
+        bcc: draft.bcc,
+      });
+      updateExportDebug({
+        gmailExecutionRan: true,
+        gmailExecutionThrew: false,
+        gmailExecutionError: null,
+      });
+      try {
+        if (appSettings.emailHandlingMode === "send") {
+          const result = await sendGmailEmailFromEmailDraft({
+            draft,
+            fallbackSubject,
+          });
+          return {
+            provider: "gmail",
+            kind: "email",
+            action: "email_sent",
+            title,
+            message: "Gmail email sent.",
+            providerObjectId: result.id,
+          } satisfies ProviderExecutionResult;
+        }
+        const result = await createGmailDraftFromEmailDraft({
+          draft,
+          fallbackSubject,
+        });
+        return {
+          provider: "gmail",
+          kind: "email",
+          action: "draft_created",
+          title,
+          message:
+            appSettings.emailHandlingMode === "schedule"
+              ? "Gmail scheduled send is not supported yet. Draft created instead."
+              : "Gmail draft created.",
+          providerObjectId: result.id,
+          webLink: result.webLink,
+        } satisfies ProviderExecutionResult;
+      } catch (error) {
+        updateExportDebug({
+          gmailExecutionRan: true,
+          gmailExecutionThrew: true,
+          gmailExecutionError: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    }
 
     if (appSettings.emailHandlingMode === "send") {
       await sendOutlookEmailFromEmailDraft({
@@ -2237,11 +3056,12 @@ export default function PlansPage() {
         expectedEmail: appSettings.outlookAccountEmail,
       });
       return {
+        provider: "outlook",
         kind: "email",
         action: "email_sent",
         title,
         message: "Outlook email sent.",
-      } satisfies OutlookExecutionResult;
+      } satisfies ProviderExecutionResult;
     }
 
     if (appSettings.emailHandlingMode === "schedule") {
@@ -2256,13 +3076,14 @@ export default function PlansPage() {
         expectedEmail: appSettings.outlookAccountEmail,
       });
       return {
+        provider: "outlook",
         kind: "email",
         action: "email_scheduled",
         title,
         message: "Outlook email scheduled.",
         providerObjectId: result.id,
         webLink: result.webLink,
-      } satisfies OutlookExecutionResult;
+      } satisfies ProviderExecutionResult;
     }
 
     const result = await createOutlookDraftFromEmailDraft({
@@ -2271,18 +3092,62 @@ export default function PlansPage() {
       expectedEmail: appSettings.outlookAccountEmail,
     });
     return {
+      provider: "outlook",
       kind: "email",
       action: "draft_created",
       title,
       message: "Outlook draft created.",
       providerObjectId: result.id,
       webLink: result.webLink,
-    } satisfies OutlookExecutionResult;
+    } satisfies ProviderExecutionResult;
   }
 
-  async function executePreviewCalendarViaGraph(item: Plan["items"][number]) {
+  async function executePreviewCalendarViaProvider(item: Plan["items"][number], provider: "outlook" | "gmail") {
     const timing = buildPreviewItemGraphTiming(item);
     const rowKind = classifyPlanRow(item);
+    console.info("[plans] executing calendar item", {
+      itemId: item.id,
+      provider,
+      rowKind,
+      title: item.customTitle ?? item.title,
+      startISO: timing.startISO,
+      endISO: timing.endISO,
+      isAllDay: timing.isAllDay,
+      attendees: item.meetingDraft?.attendees ?? [],
+      location: item.meetingDraft?.location ?? "",
+      addGoogleMeet: Boolean(item.meetingDraft?.addGoogleMeet),
+      teamsMeeting: Boolean(item.meetingDraft?.teamsMeeting),
+    });
+    if (provider === "gmail") {
+      const result = await createGoogleCalendarEvent({
+        subject: item.customTitle ?? item.title,
+        bodyText: item.body?.trim() || "",
+        startISO: timing.startISO,
+        endISO: timing.endISO,
+        timeZone: "America/New_York",
+        isAllDay: timing.isAllDay,
+        location: item.meetingDraft?.location,
+        attendees: item.meetingDraft?.attendees ?? [],
+        teamsMeeting: item.meetingDraft?.teamsMeeting,
+        addGoogleMeet: item.meetingDraft?.addGoogleMeet,
+      });
+      console.info("[plans] calendar execution result", {
+        itemId: item.id,
+        provider,
+        rowKind,
+        result,
+      });
+      return {
+        provider: "gmail",
+        kind: rowKind === "meeting" ? "meeting" : "reminder",
+        action: rowKind === "meeting" ? "meeting_created" : "reminder_created",
+        title: item.customTitle ?? item.title,
+        message: rowKind === "meeting" ? "Google Calendar meeting created." : "Google Calendar reminder created.",
+        providerObjectId: result.id,
+        webLink: result.webLink,
+        joinUrl: result.joinUrl,
+      } satisfies ProviderExecutionResult;
+    }
     const result = await createOutlookCalendarEvent({
       subject: item.customTitle ?? item.title,
       bodyText: item.body?.trim() || "",
@@ -2295,7 +3160,14 @@ export default function PlansPage() {
       teamsMeeting: item.meetingDraft?.teamsMeeting,
       expectedEmail: appSettings.outlookAccountEmail,
     });
+    console.info("[plans] calendar execution result", {
+      itemId: item.id,
+      provider,
+      rowKind,
+      result,
+    });
     return {
+      provider: "outlook",
       kind: rowKind === "meeting" ? "meeting" : "reminder",
       action: rowKind === "meeting" ? "meeting_created" : "reminder_created",
       title: item.customTitle ?? item.title,
@@ -2303,32 +3175,67 @@ export default function PlansPage() {
       providerObjectId: result.id,
       webLink: result.webLink,
       joinUrl: result.joinUrl,
-    } satisfies OutlookExecutionResult;
+    } satisfies ProviderExecutionResult;
   }
 
   async function exportPreviewEmailItem(itemId: string) {
-    const item = previewPlan.items.find((entry) => entry.id === itemId);
+    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
     if (!item) return;
+    updateExportDebug({
+      rowType: "email",
+      executionPath: "email",
+    });
     if (validateEmailRowsForExport([itemId], { usePopup: true })) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
+    setExecutionNoticePending({
+      title: "Starting email export",
+      message:
+        appSettings.emailHandlingMode === "send"
+          ? "Sending email..."
+          : "Creating email draft...",
+      details: [item.customTitle ?? item.title],
+    });
 
-    const graphAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
-    if (graphAvailability.canUseGraph) {
+    const emailAvailability = await getEmailExecutionAvailability();
+    console.info("[plans] single email export decision", {
+      requestedEmailAction: appSettings.emailHandlingMode,
+      provider: emailAvailability.provider,
+      canExecute: emailAvailability.canExecute,
+      outlookAvailable: emailAvailability.outlookAvailable,
+      gmailAvailable: emailAvailability.gmailAvailable,
+      reason: emailAvailability.reason ?? null,
+      itemId,
+    });
+    if (emailAvailability.canExecute) {
       try {
-        const result = await executePreviewEmailViaGraph(item);
-        await recordExecutionHistory({
-          item,
-          status: "success",
-          path: "graph",
-          executionGroupId,
-          result,
-        });
+        const result = await executePreviewEmailViaProvider(item, emailAvailability.provider);
+        if (result.provider === "outlook") {
+          await recordExecutionHistory({
+            item,
+            status: "success",
+            path: "graph",
+            executionGroupId,
+            result,
+          });
+        }
         setExecutionNoticeForResult(result);
         return;
       } catch (error) {
+        console.error("[plans] single email export unavailable", {
+          requestedEmailAction: appSettings.emailHandlingMode,
+          provider: emailAvailability.provider,
+          outlookAvailable: emailAvailability.outlookAvailable,
+          gmailAvailable: emailAvailability.gmailAvailable,
+          itemId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        updateExportDebug({
+          fallbackTriggered: true,
+          fallbackReason: error instanceof Error ? error.message : String(error),
+        });
         const userFixableMessage = getUserFixableEmailExecutionMessage(error);
         if (userFixableMessage) {
           if (typeof window !== "undefined") {
@@ -2336,58 +3243,73 @@ export default function PlansPage() {
           }
           return;
         }
-        const reason = error instanceof Error ? error.message : "Outlook email action failed.";
-        downloadLocalEmailItem(item, {
-          showAlert: false,
-        });
+        const reason = error instanceof Error ? error.message : "Email action failed.";
         await recordExecutionHistory({
           item,
-          status: "fallback",
-          path: "fallback",
+          status: "failed",
+          path: "graph",
           executionGroupId,
-          fallbackExportKind: "eml",
           reason,
         });
-        setExecutionNoticeForFallback({
-          title: "Email action fell back to local export",
+        setExecutionNoticeForUnavailable({
+          title: "Email action could not be completed",
           reason,
-          fallbackMessage: "Downloaded a local email draft file instead.",
         });
         return;
       }
     }
 
-    downloadLocalEmailItem(item, {
-      showAlert: false,
+    console.info("[plans] single email export unavailable", {
+      requestedEmailAction: appSettings.emailHandlingMode,
+      provider: emailAvailability.provider,
+      outlookAvailable: emailAvailability.outlookAvailable,
+      gmailAvailable: emailAvailability.gmailAvailable,
+      itemId,
+      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
+    });
+    updateExportDebug({
+      fallbackTriggered: true,
+      fallbackReason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
     });
     await recordExecutionHistory({
       item,
-      status: "fallback",
-      path: "fallback",
+      status: "failed",
+      path: "graph",
       executionGroupId,
-      fallbackExportKind: "eml",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
+      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
     });
-    setExecutionNoticeForFallback({
-      title: "Email action fell back to local export",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
-      fallbackMessage: "Downloaded a local email draft file instead.",
+    setExecutionNoticeForUnavailable({
+      title: "Email action is not available",
+      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
     });
   }
 
   async function exportPreviewMeetingItem(itemId: string) {
-    const item = previewPlan.items.find((entry) => entry.id === itemId);
+    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
     if (!item) return;
+    updateExportDebug({
+      rowType: "meeting",
+      executionPath: "calendar",
+      requestedEmailAction: null,
+      gmailExecutionRan: false,
+      gmailExecutionThrew: false,
+      gmailExecutionError: null,
+    });
     if (validateMeetingRowsForExport([itemId], { usePopup: true })) return;
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
+    setExecutionNoticePending({
+      title: "Starting calendar export",
+      message: "Creating calendar event...",
+      details: [item.customTitle ?? item.title],
+    });
 
-    const graphAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
-    if (graphAvailability.canUseGraph) {
+    const calendarAvailability = await getCalendarExecutionAvailability();
+    if (calendarAvailability.canExecute) {
       try {
-        const result = await executePreviewCalendarViaGraph(item);
+        const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
         await recordExecutionHistory({
           item,
           status: "success",
@@ -2399,41 +3321,31 @@ export default function PlansPage() {
         return;
       } catch (error) {
         const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
-        downloadLocalMeetingItem(item, {
-          showAlert: false,
-        });
         await recordExecutionHistory({
           item,
-          status: "fallback",
-          path: "fallback",
+          status: "failed",
+          path: "graph",
           executionGroupId,
-          fallbackExportKind: "ics",
           reason,
         });
-        setExecutionNoticeForFallback({
-          title: "Meeting action fell back to local export",
+        setExecutionNoticeForUnavailable({
+          title: "Meeting action could not be completed",
           reason,
-          fallbackMessage: "Downloaded a local calendar file instead.",
         });
         return;
       }
     }
 
-    downloadLocalMeetingItem(item, {
-      showAlert: false,
-    });
     await recordExecutionHistory({
       item,
-      status: "fallback",
-      path: "fallback",
+      status: "failed",
+      path: "graph",
       executionGroupId,
-      fallbackExportKind: "ics",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
+      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
     });
-    setExecutionNoticeForFallback({
-      title: "Meeting action fell back to local export",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
-      fallbackMessage: "Downloaded a local calendar file instead.",
+    setExecutionNoticeForUnavailable({
+      title: "Meeting action is not available",
+      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
     });
   }
 
@@ -2556,8 +3468,671 @@ export default function PlansPage() {
   function applyTemplateRecord(template: SavedPlanTemplate) {
     setTemplateActionMessage("");
     const snapshot = buildTemplateSnapshot(template);
+    setBuilderSourceProvenance(
+      buildBuilderSourceProvenance(snapshot, {
+        sourceType: "saved_template",
+        sourceLabel: template.name,
+      })
+    );
     applyBuilderSnapshot(snapshot);
     setLastTemplateSnapshot(snapshot);
+  }
+
+  function buildAiAnchorState(draft: AIPlanDraft) {
+    const genericAnchors = createGenericPresetAnchors().map((anchor) => {
+      const normalizedKey = normalizeAnchorKey(anchor.key);
+      if (normalizedKey === normalizeAnchorKey("Event Name")) {
+        return { ...anchor, value: draft.eventName || draft.templateName };
+      }
+      if (normalizedKey === normalizeAnchorKey("Event Date")) {
+        return { ...anchor, value: draft.noEventDate ? "" : draft.anchorDate || todayYYYYMMDD() };
+      }
+      return anchor;
+    });
+
+    const genericKeys = new Set(genericAnchors.map((anchor) => normalizeAnchorKey(anchor.key)));
+    const extraAnchors = draft.anchors
+      .filter((anchor) => !genericKeys.has(normalizeAnchorKey(anchor.key)))
+      .map((anchor) => ({
+        id: crypto.randomUUID(),
+        key: anchor.key,
+        value: anchor.value,
+      }));
+
+    return [...genericAnchors, ...extraAnchors];
+  }
+
+  function buildBuilderSnapshotFromAiDraft(draft: AIPlanDraft): BuilderStateSnapshot {
+    return {
+      builderMode: "new",
+      selectedTemplateId: null,
+      planType: draft.baseType,
+      templateName: draft.templateName || draft.eventName || "AI Generated Plan",
+      eventName: draft.eventName || draft.templateName || "AI Generated Plan",
+      anchorDate: draft.anchorDate || todayYYYYMMDD(),
+      noEventDate: draft.noEventDate,
+      weekendRule: draft.weekendRule,
+      rows: draft.rows.map((row) => ({
+        id: crypto.randomUUID(),
+        title: row.title,
+        body: row.body ?? "",
+        offsetDays: row.offsetDays,
+        dateBasis: row.dateBasis,
+        rowType: row.rowType,
+        reminderTime: normalizeReminderTimeInput(row.reminderTime ?? normalizedDefaultReminderTime),
+        emailDraft:
+          row.rowType === "email"
+            ? normalizeEmailDraft(row.emailDraft)
+            : { to: [], cc: [], bcc: [], subject: "", body: "" },
+        durationDraft: row.durationDraft ? { ...row.durationDraft } : undefined,
+        meetingDraft: row.meetingDraft ? { ...normalizeMeetingDraft(row.meetingDraft) } : undefined,
+      })),
+      anchors: buildAiAnchorState(draft),
+      guidedForm: createEmptyGuidedForm(),
+    };
+  }
+
+  function buildSavedTemplateFromAiDraft(draft: AIPlanDraft, name: string): SavedPlanTemplate {
+    return normalizeImportedTemplate({
+      id: makeId("template"),
+      name: name.trim() || draft.templateName || draft.eventName || "AI Template",
+      baseType: draft.baseType,
+      templateMode: "custom",
+      noEventDate: draft.noEventDate,
+      weekendRule: draft.weekendRule,
+      anchors: buildAiAnchorState(draft).map((anchor) => ({
+        key: anchor.key,
+        value: anchor.value,
+      })),
+      items: draft.rows.map((row) => ({
+        id: crypto.randomUUID(),
+        title: row.title,
+        body: row.body ?? "",
+        offsetDays: row.offsetDays,
+        dateBasis: row.dateBasis,
+        rowType: row.rowType,
+        reminderTime: normalizeReminderTimeInput(row.reminderTime ?? normalizedDefaultReminderTime),
+        emailDraft:
+          row.rowType === "email"
+            ? normalizeEmailDraft(row.emailDraft)
+            : { to: [], cc: [], bcc: [], subject: "", body: "" },
+        durationDraft: row.durationDraft ? { ...row.durationDraft } : undefined,
+        meetingDraft: row.meetingDraft ? { ...normalizeMeetingDraft(row.meetingDraft) } : undefined,
+      })),
+    });
+  }
+
+  function buildCurrentBuilderContext(): AIPlanBuilderContext {
+    return {
+      title: eventName.trim() || templateName.trim() || "Current plan",
+      planType,
+      noEventDate,
+      anchorDate,
+      weekendRule,
+      anchors: anchors
+        .filter((anchor) => anchor.key.trim() || anchor.value.trim())
+        .map((anchor) => ({
+          key: anchor.key.trim(),
+          value: anchor.value.trim(),
+        })),
+      rows: rows.map((row) => {
+        const normalizedEmailDraft = normalizeEmailDraft(row.emailDraft);
+        const normalizedMeetingDraft = normalizeMeetingDraft(row.meetingDraft);
+        return {
+          rowType: row.rowType,
+          title: row.title.trim() || row.body?.trim() || getAiBuilderContextRowLabel(row.rowType),
+          offsetDays: row.offsetDays ?? 0,
+          dateBasis: row.dateBasis ?? "event",
+          reminderTime: row.reminderTime?.trim() || undefined,
+          emailSubject: normalizedEmailDraft.subject.trim() || undefined,
+          recipientCount:
+            row.rowType === "email"
+              ? normalizedEmailDraft.to.length + normalizedEmailDraft.cc.length + normalizedEmailDraft.bcc.length
+              : undefined,
+          attendeeCount: normalizedMeetingDraft?.attendees?.length || undefined,
+        };
+      }),
+    };
+  }
+
+  function buildBaselineFromBuilder(): AIDraftBaseline {
+    const reminderCount = rows.filter((row) => row.rowType === "reminder").length;
+    const emailCount = rows.filter((row) => row.rowType === "email").length;
+    const meetingCount = rows.filter((row) => row.rowType === "calendar_event").length;
+
+    return {
+      sourceLabel: "starting builder plan",
+      planType,
+      noEventDate,
+      anchorDate,
+      eventTime: "",
+      weekendRule,
+      totalRows: rows.length,
+      reminderCount,
+      emailCount,
+      meetingCount,
+    };
+  }
+
+  function buildBaselineFromDraft(draft: AIPlanDraft, sourceLabel: string): AIDraftBaseline {
+    const reminderCount = draft.rows.filter((row) => row.rowType === "reminder").length;
+    const emailCount = draft.rows.filter((row) => row.rowType === "email").length;
+    const meetingCount = draft.rows.filter((row) => row.rowType === "calendar_event").length;
+
+    return {
+      sourceLabel,
+      planType: draft.baseType,
+      noEventDate: draft.noEventDate,
+      anchorDate: draft.anchorDate || "",
+      eventTime: draft.eventTime || "",
+      weekendRule: draft.weekendRule,
+      totalRows: draft.rows.length,
+      reminderCount,
+      emailCount,
+      meetingCount,
+    };
+  }
+
+  function getAiDraftComparisonSummary(draft: AIPlanDraft, baseline: AIDraftBaseline) {
+    const current = buildBaselineFromDraft(draft, baseline.sourceLabel);
+    const totalDelta = current.totalRows - baseline.totalRows;
+    const reminderDelta = current.reminderCount - baseline.reminderCount;
+    const emailDelta = current.emailCount - baseline.emailCount;
+    const meetingDelta = current.meetingCount - baseline.meetingCount;
+    const timingChanged =
+      baseline.noEventDate !== current.noEventDate ||
+      baseline.anchorDate !== current.anchorDate ||
+      baseline.eventTime !== current.eventTime ||
+      baseline.weekendRule !== current.weekendRule;
+
+    let qualitativeLabel = "";
+    if (totalDelta > 0) {
+      qualitativeLabel = "Timeline expanded";
+    } else if (totalDelta < 0) {
+      qualitativeLabel = "Timeline simplified";
+    } else if (reminderDelta !== 0 || emailDelta !== 0 || meetingDelta !== 0) {
+      qualitativeLabel = "Mix of actions changed";
+    }
+
+    return {
+      current,
+      totalDelta,
+      reminderDelta,
+      emailDelta,
+      meetingDelta,
+      timingChanged,
+      qualitativeLabel,
+    };
+  }
+
+  function buildInitialAiMessages(): AIConversationMessage[] {
+    if (hasMeaningfulBuilderContent()) {
+      return [
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: "I can help refine your current plan or create a new one. Choose how you’d like to start.",
+          status: "needs_more_info",
+          modeOptions: [
+            { id: "refine_current", label: "Refine current plan" },
+            { id: "start_new", label: "Start a new plan" },
+          ],
+        },
+      ];
+    }
+
+    return [
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "Tell me what kind of event or workflow you’re planning for. You can describe your job, the event, and any reminders, emails, or meetings you want help creating.",
+        status: "needs_more_info",
+        starterPrompts: [...AI_STARTER_PROMPTS],
+      },
+    ];
+  }
+
+  function buildFreshNewPlanAiMessages(): AIConversationMessage[] {
+    return [
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "Tell me what kind of event or workflow you want to plan, and I’ll draft a timeline for you.",
+        status: "needs_more_info",
+        starterPrompts: [...AI_STARTER_PROMPTS],
+      },
+    ];
+  }
+
+  function buildSeededExplorationMessages(): AIConversationMessage[] {
+    return [
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "Starting a fresh exploration from your last draft. Tell me how you want this version to change.",
+        status: aiChatStatus,
+        starterPrompts: [
+          "Make the timeline more aggressive.",
+          "Move reminders earlier.",
+          "Add an internal prep meeting.",
+          "Remove the follow-up email.",
+        ],
+      },
+    ];
+  }
+
+  function buildCurrentBuilderSeededAiMessages(): AIConversationMessage[] {
+    return [
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "Continuing from your current builder plan. Tell me how you want to change it.",
+        status: "needs_more_info",
+        starterPrompts: [
+          "Move the reminders earlier.",
+          "Add an internal prep meeting.",
+          "Remove the follow-up email.",
+          "Make the timeline more aggressive.",
+        ],
+      },
+    ];
+  }
+
+  function hasMeaningfulAiSession() {
+    return Boolean(
+      aiChatMessages.length > 1 ||
+        aiChatDraft ||
+        aiChatSummary ||
+        aiChatChangeSummary.length ||
+        aiChatConfidenceNote ||
+        aiChatSuggestedNextActions.length ||
+        aiBuilderContextMode === "refine_current"
+    );
+  }
+
+  function restoreAiInitialState() {
+    setAiComposer("");
+    setAiGenerating(false);
+    setAiChatError(null);
+    setAiChatMessages(buildInitialAiMessages());
+    setAiChatSummary("");
+    setAiChatDraft(null);
+    setAiChatStatus("needs_more_info");
+    setAiChatChangeSummary([]);
+    setAiChatConfidenceNote("");
+    setAiChatSuggestedNextActions([]);
+    setAiBuilderContextMode(hasMeaningfulBuilderContent() ? null : "start_new");
+    setAiDraftBaseline(null);
+    setAiSessionSource({ type: "new" });
+    setShowAiApplyConfirm(false);
+  }
+
+  function openAiPanel() {
+    if (!AI_ENABLED) return;
+    setAiChatError(null);
+    setShowAiApplyConfirm(false);
+    setIsAiPanelOpen(true);
+    setAiComposer("");
+    setAiBuilderContextMode(hasMeaningfulBuilderContent() ? null : "start_new");
+    if (aiChatMessages.length > 0) return;
+    setAiSessionSource({ type: "new" });
+    setAiChatMessages(buildInitialAiMessages());
+  }
+
+  function resetAiChatState() {
+    setAiComposer("");
+    setAiGenerating(false);
+    setAiChatError(null);
+    setAiChatMessages([]);
+    setAiChatSummary("");
+    setAiChatDraft(null);
+    setAiChatStatus("needs_more_info");
+    setAiChatChangeSummary([]);
+    setAiChatConfidenceNote("");
+    setAiChatSuggestedNextActions([]);
+    setAiBuilderContextMode(null);
+    setAiSessionBackup(null);
+    setAiSavedTemplateInfo(null);
+    setAiTemplateSaveMessage(null);
+    setAiDraftBaseline(null);
+    setAiSessionSource(null);
+    setShowAiApplyConfirm(false);
+  }
+
+  function onStartOverAiSession() {
+    if (hasMeaningfulAiSession()) {
+      setAiSessionBackup({
+        messages: aiChatMessages,
+        summary: aiChatSummary,
+        draft: aiChatDraft,
+        status: aiChatStatus,
+        changeSummary: aiChatChangeSummary,
+        confidenceNote: aiChatConfidenceNote,
+        suggestedNextActions: aiChatSuggestedNextActions,
+        builderContextMode: aiBuilderContextMode,
+        baseline: aiDraftBaseline,
+        sessionSource: aiSessionSource,
+      });
+    }
+    restoreAiInitialState();
+  }
+
+  function onRestoreAiSession() {
+    if (!aiSessionBackup) return;
+    setAiComposer("");
+    setAiGenerating(false);
+    setAiChatError(null);
+    setAiChatMessages(aiSessionBackup.messages);
+    setAiChatSummary(aiSessionBackup.summary);
+    setAiChatDraft(aiSessionBackup.draft);
+    setAiChatStatus(aiSessionBackup.status);
+    setAiChatChangeSummary(aiSessionBackup.changeSummary);
+    setAiChatConfidenceNote(aiSessionBackup.confidenceNote);
+    setAiChatSuggestedNextActions(aiSessionBackup.suggestedNextActions);
+    setAiBuilderContextMode(aiSessionBackup.builderContextMode);
+    setAiDraftBaseline(aiSessionBackup.baseline);
+    setAiSessionSource(aiSessionBackup.sessionSource);
+    setShowAiApplyConfirm(false);
+  }
+
+  function onDuplicateAiDraftIntoNewExploration() {
+    if (!hasMeaningfulAiSession() || !aiChatDraft) return;
+    setAiSessionBackup({
+      messages: aiChatMessages,
+      summary: aiChatSummary,
+      draft: aiChatDraft,
+      status: aiChatStatus,
+      changeSummary: aiChatChangeSummary,
+      confidenceNote: aiChatConfidenceNote,
+      suggestedNextActions: aiChatSuggestedNextActions,
+      builderContextMode: aiBuilderContextMode,
+      baseline: aiDraftBaseline,
+      sessionSource: aiSessionSource,
+    });
+    setAiComposer("");
+    setAiGenerating(false);
+    setAiChatError(null);
+    setAiChatMessages(buildSeededExplorationMessages());
+    setAiBuilderContextMode(aiBuilderContextMode ?? "start_new");
+    setAiDraftBaseline(buildBaselineFromDraft(aiChatDraft, "seed draft"));
+    setAiSessionSource({ type: "branched_draft" });
+    setShowAiApplyConfirm(false);
+  }
+
+  function openAiPanelFromCurrentBuilder() {
+    if (!AI_ENABLED) return;
+    setAiChatError(null);
+    setShowAiApplyConfirm(false);
+    setShowAiTemplateSaveDialog(false);
+    setAiSavedTemplateInfo(null);
+    setAiTemplateSaveMessage(null);
+    setIsAiPanelOpen(true);
+    setAiComposer("");
+    setAiGenerating(false);
+    setAiChatMessages(buildCurrentBuilderSeededAiMessages());
+    setAiChatSummary(`Continuing from current builder plan "${eventName || templateName || "Current plan"}".`);
+    setAiChatDraft(null);
+    setAiChatStatus("needs_more_info");
+    setAiChatChangeSummary([]);
+    setAiChatConfidenceNote("");
+    setAiChatSuggestedNextActions([]);
+    setAiBuilderContextMode("refine_current");
+    setAiSessionBackup(null);
+    setAiDraftBaseline(buildBaselineFromBuilder());
+    setAiSessionSource({ type: "current_builder" });
+  }
+
+  function focusAiComposer() {
+    aiComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    aiComposerRef.current?.focus();
+  }
+
+  function onSelectAiBuilderMode(mode: "refine_current" | "start_new") {
+    setAiBuilderContextMode(mode);
+    setAiDraftBaseline(mode === "refine_current" ? buildBaselineFromBuilder() : null);
+    setAiSessionSource(mode === "refine_current" ? { type: "current_builder" } : { type: "new" });
+    if (mode === "start_new") {
+      setAiComposer("");
+      setAiGenerating(false);
+      setAiChatError(null);
+      setAiChatMessages(buildFreshNewPlanAiMessages());
+      setAiChatSummary("");
+      setAiChatDraft(null);
+      setAiChatStatus("needs_more_info");
+      setAiChatChangeSummary([]);
+      setAiChatConfidenceNote("");
+      setAiChatSuggestedNextActions([]);
+      return;
+    }
+    void onSendAiMessage(
+      mode === "refine_current" ? "Help me refine my current plan." : "Let’s start a new plan.",
+      mode
+    );
+  }
+
+  async function onSendAiMessage(rawInput?: string, explicitBuilderContextMode?: "refine_current" | "start_new") {
+    const trimmedPrompt = (rawInput ?? aiComposer).trim();
+    if (!trimmedPrompt) {
+      setAiChatError("Please enter a message.");
+      return;
+    }
+    const builderContextMode = explicitBuilderContextMode ?? aiBuilderContextMode ?? "start_new";
+
+    const userMessage: AIConversationMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: trimmedPrompt,
+    };
+    const requestMessages: AIChatMessage[] = [...aiChatMessages, userMessage].map((message) => ({
+      role: message.role,
+      text: message.text,
+    }));
+
+    setAiGenerating(true);
+    setAiChatError(null);
+    setAiChatMessages((current) => [...current, userMessage]);
+    if (!rawInput) {
+      setAiComposer("");
+    }
+
+    try {
+      const requestBody: AIPlanChatRequest = {
+        messages: requestMessages,
+        currentSummary: aiChatSummary,
+        currentDraft: aiChatDraft,
+        builderContextMode,
+        currentBuilderContext:
+          builderContextMode === "refine_current" ? buildCurrentBuilderContext() : null,
+      };
+
+      const response = await fetch("/api/ai/generate-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+
+      const payload = (await response.json()) as AIPlanChatTurnResult & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "AI plan generation failed.");
+      }
+      if (!payload?.draft?.rows?.length || !payload.assistantMessage) {
+        throw new Error("AI did not return a usable plan draft.");
+      }
+      setAiChatSummary(payload.summary);
+      setAiChatDraft(payload.draft);
+      setAiChatStatus(payload.status);
+      setAiChatChangeSummary(payload.changeSummary);
+      setAiChatConfidenceNote(payload.confidenceNote);
+      setAiChatSuggestedNextActions(payload.suggestedNextActions);
+      setAiChatMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: payload.assistantMessage,
+          summary: payload.summary,
+          status: payload.status,
+          followUpQuestions: payload.followUpQuestions,
+          changeSummary: payload.changeSummary,
+          confidenceNote: payload.confidenceNote,
+          suggestedNextActions: payload.suggestedNextActions,
+        },
+      ]);
+    } catch (error) {
+      setAiChatError(error instanceof Error ? error.message : "AI plan generation failed.");
+    } finally {
+      setAiGenerating(false);
+    }
+  }
+
+  function hasMeaningfulBuilderContent() {
+    const hasMeaningfulName = Boolean(templateName.trim() || eventName.trim());
+    const hasMeaningfulAnchorValue = anchors.some((anchor) => anchor.value.trim());
+    const hasMeaningfulRowContent = rows.some((row) => {
+      const normalizedEmailDraft = normalizeEmailDraft(row.emailDraft);
+      const normalizedMeetingDraft = normalizeMeetingDraft(row.meetingDraft);
+      return Boolean(
+        row.title.trim() ||
+          row.body?.trim() ||
+          normalizedEmailDraft.subject.trim() ||
+          normalizedEmailDraft.body.trim() ||
+          normalizedEmailDraft.to.length ||
+          normalizedEmailDraft.cc.length ||
+          normalizedEmailDraft.bcc.length ||
+          normalizedMeetingDraft?.attendees?.length ||
+          normalizedMeetingDraft?.location?.trim()
+      );
+    });
+
+    const hasMultipleRows = rows.length > 1;
+
+    return hasMeaningfulName || hasMeaningfulAnchorValue || hasMeaningfulRowContent || hasMultipleRows;
+  }
+
+  function applyAiDraftToBuilder() {
+    if (!aiChatDraft) return;
+    const sourceDetails = getAiSessionSourceDetails(aiSessionSource);
+    const nextSnapshot = buildBuilderSnapshotFromAiDraft(aiChatDraft);
+    setLastTemplateSnapshot(buildCurrentTemplateSnapshot());
+    setLastBuilderSourceProvenance(builderSourceProvenance);
+    applyBuilderSnapshot(nextSnapshot);
+    setBuilderSourceProvenance(
+      buildBuilderSourceProvenance(nextSnapshot, {
+        sourceType: "ai_draft",
+        sourceLabel: sourceDetails.label,
+        hadMissingDetails: aiDraftMissingDetails.length > 0,
+      })
+    );
+    setTemplateActionMessage("AI draft applied. Review and adjust it before exporting.");
+    setAiApplySuccessMessage("AI draft loaded into your plan. You can now review, edit, preview, and export it.");
+    resetAiChatState();
+    setIsAiPanelOpen(false);
+    window.setTimeout(() => {
+      builderSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
+
+  function onApplyAiDraft() {
+    if (!aiChatDraft) return;
+    if (hasMeaningfulBuilderContent()) {
+      setShowAiApplyConfirm(true);
+      return;
+    }
+    applyAiDraftToBuilder();
+  }
+
+  function updateAiDraftRow(
+    rowIndex: number,
+    updater: (row: AIPlanDraft["rows"][number]) => AIPlanDraft["rows"][number]
+  ) {
+    setAiChatDraft((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        rows: current.rows.map((row, index) => (index === rowIndex ? updater(row) : row)),
+      };
+    });
+  }
+
+  function removeAiDraftRow(rowIndex: number) {
+    setAiChatDraft((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        rows: current.rows.filter((_, index) => index !== rowIndex),
+      };
+    });
+  }
+
+  function openAiTemplateSaveDialog() {
+    if (!aiChatDraft) return;
+    setAiTemplateSaveMessage(null);
+    setAiSavedTemplateInfo(null);
+    setAiTemplateNameDraft(aiChatDraft.templateName || aiChatDraft.eventName || "AI Template");
+    setShowAiTemplateSaveDialog(true);
+  }
+
+  function saveAiDraftAsTemplate() {
+    if (!aiChatDraft) return;
+    const trimmedName = aiTemplateNameDraft.trim();
+    if (!trimmedName) {
+      setAiTemplateSaveMessage("Template name is required.");
+      return;
+    }
+    if (hasDuplicateTemplateName(trimmedName)) {
+      setAiTemplateSaveMessage("That name is already taken. Please choose another name.");
+      return;
+    }
+
+    const nextTemplate = buildSavedTemplateFromAiDraft(aiChatDraft, trimmedName);
+    hasLocalTemplateMutationRef.current = true;
+    const nextTemplates = [...savedTemplates, nextTemplate];
+    setSavedTemplates(nextTemplates);
+    persistTemplateStateImmediately(nextTemplates, selectedTemplateId);
+    setAiSavedTemplateInfo({ id: nextTemplate.id, name: nextTemplate.name });
+    setHighlightedTemplateId(nextTemplate.id);
+    setAiTemplateSaveMessage(null);
+    setShowAiTemplateSaveDialog(false);
+  }
+
+  function openBuilderTemplateSaveDialog() {
+    if (!hasMeaningfulBuilderContent()) return;
+    setBuilderTemplateSaveMessage(null);
+    setBuilderTemplateNameDraft(templateName.trim() || eventName.trim() || "Current Plan Template");
+    setShowBuilderTemplateSaveDialog(true);
+  }
+
+  function saveCurrentBuilderAsTemplate() {
+    const trimmedName = builderTemplateNameDraft.trim();
+    if (!trimmedName) {
+      setBuilderTemplateSaveMessage("Template name is required.");
+      return;
+    }
+    if (hasDuplicateTemplateName(trimmedName)) {
+      setBuilderTemplateSaveMessage("That name is already taken. Please choose another name.");
+      return;
+    }
+
+    const nextTemplate = normalizeImportedTemplate({
+      id: makeId("template"),
+      name: trimmedName,
+      baseType: planType,
+      templateMode: "custom",
+      noEventDate,
+      weekendRule,
+      anchors: resolvedAnchors
+        .map((anchor) => ({ key: anchor.key.trim(), value: anchor.value }))
+        .filter((anchor) => anchor.key),
+      items: cloneTemplateRows(rows),
+    });
+    hasLocalTemplateMutationRef.current = true;
+    const nextTemplates = [...savedTemplates, nextTemplate];
+    setSavedTemplates(nextTemplates);
+    persistTemplateStateImmediately(nextTemplates, selectedTemplateId);
+    setHighlightedTemplateId(nextTemplate.id);
+    setTemplateActionMessage(`Saved "${nextTemplate.name}" as a custom template.`);
+    setBuilderTemplateSaveMessage(null);
+    setShowBuilderTemplateSaveDialog(false);
   }
 
   function applyTemplate(templateId: string) {
@@ -2732,7 +4307,9 @@ export default function PlansPage() {
   function startNewPlan() {
     if (builderMode !== "new") {
       setLastTemplateSnapshot(buildCurrentTemplateSnapshot());
+      setLastBuilderSourceProvenance(builderSourceProvenance);
     }
+    setBuilderSourceProvenance(null);
     setBuilderMode("new");
     setSelectedTemplateId(null);
     setTemplateName("");
@@ -2750,6 +4327,7 @@ export default function PlansPage() {
   function cancelEditing() {
     if (builderMode === "new" && lastTemplateSnapshot) {
       applyBuilderSnapshot(lastTemplateSnapshot);
+      setBuilderSourceProvenance(lastBuilderSourceProvenance);
       return;
     }
     if (selectedTemplateId) {
@@ -2760,17 +4338,30 @@ export default function PlansPage() {
   }
 
   async function exportPreviewReminderItem(itemId: string) {
-    const item = previewPlan.items.find((entry) => entry.id === itemId);
+    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
     if (!item) return;
+    updateExportDebug({
+      rowType: "reminder",
+      executionPath: "calendar",
+      requestedEmailAction: null,
+      gmailExecutionRan: false,
+      gmailExecutionThrew: false,
+      gmailExecutionError: null,
+    });
     if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
     if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
     if (!confirmExport()) return;
     const executionGroupId = crypto.randomUUID();
+    setExecutionNoticePending({
+      title: "Starting calendar export",
+      message: "Creating calendar event...",
+      details: [item.customTitle ?? item.title],
+    });
 
-    const graphAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
-    if (graphAvailability.canUseGraph) {
+    const calendarAvailability = await getCalendarExecutionAvailability();
+    if (calendarAvailability.canExecute) {
       try {
-        const result = await executePreviewCalendarViaGraph(item);
+        const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
         await recordExecutionHistory({
           item,
           status: "success",
@@ -2782,41 +4373,31 @@ export default function PlansPage() {
         return;
       } catch (error) {
         const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
-        downloadLocalReminderItem(item, {
-          showAlert: false,
-        });
         await recordExecutionHistory({
           item,
-          status: "fallback",
-          path: "fallback",
+          status: "failed",
+          path: "graph",
           executionGroupId,
-          fallbackExportKind: "ics",
           reason,
         });
-        setExecutionNoticeForFallback({
-          title: "Reminder action fell back to local export",
+        setExecutionNoticeForUnavailable({
+          title: "Reminder action could not be completed",
           reason,
-          fallbackMessage: "Downloaded a local calendar file instead.",
         });
         return;
       }
     }
 
-    downloadLocalReminderItem(item, {
-      showAlert: false,
-    });
     await recordExecutionHistory({
       item,
-      status: "fallback",
-      path: "fallback",
+      status: "failed",
+      path: "graph",
       executionGroupId,
-      fallbackExportKind: "ics",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
+      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
     });
-    setExecutionNoticeForFallback({
-      title: "Reminder action fell back to local export",
-      reason: graphAvailability.reason ?? "Outlook is not connected. Falling back to local export.",
-      fallbackMessage: "Downloaded a local calendar file instead.",
+    setExecutionNoticeForUnavailable({
+      title: "Reminder action is not available",
+      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
     });
   }
 
@@ -2825,109 +4406,223 @@ export default function PlansPage() {
     if (warnIfPastScheduledItems({ usePopup: true })) return;
     if (!options?.skipConfirm && !confirmExport()) return;
 
-    const { emailItems, calendarItems } = partitionPlanItemsByKind(previewPlan.items);
-    const graphAvailability = await getGraphExecutionAvailability([
-      "Mail.ReadWrite",
-      "Mail.Send",
-      "Calendars.ReadWrite",
-    ]);
+    const latestPreviewPlan = getLatestPreviewPlan();
+    const { emailItems, calendarItems } = partitionPlanItemsByKind(latestPreviewPlan.items);
+    setExecutionNoticePending({
+      title: "Starting export",
+      message:
+        emailItems.length > 0 && calendarItems.length === 0
+          ? appSettings.emailHandlingMode === "send"
+            ? "Sending email..."
+            : "Creating email draft..."
+          : calendarItems.length > 0 && emailItems.length === 0
+            ? "Creating calendar event..."
+            : "Sending provider actions...",
+    });
+    const calendarAvailability: ProviderExecutionAvailability = calendarItems.length > 0
+      ? await getCalendarExecutionAvailability()
+      : {
+          provider: "outlook",
+          canExecute: false,
+          reason: undefined,
+          outlookAvailable: false,
+          gmailAvailable: false,
+        };
 
     const failedEmailItems: Plan["items"] = [];
     const failedCalendarItems: Plan["items"] = [];
-    const graphResults: OutlookExecutionResult[] = [];
+    const failedCalendarReasons = new Map<string, string>();
+    const graphResults: ProviderExecutionResult[] = [];
     const executionGroupId = crypto.randomUUID();
+    const emailAvailability: ProviderExecutionAvailability = emailItems.length > 0
+      ? await getEmailExecutionAvailability()
+      : {
+          provider: "outlook",
+          canExecute: false,
+          reason: undefined,
+          outlookAvailable: false,
+          gmailAvailable: false,
+        };
+    if (emailItems.length > 0) {
+      console.info("[plans] bulk email export decision", {
+        requestedEmailAction: appSettings.emailHandlingMode,
+        provider: emailAvailability.provider,
+        canExecute: emailAvailability.canExecute,
+        outlookAvailable: emailAvailability.outlookAvailable,
+        gmailAvailable: emailAvailability.gmailAvailable,
+        reason: emailAvailability.reason ?? null,
+        emailItemCount: emailItems.length,
+      });
+    }
+    if (calendarItems.length > 0) {
+      console.info("[plans] bulk calendar export decision", {
+        provider: calendarAvailability.provider,
+        canExecute: calendarAvailability.canExecute,
+        outlookAvailable: calendarAvailability.outlookAvailable,
+        gmailAvailable: calendarAvailability.gmailAvailable,
+        reason: calendarAvailability.reason ?? null,
+        calendarItemCount: calendarItems.length,
+      });
+    }
+    updateExportDebug({
+      rowType:
+        emailItems.length > 0 && calendarItems.length > 0
+          ? "mixed"
+          : emailItems.length > 0
+            ? "email"
+            : latestPreviewPlan.items.some((item) => classifyPlanRow(item) === "meeting")
+              ? latestPreviewPlan.items.some((item) => classifyPlanRow(item) === "reminder")
+                ? "calendar_mixed"
+                : "meeting"
+              : "reminder",
+      executionPath:
+        emailItems.length > 0 && calendarItems.length === 0
+          ? "email"
+          : calendarItems.length > 0 && emailItems.length === 0
+            ? "calendar"
+            : null,
+    });
     let draftCount = 0;
     let scheduledCount = 0;
     let sentCount = 0;
     let reminderCount = 0;
     let meetingCount = 0;
+    let gmailScheduledDraftCount = 0;
+    const executableItems = latestPreviewPlan.items.filter((item) => {
+      const rowKind = classifyPlanRow(item);
+      return rowKind === "email" ? emailAvailability.canExecute : calendarAvailability.canExecute;
+    });
 
-    if (graphAvailability.canUseGraph) {
-      for (const item of previewPlan.items) {
+    const executionResults = await Promise.allSettled(
+      executableItems.map(async (item) => {
         const rowKind = classifyPlanRow(item);
-        try {
-          if (rowKind === "email") {
-            const result = await executePreviewEmailViaGraph(item);
-            graphResults.push(result);
-            await recordExecutionHistory({
-              item,
-              status: "success",
-              path: "graph",
-              executionGroupId,
-              result,
-            });
-            if (result.action === "email_sent") {
-              sentCount += 1;
-            } else if (result.action === "email_scheduled") {
-              scheduledCount += 1;
-            } else {
-              draftCount += 1;
-            }
-          } else {
-            const result = await executePreviewCalendarViaGraph(item);
-            graphResults.push(result);
-            await recordExecutionHistory({
-              item,
-              status: "success",
-              path: "graph",
-              executionGroupId,
-              result,
-            });
-            if (rowKind === "meeting") {
-              meetingCount += 1;
-            } else {
-              reminderCount += 1;
-            }
-          }
-        } catch (error) {
-          if (rowKind === "email") {
-            const userFixableMessage = getUserFixableEmailExecutionMessage(error);
-            if (userFixableMessage) {
-              if (typeof window !== "undefined") {
-                window.alert(userFixableMessage);
-              }
-              return;
-            }
-            failedEmailItems.push(item);
-          } else {
-            failedCalendarItems.push(item);
-          }
+        const result =
+          rowKind === "email"
+            ? await executePreviewEmailViaProvider(item, emailAvailability.provider)
+            : await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
+
+        if (result.provider === "outlook" || rowKind !== "email") {
+          await recordExecutionHistory({
+            item,
+            status: "success",
+            path: "graph",
+            executionGroupId,
+            result,
+          });
         }
+
+        return { item, rowKind, result };
+      })
+    );
+
+    for (const settledResult of executionResults) {
+      if (settledResult.status === "fulfilled") {
+        const { rowKind, result } = settledResult.value;
+        graphResults.push(result);
+        if (rowKind === "email") {
+          if (result.action === "email_sent") {
+            sentCount += 1;
+          } else if (result.action === "email_scheduled") {
+            scheduledCount += 1;
+          } else {
+            draftCount += 1;
+            if (appSettings.emailHandlingMode === "schedule" && result.provider === "gmail") {
+              gmailScheduledDraftCount += 1;
+            }
+          }
+        } else if (rowKind === "meeting") {
+          meetingCount += 1;
+        } else {
+          reminderCount += 1;
+        }
+        continue;
       }
-    } else {
+
+      const failedItem = executableItems[executionResults.indexOf(settledResult)];
+      const rowKind = classifyPlanRow(failedItem);
+      const error = settledResult.reason;
+      if (rowKind === "email") {
+        console.error("[plans] bulk email export unavailable", {
+          requestedEmailAction: appSettings.emailHandlingMode,
+          provider: emailAvailability.provider,
+          outlookAvailable: emailAvailability.outlookAvailable,
+          gmailAvailable: emailAvailability.gmailAvailable,
+          itemId: failedItem.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        updateExportDebug({
+          fallbackTriggered: true,
+          fallbackReason: error instanceof Error ? error.message : String(error),
+        });
+        failedEmailItems.push(failedItem);
+      } else {
+        const failureReason = error instanceof Error ? error.message : String(error);
+        console.error("[plans] bulk calendar export unavailable", {
+          provider: calendarAvailability.provider,
+          outlookAvailable: calendarAvailability.outlookAvailable,
+          gmailAvailable: calendarAvailability.gmailAvailable,
+          itemId: failedItem.id,
+          reason: failureReason,
+        });
+        failedCalendarItems.push(failedItem);
+        failedCalendarReasons.set(failedItem.id, failureReason);
+      }
+    }
+
+    if (!emailAvailability.canExecute) {
       failedEmailItems.push(...emailItems);
+    }
+    if (!calendarAvailability.canExecute) {
       failedCalendarItems.push(...calendarItems);
     }
 
     for (const item of failedEmailItems) {
-      downloadLocalEmailItem(item, { showAlert: false });
+      console.info("[plans] bulk email export unavailable", {
+        requestedEmailAction: appSettings.emailHandlingMode,
+        provider: emailAvailability.provider,
+        outlookAvailable: emailAvailability.outlookAvailable,
+        gmailAvailable: emailAvailability.gmailAvailable,
+        itemId: item.id,
+        reason: emailAvailability.canExecute
+          ? `${emailAvailability.provider === "gmail" ? "Gmail" : "Outlook"} email action could not be completed.`
+          : emailAvailability.reason ?? null,
+      });
+      updateExportDebug({
+        fallbackTriggered: true,
+        fallbackReason: emailAvailability.canExecute
+          ? `${emailAvailability.provider === "gmail" ? "Gmail" : "Outlook"} email action could not be completed.`
+          : emailAvailability.reason ?? null,
+      });
       await recordExecutionHistory({
         item,
-        status: "fallback",
-        path: "fallback",
+        status: "failed",
+        path: "graph",
         executionGroupId,
-        fallbackExportKind: "eml",
-        reason: graphAvailability.canUseGraph ? "Outlook email action fell back to local export." : graphAvailability.reason,
+        reason: emailAvailability.canExecute
+          ? `${emailAvailability.provider === "gmail" ? "Gmail" : "Outlook"} email action could not be completed.`
+          : emailAvailability.reason,
       });
     }
     if (failedCalendarItems.length > 0) {
-      downloadLocalPlanCalendarItems(failedCalendarItems, { showAlert: false });
       for (const item of failedCalendarItems) {
+        const failureReason = failedCalendarReasons.get(item.id);
         await recordExecutionHistory({
           item,
-          status: "fallback",
-          path: "fallback",
+          status: "failed",
+          path: "graph",
           executionGroupId,
-          fallbackExportKind: "ics",
-          reason: graphAvailability.canUseGraph
-            ? "Outlook calendar action fell back to local export."
-            : graphAvailability.reason,
+          reason: calendarAvailability.canExecute
+            ? failureReason ||
+              (calendarAvailability.provider === "gmail"
+                ? "Reconnect Google to enable calendar access."
+                : "Outlook calendar action could not be completed.")
+            : calendarAvailability.reason,
         });
       }
     }
 
     setExecutionNoticeForExportSummary({
-      graphUnavailableReason: graphAvailability.canUseGraph ? undefined : graphAvailability.reason,
+      graphUnavailableReason: calendarAvailability.canExecute ? undefined : calendarAvailability.reason,
       graphResults,
       failedEmailItems,
       failedCalendarItems,
@@ -2936,6 +4631,7 @@ export default function PlansPage() {
       sentCount,
       reminderCount,
       meetingCount,
+      gmailScheduledDraftCount,
     });
   }
 
@@ -3062,11 +4758,26 @@ export default function PlansPage() {
     }));
   }
 
+  const activeAccountProvider = hasMounted
+    ? outlookConnection?.status === "connected"
+      ? "outlook"
+      : gmailConnection?.status === "connected"
+        ? "gmail"
+        : outlookConnection?.status === "reconnect_required"
+          ? "outlook"
+          : gmailConnection?.status === "reconnect_required"
+            ? "gmail"
+            : null
+    : null;
   const accountConnectionStatus = hasMounted
-    ? outlookConnection?.status ?? appSettings.outlookConnectionStatus
+    ? activeAccountProvider === "gmail"
+      ? gmailConnection?.status ?? "not_connected"
+      : outlookConnection?.status ?? appSettings.outlookConnectionStatus
     : "not_connected";
   const connectedMailboxEmail = hasMounted
-    ? getConnectedOutlookMailboxEmail(outlookConnection?.identity) || appSettings.outlookAccountEmail
+    ? activeAccountProvider === "gmail"
+      ? getConnectedGmailMailboxEmail(gmailConnection?.identity) || ""
+      : getConnectedOutlookMailboxEmail(outlookConnection?.identity) || appSettings.outlookAccountEmail
     : "";
   const accountStatusLabel =
     accountConnectionStatus === "connected"
@@ -3082,12 +4793,65 @@ export default function PlansPage() {
         : "text-red-600";
   const accountPrimaryText =
     accountConnectionStatus === "connected"
-      ? connectedMailboxEmail || "Connected email account"
+      ? `${activeAccountProvider === "gmail" ? "Google" : "Outlook"}: ${connectedMailboxEmail || "Connected email account"}`
       : accountConnectionStatus === "reconnect_required"
-        ? connectedMailboxEmail || "Reconnect required"
+        ? `${activeAccountProvider === "gmail" ? "Google" : "Outlook"}: ${connectedMailboxEmail || "Reconnect required"}`
         : "No connected email account";
   const accountButtonLabel =
     accountConnectionStatus === "connected" ? "Manage in Settings" : "Reconnect in Settings";
+  const aiSessionSourceDetails = getAiSessionSourceDetails(aiSessionSource);
+  const aiDraftIdentityDetails = getAiDraftIdentityDetails(aiSessionSource);
+  const latestAssistantMessage = [...aiChatMessages].reverse().find((message) => message.role === "assistant") ?? null;
+  const aiDraftStageDetails = getAiDraftStageDetails({
+    hasDraft: Boolean(aiChatDraft),
+    readiness: aiChatStatus,
+    hasFollowUpQuestions: Boolean(latestAssistantMessage?.followUpQuestions?.length),
+    wasSavedAsTemplate: Boolean(aiSavedTemplateInfo),
+    source: aiSessionSource,
+    rowCount: aiChatDraft?.rows.length ?? 0,
+  });
+  const aiDraftMissingDetails = getAiDraftMissingDetails({
+    draft: aiChatDraft,
+    confidenceNote: aiChatConfidenceNote,
+    hasFollowUpQuestions: Boolean(latestAssistantMessage?.followUpQuestions?.length),
+    source: aiSessionSource,
+  });
+  void openAiPanelFromCurrentBuilder;
+  const builderHasMeaningfulContent = hasMeaningfulBuilderContent();
+  const currentBuilderSignature = buildBuilderContentSignature({
+    planType,
+    templateName,
+    eventName,
+    anchorDate,
+    noEventDate,
+    weekendRule,
+    anchors,
+    rows,
+  });
+  const shouldRenderBuilderSourceBanner = hasMounted && builderHasMeaningfulContent;
+
+  useEffect(() => {
+    if (!builderHasMeaningfulContent) {
+      if (builderMode === "new" && builderSourceProvenance?.sourceType === "manual") {
+        setBuilderSourceProvenance(null);
+      }
+      return;
+    }
+    if (builderSourceProvenance) return;
+    if (selectedTemplateId || builderMode === "template") return;
+    setBuilderSourceProvenance({
+      sourceType: "manual",
+      sourceLabel: "Manual plan",
+      loadedAt: getBuilderSourceTimestamp(),
+      sourceSignature: currentBuilderSignature,
+    });
+  }, [builderHasMeaningfulContent, builderMode, builderSourceProvenance, currentBuilderSignature, selectedTemplateId]);
+
+  useEffect(() => {
+    if (AI_ENABLED) return;
+    if (!isAiPanelOpen) return;
+    setIsAiPanelOpen(false);
+  }, [isAiPanelOpen]);
 
   return (
     <div className="space-y-8 text-gray-900">
@@ -3098,6 +4862,17 @@ export default function PlansPage() {
             <p className="text-sm text-gray-600">
               Build an event timeline and export it to Outlook when you&apos;re ready.
             </p>
+            {AI_ENABLED ? (
+              <div>
+                <button
+                  type="button"
+                  onClick={openAiPanel}
+                  className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                >
+                  Generate with AI
+                </button>
+              </div>
+            ) : null}
           </div>
           <div className="rounded-xl border bg-white px-4 py-3 text-sm shadow-sm md:min-w-[260px] md:max-w-[280px]">
             <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Connected Email Account</div>
@@ -3105,6 +4880,9 @@ export default function PlansPage() {
             <div className={`mt-1 text-xs font-semibold uppercase tracking-wide ${accountStatusClass}`}>
               {accountStatusLabel}
             </div>
+            {providerLoading.outlook || providerLoading.gmail ? (
+              <div className="mt-1 text-xs text-gray-500">Refreshing provider status…</div>
+            ) : null}
             <Link
               href="/settings"
               className="mt-2 inline-flex rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
@@ -3116,7 +4894,10 @@ export default function PlansPage() {
       </section>
 
       {executionNotice && !isBuilderPreviewOpen ? (
-        <OutlookExecutionNoticeCard notice={executionNotice} onDismiss={() => setExecutionNotice(null)} />
+        <div className="space-y-3">
+          <OutlookExecutionNoticeCard notice={executionNotice} onDismiss={() => setExecutionNotice(null)} />
+          {showExportDebugPanel ? <ExportDebugCard debug={exportDebug} /> : null}
+        </div>
       ) : null}
 
       <section className="rounded-2xl border bg-white shadow-sm">
@@ -3172,7 +4953,11 @@ export default function PlansPage() {
                   type="button"
                   onClick={() => onSelectSavedTemplate(template.id)}
                   className={`flex min-h-[72px] w-full items-center justify-center rounded-xl border px-4 py-4 text-center hover:bg-gray-50 ${
-                    selectedTemplateId === template.id ? "border-blue-300 bg-blue-50" : ""
+                    selectedTemplateId === template.id
+                      ? "border-blue-300 bg-blue-50"
+                      : highlightedTemplateId === template.id
+                        ? "border-green-300 bg-green-50"
+                        : ""
                   }`}
                 >
                   <div className="font-semibold text-gray-900">{template.name}</div>
@@ -3193,8 +4978,25 @@ export default function PlansPage() {
         </div>
       </section>
 
-      <section className="rounded-2xl border bg-white shadow-sm">
+      {AI_ENABLED && aiApplySuccessMessage ? (
+        <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900 shadow-sm">
+          {aiApplySuccessMessage}
+        </div>
+      ) : null}
+
+      <section ref={builderSectionRef} className="rounded-2xl border bg-white shadow-sm">
         <div className="space-y-5 p-6">
+              {shouldRenderBuilderSourceBanner ? (
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={openBuilderTemplateSaveDialog}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Save current plan as template
+                  </button>
+                </div>
+              ) : null}
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div>
                   <div className="text-sm font-semibold uppercase tracking-wide text-gray-500">Plan Builder</div>
@@ -4200,16 +6002,21 @@ export default function PlansPage() {
                               </div>
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-gray-700">Location</label>
+                                {(() => {
+                                  const normalizedMeetingDraft = normalizeMeetingDraft(row.meetingDraft);
+                                  const isGoogleProviderActive = activeAccountProvider === "gmail";
+                                  const isProviderManagedMeeting =
+                                    normalizedMeetingDraft?.teamsMeeting || (isGoogleProviderActive && normalizedMeetingDraft?.addGoogleMeet);
+                                  const locationValue = normalizedMeetingDraft?.teamsMeeting
+                                    ? TEAMS_MEETING_LOCATION
+                                    : isGoogleProviderActive && normalizedMeetingDraft?.addGoogleMeet
+                                      ? GOOGLE_MEET_LOCATION
+                                      : normalizedMeetingDraft?.location ?? "";
+                                  return (
                                 <input
-                                  className={`w-full rounded-lg border px-3 py-2 ${
-                                    normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting ? "bg-gray-100 text-gray-600" : "bg-white"
-                                  }`}
-                                  value={
-                                    normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting
-                                      ? TEAMS_MEETING_LOCATION
-                                      : normalizeMeetingDraft(row.meetingDraft)?.location ?? ""
-                                  }
-                                  readOnly={Boolean(normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting)}
+                                  className={`w-full rounded-lg border px-3 py-2 ${isProviderManagedMeeting ? "bg-gray-100 text-gray-600" : "bg-white"}`}
+                                  value={locationValue}
+                                  readOnly={Boolean(isProviderManagedMeeting)}
                                   onChange={(e) =>
                                     updateRow(row.id, (current) => ({
                                       ...current,
@@ -4217,6 +6024,8 @@ export default function PlansPage() {
                                     }))
                                   }
                                 />
+                                  );
+                                })()}
                               </div>
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-gray-700">
@@ -4273,26 +6082,50 @@ export default function PlansPage() {
                                   ))}
                                 </select>
                               </div>
-                              <div className="md:col-span-2 flex items-center gap-2 text-sm text-gray-700">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting)}
-                                  onChange={(e) =>
-                                    updateRow(row.id, (current) => ({
-                                      ...current,
-                                      meetingDraft: {
-                                        ...normalizeMeetingDraft(current.meetingDraft),
-                                        teamsMeeting: e.target.checked,
-                                        location: e.target.checked
-                                          ? TEAMS_MEETING_LOCATION
-                                          : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
-                                      },
-                                    }))
-                                  }
-                                />
-                                <span>Microsoft Teams Meeting</span>
-                              </div>
-                              {normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting ? (
+                              {activeAccountProvider === "gmail" ? (
+                                <div className="md:col-span-2 flex items-center gap-2 text-sm text-gray-700">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(normalizeMeetingDraft(row.meetingDraft)?.addGoogleMeet)}
+                                    onChange={(e) =>
+                                      updateRow(row.id, (current) => ({
+                                        ...current,
+                                        meetingDraft: {
+                                          ...normalizeMeetingDraft(current.meetingDraft),
+                                          addGoogleMeet: e.target.checked,
+                                          teamsMeeting: false,
+                                          location: e.target.checked
+                                            ? GOOGLE_MEET_LOCATION
+                                            : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                        },
+                                      }))
+                                    }
+                                  />
+                                  <span>Add Google Meet link</span>
+                                </div>
+                              ) : (
+                                <div className="md:col-span-2 flex items-center gap-2 text-sm text-gray-700">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting)}
+                                    onChange={(e) =>
+                                      updateRow(row.id, (current) => ({
+                                        ...current,
+                                        meetingDraft: {
+                                          ...normalizeMeetingDraft(current.meetingDraft),
+                                          teamsMeeting: e.target.checked,
+                                          addGoogleMeet: false,
+                                          location: e.target.checked
+                                            ? TEAMS_MEETING_LOCATION
+                                            : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                        },
+                                      }))
+                                    }
+                                  />
+                                  <span>Microsoft Teams Meeting</span>
+                                </div>
+                              )}
+                              {activeAccountProvider !== "gmail" && normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting ? (
                                 <div className="md:col-span-2 rounded-xl border border-violet-200 bg-white p-4">
                                   <div className="text-sm font-semibold text-violet-950">Teams Meeting Details</div>
                                   <div className="mt-3 space-y-3 text-sm text-gray-700">
@@ -4301,6 +6134,17 @@ export default function PlansPage() {
                                       <div className="text-gray-500">
                                         Teams join info will appear here after the Outlook event is created.
                                       </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
+                              {activeAccountProvider === "gmail" && normalizeMeetingDraft(row.meetingDraft)?.addGoogleMeet ? (
+                                <div className="md:col-span-2 rounded-xl border border-violet-200 bg-white p-4">
+                                  <div className="text-sm font-semibold text-violet-950">Google Meet Details</div>
+                                  <div className="mt-3 space-y-3 text-sm text-gray-700">
+                                    <div>
+                                      <div className="mb-1 font-medium text-violet-950">Join link</div>
+                                      <div className="text-gray-500">Google Meet link will be generated after export.</div>
                                     </div>
                                   </div>
                                 </div>
@@ -4633,13 +6477,23 @@ export default function PlansPage() {
 
             <div className="space-y-6 p-6">
               {executionNotice ? (
-                <OutlookExecutionNoticeCard notice={executionNotice} onDismiss={() => setExecutionNotice(null)} />
+                <div className="space-y-3">
+                  <OutlookExecutionNoticeCard
+                    notice={executionNotice}
+                    onDismiss={() => {
+                      setExecutionNotice(null);
+                      setExecutionState(null);
+                    }}
+                  />
+                  {showExportDebugPanel ? <ExportDebugCard debug={exportDebug} /> : null}
+                </div>
               ) : null}
               {previewPlanForRender ? (
                 <>
                   <div className="rounded-xl border">
                     <div className="border-b bg-gray-50 px-4 py-3">
                       <div className="font-semibold text-gray-900">{previewPlanForRender.name}</div>
+                      {previewLoading ? <div className="mt-1 text-xs text-gray-500">Refreshing preview…</div> : null}
                       <div className="mt-1 text-sm text-gray-600">
                         {previewPlanForRender.items.filter((item) => classifyPlanRow(item) !== "email").length} plan events
                       </div>
@@ -4668,11 +6522,11 @@ export default function PlansPage() {
                     const previewEmailDraft = normalizeEmailDraft(item.emailDraft);
                     const previewEmailSubject = previewEmailDraft.subject.trim() || item.title || "Email draft";
                     const previewEmailFinalBody = buildFinalEmailBody(previewEmailDraft.body, {
-                      enabled: appSettings.emailSignatureEnabled,
                       signature: appSettings.emailSignatureText,
                     });
                     const previewMeetingDraft = normalizeMeetingDraft(item.meetingDraft);
                     const isPreviewTeamsMeetingEnabled = Boolean(previewMeetingDraft?.teamsMeeting);
+                    const isPreviewGoogleMeetEnabled = Boolean(previewMeetingDraft?.addGoogleMeet);
                     const rowTypeLabel = rowKind === "email" ? "Email" : rowKind === "meeting" ? "Meeting" : "Reminder";
 
                     return (
@@ -4709,15 +6563,16 @@ export default function PlansPage() {
                                 type="button"
                                 onClick={() => {
                                   if (hasEmailPreview) {
-                                    exportPreviewEmailItem(item.id);
+                                    void exportPreviewEmailItem(item.id);
                                     return;
                                   }
                                   if (hasMeetingPreview) {
-                                    exportPreviewMeetingItem(item.id);
+                                    void exportPreviewMeetingItem(item.id);
                                     return;
                                   }
-                                  exportPreviewReminderItem(item.id);
+                                  void exportPreviewReminderItem(item.id);
                                 }}
+                                disabled={executionState === "pending"}
                                 title={
                                   hasReminderPreview
                                     ? "Export this reminder"
@@ -4725,7 +6580,7 @@ export default function PlansPage() {
                                       ? "Execute this email action"
                                       : "Create this meeting event"
                                 }
-                                className="flex h-14 w-44 items-center justify-center rounded-lg border px-3 py-2 text-center text-sm hover:bg-gray-50"
+                                className="flex h-14 w-44 items-center justify-center rounded-lg border px-3 py-2 text-center text-sm hover:bg-gray-50 disabled:opacity-60"
                               >
                                 {hasEmailPreview
                                   ? getPreviewEmailActionLabel(appSettings.emailHandlingMode)
@@ -4819,7 +6674,9 @@ export default function PlansPage() {
                         {rowKind === "meeting" && isMeetingExpanded ? (
                           <div className="bg-violet-50 px-4 py-3">
                             <div className="mb-3 text-sm font-medium text-violet-900">
-                              This meeting will be created in Outlook when connected, or downloaded as a local calendar file otherwise.
+                              {activeAccountProvider === "gmail"
+                                ? "This meeting will be created in Google Calendar when Google is connected."
+                                : "This meeting will be created in Outlook when connected."}
                             </div>
                             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                               <div className="md:col-span-2">
@@ -4850,16 +6707,22 @@ export default function PlansPage() {
                               </div>
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-violet-950">Location</label>
+                                {(() => {
+                                  const isGoogleProviderActive = activeAccountProvider === "gmail";
+                                  const isProviderManagedMeeting =
+                                    isPreviewTeamsMeetingEnabled || (isGoogleProviderActive && isPreviewGoogleMeetEnabled);
+                                  const locationValue = isPreviewTeamsMeetingEnabled
+                                    ? TEAMS_MEETING_LOCATION
+                                    : isGoogleProviderActive && isPreviewGoogleMeetEnabled
+                                      ? GOOGLE_MEET_LOCATION
+                                      : previewMeetingDraft?.location ?? "";
+                                  return (
                                 <input
                                   className={`w-full rounded-lg border border-violet-200 px-3 py-2 text-sm ${
-                                    isPreviewTeamsMeetingEnabled ? "bg-gray-100 text-gray-600" : "bg-white text-gray-900"
+                                    isProviderManagedMeeting ? "bg-gray-100 text-gray-600" : "bg-white text-gray-900"
                                   }`}
-                                  value={
-                                    isPreviewTeamsMeetingEnabled
-                                      ? TEAMS_MEETING_LOCATION
-                                      : previewMeetingDraft?.location ?? ""
-                                  }
-                                  readOnly={isPreviewTeamsMeetingEnabled}
+                                  value={locationValue}
+                                  readOnly={isProviderManagedMeeting}
                                   onChange={(e) =>
                                     builderItem
                                       ? updateRow(builderItem.id, (current) => ({
@@ -4869,6 +6732,8 @@ export default function PlansPage() {
                                       : undefined
                                   }
                                 />
+                                  );
+                                })()}
                               </div>
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-violet-950">Meeting Duration</label>
@@ -4946,28 +6811,54 @@ export default function PlansPage() {
                                   </div>
                                 </>
                               ) : null}
-                              <div className="md:col-span-2 flex items-center gap-2 text-sm text-violet-950">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(previewMeetingDraft?.teamsMeeting)}
-                                  onChange={(e) =>
-                                    builderItem
-                                      ? updateRow(builderItem.id, (current) => ({
-                                          ...current,
-                                          meetingDraft: {
-                                            ...normalizeMeetingDraft(current.meetingDraft),
-                                            teamsMeeting: e.target.checked,
-                                            location: e.target.checked
-                                              ? TEAMS_MEETING_LOCATION
-                                              : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
-                                          },
-                                        }))
-                                      : undefined
-                                  }
-                                />
-                                <span>Microsoft Teams Meeting</span>
-                              </div>
-                              {isPreviewTeamsMeetingEnabled ? (
+                              {activeAccountProvider === "gmail" ? (
+                                <div className="md:col-span-2 flex items-center gap-2 text-sm text-violet-950">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(previewMeetingDraft?.addGoogleMeet)}
+                                    onChange={(e) =>
+                                      builderItem
+                                        ? updateRow(builderItem.id, (current) => ({
+                                            ...current,
+                                            meetingDraft: {
+                                              ...normalizeMeetingDraft(current.meetingDraft),
+                                              addGoogleMeet: e.target.checked,
+                                              teamsMeeting: false,
+                                              location: e.target.checked
+                                                ? GOOGLE_MEET_LOCATION
+                                                : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                            },
+                                          }))
+                                        : undefined
+                                    }
+                                  />
+                                  <span>Add Google Meet link</span>
+                                </div>
+                              ) : (
+                                <div className="md:col-span-2 flex items-center gap-2 text-sm text-violet-950">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(previewMeetingDraft?.teamsMeeting)}
+                                    onChange={(e) =>
+                                      builderItem
+                                        ? updateRow(builderItem.id, (current) => ({
+                                            ...current,
+                                            meetingDraft: {
+                                              ...normalizeMeetingDraft(current.meetingDraft),
+                                              teamsMeeting: e.target.checked,
+                                              addGoogleMeet: false,
+                                              location: e.target.checked
+                                                ? TEAMS_MEETING_LOCATION
+                                                : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                            },
+                                          }))
+                                        : undefined
+                                    }
+                                  />
+                                  <span>Microsoft Teams Meeting</span>
+                                </div>
+                              )}
+                              {activeAccountProvider !== "gmail" && isPreviewTeamsMeetingEnabled ? (
                                 <div className="md:col-span-2 rounded-xl border border-violet-200 bg-white p-4">
                                   <div className="text-sm font-semibold text-violet-950">Teams Meeting Details</div>
                                   <div className="mt-3 space-y-3 text-sm text-gray-700">
@@ -4976,6 +6867,17 @@ export default function PlansPage() {
                                       <div className="text-gray-500">
                                         Teams join info will appear here after the Outlook event is created.
                                       </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
+                              {activeAccountProvider === "gmail" && isPreviewGoogleMeetEnabled ? (
+                                <div className="md:col-span-2 rounded-xl border border-violet-200 bg-white p-4">
+                                  <div className="text-sm font-semibold text-violet-950">Google Meet Details</div>
+                                  <div className="mt-3 space-y-3 text-sm text-gray-700">
+                                    <div>
+                                      <div className="mb-1 font-medium text-violet-950">Join link</div>
+                                      <div className="text-gray-500">Google Meet link will be generated after export.</div>
                                     </div>
                                   </div>
                                 </div>
@@ -5108,11 +7010,12 @@ export default function PlansPage() {
                         onClick={() => {
                           void exportCurrentPlan({ skipConfirm: true });
                         }}
-                        className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+                        disabled={executionState === "pending"}
+                        className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-60"
                       >
-                        Export
+                        {executionState === "pending" ? "Exporting..." : "Export"}
                       </button>
-                      {executionNotice?.tone === "success" ? <ExportDoneBadge /> : null}
+                      {executionState === "success" ? <ExportDoneBadge /> : null}
                     </div>
                   </div>
                 </>
@@ -5123,6 +7026,615 @@ export default function PlansPage() {
                     : "Add an event date to preview the current plan schedule."}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {AI_ENABLED && isAiPanelOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4 py-8">
+          <div className="max-h-[90vh] w-full max-w-6xl overflow-hidden rounded-2xl border bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Generate Plan with AI</h2>
+                <p className="mt-1 text-sm text-gray-600">
+                  {aiSessionSource?.type === "current_builder"
+                    ? "Refine your current plan through chat, then review the revised draft before applying it."
+                    : aiSessionSource?.type === "saved_template"
+                      ? "Refine a saved template through chat, then review the revised draft before applying or saving."
+                      : aiSessionSource?.type === "branched_draft"
+                        ? "Explore a different version of your draft without affecting the earlier one."
+                        : "Chat through the workflow you need, then apply the generated plan into the builder."}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onDuplicateAiDraftIntoNewExploration}
+                  disabled={aiGenerating || !aiChatDraft}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Try a different version
+                </button>
+                <button
+                  type="button"
+                  onClick={onStartOverAiSession}
+                  disabled={aiGenerating}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  Start over
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAiPanelOpen(false)}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="grid h-[calc(90vh-81px)] grid-cols-1 divide-y md:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)] md:divide-x md:divide-y-0">
+              <div className="flex min-h-0 flex-col">
+                <div ref={aiConversationRef} className="flex-1 space-y-4 overflow-y-auto p-6">
+                  <div className={`rounded-xl border px-4 py-3 text-sm ${aiSessionSourceDetails.classes}`}>
+                    <div className="text-xs font-semibold uppercase tracking-wide">Working from</div>
+                    <div className="mt-1 font-medium">{aiSessionSourceDetails.label}</div>
+                    <div className="mt-1 text-xs opacity-80">{aiSessionSourceDetails.note}</div>
+                  </div>
+                  {aiSessionBackup && !hasMeaningfulAiSession() ? (
+                    <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-medium text-gray-900">Last AI draft cleared</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            You can restore the last conversation and draft from this modal session.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={onRestoreAiSession}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-900 hover:bg-gray-50"
+                        >
+                          Restore last draft
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {aiChatMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                          message.role === "user"
+                            ? "bg-blue-600 text-white"
+                            : "border border-gray-200 bg-gray-50 text-gray-900"
+                        }`}
+                      >
+                        <div className="whitespace-pre-wrap">{message.text}</div>
+                        {message.status ? (
+                          <div className="mt-3 text-xs font-medium uppercase tracking-wide text-gray-500">
+                            {getAiReadinessLabel(message.status)}
+                          </div>
+                        ) : null}
+                        {message.followUpQuestions?.length ? (
+                          <div className="mt-3 space-y-1 rounded-xl border border-gray-200 bg-white/70 px-3 py-2 text-xs text-gray-700">
+                            <div className="font-semibold uppercase tracking-wide text-gray-500">Still helpful to know</div>
+                            {message.followUpQuestions.map((question) => (
+                              <div key={question}>- {question}</div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.changeSummary?.length ? (
+                          <div className="mt-3 space-y-1 rounded-xl border border-gray-200 bg-white/70 px-3 py-2 text-xs text-gray-700">
+                            <div className="font-semibold uppercase tracking-wide text-gray-500">What changed</div>
+                            {message.changeSummary.map((item) => (
+                              <div key={item}>- {item}</div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.confidenceNote ? (
+                          <div className="mt-3 text-xs text-gray-500">Confidence: {message.confidenceNote}</div>
+                        ) : null}
+                        {message.suggestedNextActions?.length ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {message.suggestedNextActions.map((action) => (
+                              <button
+                                key={action}
+                                type="button"
+                                onClick={() => {
+                                  void onSendAiMessage(action);
+                                }}
+                                disabled={aiGenerating}
+                                className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-800 hover:bg-blue-100 disabled:opacity-60"
+                              >
+                                {action}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.starterPrompts?.length ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {message.starterPrompts.map((prompt) => (
+                              <button
+                                key={prompt}
+                                type="button"
+                                onClick={() => {
+                                  void onSendAiMessage(prompt);
+                                }}
+                                className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100"
+                              >
+                                {prompt}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={focusAiComposer}
+                              className="rounded-full border border-dashed border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50"
+                            >
+                              Something else…
+                            </button>
+                          </div>
+                        ) : null}
+                        {message.modeOptions?.length ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {message.modeOptions.map((option) => (
+                              <button
+                                key={option.id}
+                                type="button"
+                                onClick={() => onSelectAiBuilderMode(option.id)}
+                                disabled={aiGenerating}
+                                className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-60"
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                  {aiGenerating ? (
+                    <div className="flex justify-start">
+                      <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 shadow-sm">
+                        Thinking…
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="border-t p-4">
+                  {aiChatError ? (
+                    <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                      {aiChatError}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-col gap-3">
+                    <textarea
+                      ref={aiComposerRef}
+                      rows={4}
+                      value={aiComposer}
+                      onChange={(e) => setAiComposer(e.target.value)}
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                      placeholder={
+                        aiBuilderContextMode === "refine_current"
+                          ? "Describe how you want to change the current plan. For example: move reminders earlier, remove the email, or add a prep meeting."
+                          : "Describe the event workflow you need, or answer the assistant’s follow-up question here."
+                      }
+                    />
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs text-gray-500">
+                        The builder stays unchanged until you click Apply to Builder.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void onSendAiMessage();
+                        }}
+                        disabled={aiGenerating}
+                        className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                      >
+                        {aiGenerating ? "Sending..." : "Send"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="min-h-0 overflow-y-auto bg-gray-50/60 p-6">
+                <div className="space-y-5">
+                  {aiSavedTemplateInfo ? (
+                    <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-4 text-sm text-green-900">
+                      <div className="font-medium">Saved &quot;{aiSavedTemplateInfo.name}&quot; as a custom template.</div>
+                      <div className="mt-1 text-xs text-green-800">
+                        You can keep refining this draft, apply it to the builder, or use the saved template later from Templates.
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAiSavedTemplateInfo(null)}
+                          className="rounded-lg border border-green-300 bg-white px-3 py-2 text-xs font-medium text-green-900 hover:bg-green-100"
+                        >
+                          Keep editing this draft
+                        </button>
+                        <button
+                          type="button"
+                          onClick={onApplyAiDraft}
+                          className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+                        >
+                          Apply this draft to builder
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Plan Summary</div>
+                    <div className="mt-2 rounded-xl border bg-white p-4 text-sm text-gray-900">
+                      {aiChatSummary || "The assistant will keep a running summary here as the plan takes shape."}
+                    </div>
+                  </div>
+
+                  {aiSessionSource ? (
+                    <div className="rounded-xl border bg-white p-4">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Working from</div>
+                      <div className="mt-2 text-sm font-medium text-gray-900">{aiSessionSourceDetails.label}</div>
+                      <div className="mt-2 text-xs text-gray-500">{aiSessionSourceDetails.note}</div>
+                    </div>
+                  ) : null}
+
+                  {aiChatDraft ? (
+                    <div className="rounded-xl border bg-white p-4">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Draft</div>
+                      <div className="mt-3 space-y-1 text-sm text-gray-700">
+                        <div>
+                          Source: <span className="text-gray-900">{aiDraftIdentityDetails.source}</span>
+                        </div>
+                        <div>
+                          Current draft: <span className="text-gray-900">{aiDraftIdentityDetails.currentDraft}</span>
+                        </div>
+                        <div>
+                          Apply destination: <span className="text-gray-900">{aiDraftIdentityDetails.applyDestination}</span>
+                        </div>
+                        <div>
+                          Save destination: <span className="text-gray-900">{aiDraftIdentityDetails.saveDestination}</span>
+                        </div>
+                      </div>
+                      <div className="mt-3 text-xs text-gray-500">{aiDraftIdentityDetails.note}</div>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Draft Status</div>
+                    <div className="mt-2 text-sm font-medium text-gray-900">{aiDraftStageDetails.stage}</div>
+                    <div className="mt-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Recommended next step</div>
+                    <div className="mt-1 text-xs text-gray-500">{aiDraftStageDetails.nextStep}</div>
+                  </div>
+
+                  {aiChatDraft ? (
+                    <div className="rounded-xl border bg-white p-4">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Missing / Assumed Details</div>
+                      {aiDraftMissingDetails.length ? (
+                        <div className="mt-2 space-y-1 text-sm text-gray-700">
+                          {aiDraftMissingDetails.map((detail) => (
+                            <div key={detail}>- {detail}</div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-sm text-gray-500">No major gaps detected.</div>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {aiBuilderContextMode === "refine_current" && (aiChatChangeSummary.length > 0 || aiChatConfidenceNote) ? (
+                    <div className="rounded-xl border bg-white p-4">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">What Changed</div>
+                      {aiChatChangeSummary.length ? (
+                        <div className="mt-2 space-y-1 text-sm text-gray-700">
+                          {aiChatChangeSummary.map((item) => (
+                            <div key={item}>- {item}</div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-sm text-gray-500">The assistant is still tightening the revised draft.</div>
+                      )}
+                      {aiChatConfidenceNote ? (
+                        <div className="mt-3 text-xs text-gray-500">Confidence: {aiChatConfidenceNote}</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {aiChatDraft ? (
+                    <>
+                      {aiDraftBaseline ? (() => {
+                        const comparison = getAiDraftComparisonSummary(aiChatDraft, aiDraftBaseline);
+                        return (
+                          <div className="rounded-xl border bg-white p-4">
+                            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Compared with Starting Point</div>
+                            <div className="mt-2 text-xs text-gray-500">
+                              Based on your {aiDraftBaseline.sourceLabel}.
+                            </div>
+                            {comparison.qualitativeLabel ? (
+                              <div className="mt-2 text-sm font-medium text-gray-900">{comparison.qualitativeLabel}</div>
+                            ) : null}
+                            <div className="mt-3 space-y-1 text-sm text-gray-700">
+                              <div>
+                                Rows: <span className="text-gray-900">{getBaselineDeltaLabel(comparison.totalDelta)}</span>
+                              </div>
+                              <div>
+                                Reminders: <span className="text-gray-900">{getBaselineDeltaLabel(comparison.reminderDelta)}</span>
+                              </div>
+                              <div>
+                                Emails: <span className="text-gray-900">{getBaselineDeltaLabel(comparison.emailDelta)}</span>
+                              </div>
+                              <div>
+                                Meetings: <span className="text-gray-900">{getBaselineDeltaLabel(comparison.meetingDelta)}</span>
+                              </div>
+                              <div>
+                                Event timing: <span className="text-gray-900">{comparison.timingChanged ? "Changed" : "Unchanged"}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })() : null}
+
+                      <div className="rounded-xl border bg-white p-4">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Draft Details</div>
+                        <div className="mt-2 space-y-1 text-sm text-gray-700">
+                          <div>Event name: <span className="text-gray-900">{aiChatDraft.eventName || "—"}</span></div>
+                          <div>Template name: <span className="text-gray-900">{aiChatDraft.templateName || "—"}</span></div>
+                          <div>Event date: <span className="text-gray-900">{aiChatDraft.noEventDate ? "No event date" : aiChatDraft.anchorDate || "—"}</span></div>
+                          <div>Event time: <span className="text-gray-900">{aiChatDraft.eventTime || "—"}</span></div>
+                          <div>Plan type: <span className="text-gray-900">{getSeedTemplateName(aiChatDraft.baseType)}</span></div>
+                          <div>Weekend handling: <span className="text-gray-900">{aiChatDraft.weekendRule === "none" ? "Allow weekends" : "Prior business day"}</span></div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Generated Rows</div>
+                        {aiChatDraft.rows.map((row, index) => (
+                          <div key={`${row.title}-${index}`} className="rounded-xl border bg-white p-4">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                                  {row.rowType === "email" ? "Email" : row.rowType === "calendar_event" ? "Meeting" : "Reminder"}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeAiDraftRow(index)}
+                                className="rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                              >
+                                Remove
+                              </button>
+                            </div>
+
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <div className="md:col-span-2">
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Title</label>
+                                <input
+                                  value={row.title}
+                                  onChange={(e) =>
+                                    updateAiDraftRow(index, (current) => ({
+                                      ...current,
+                                      title: e.target.value,
+                                    }))
+                                  }
+                                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Offset</label>
+                                <input
+                                  type="number"
+                                  value={row.offsetDays}
+                                  onChange={(e) =>
+                                    updateAiDraftRow(index, (current) => ({
+                                      ...current,
+                                      offsetDays: Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0,
+                                    }))
+                                  }
+                                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                                />
+                                <div className="mt-1 text-xs text-gray-500">
+                                  {formatOffsetLabel(row.offsetDays, {
+                                    relativeToToday: aiChatDraft.noEventDate,
+                                    dateBasis: row.dateBasis,
+                                  })}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Time</label>
+                                <input
+                                  value={row.reminderTime ?? ""}
+                                  onChange={(e) =>
+                                    updateAiDraftRow(index, (current) => ({
+                                      ...current,
+                                      reminderTime: e.target.value,
+                                    }))
+                                  }
+                                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                                  placeholder="Optional time"
+                                />
+                              </div>
+                            </div>
+
+                            {row.rowType === "email" ? (
+                              <div className="mt-3">
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Email Subject</label>
+                                <input
+                                  value={row.emailDraft?.subject ?? ""}
+                                  onChange={(e) =>
+                                    updateAiDraftRow(index, (current) => ({
+                                      ...current,
+                                      emailDraft: {
+                                        to: current.emailDraft?.to ?? [],
+                                        cc: current.emailDraft?.cc ?? [],
+                                        bcc: current.emailDraft?.bcc ?? [],
+                                        subject: e.target.value,
+                                        body: current.emailDraft?.body ?? "",
+                                      },
+                                    }))
+                                  }
+                                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                                />
+                              </div>
+                            ) : null}
+
+                            {row.body ? (
+                              <div className="mt-3">
+                                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</div>
+                                <div className="whitespace-pre-wrap text-sm text-gray-700">{row.body}</div>
+                              </div>
+                            ) : null}
+
+                            {row.rationale ? (
+                              <div className="mt-2 text-xs text-gray-500">{row.rationale}</div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={openAiTemplateSaveDialog}
+                          className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                        >
+                          Save as template
+                        </button>
+                        <button
+                          type="button"
+                          onClick={onApplyAiDraft}
+                          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                        >
+                          Apply to Builder
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="rounded-xl border border-dashed bg-white px-4 py-8 text-sm text-gray-500">
+                      Start the conversation on the left and the current draft will appear here as soon as the assistant can shape one.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {AI_ENABLED && showAiApplyConfirm && aiChatDraft ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4">
+          <div className="w-full max-w-md rounded-2xl border bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Replace current builder?</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Applying this AI draft will replace what is currently in the builder.
+            </p>
+            <div className="mt-4 rounded-xl border bg-gray-50 p-4 text-sm text-gray-700">
+              <div>Current builder rows: <span className="font-medium text-gray-900">{rows.length}</span></div>
+              <div className="mt-1">Incoming AI draft rows: <span className="font-medium text-gray-900">{aiChatDraft.rows.length}</span></div>
+            </div>
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowAiApplyConfirm(false)}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={applyAiDraftToBuilder}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Replace current builder
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {AI_ENABLED && showAiTemplateSaveDialog && aiChatDraft ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4">
+          <div className="w-full max-w-md rounded-2xl border bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Save AI draft as template</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Save this draft as a reusable custom template. Your current builder will stay unchanged.
+            </p>
+            <div className="mt-4">
+              <label className="mb-1 block text-sm font-medium text-gray-700">Template name</label>
+              <input
+                value={aiTemplateNameDraft}
+                onChange={(e) => setAiTemplateNameDraft(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="Template name"
+              />
+            </div>
+            {aiTemplateSaveMessage ? (
+              <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                {aiTemplateSaveMessage}
+              </div>
+            ) : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowAiTemplateSaveDialog(false)}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveAiDraftAsTemplate}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Save template
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showBuilderTemplateSaveDialog && hasMeaningfulBuilderContent() ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4">
+          <div className="w-full max-w-md rounded-2xl border bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Save current plan as template</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Create a new reusable custom template from the current builder. The builder will stay unchanged.
+            </p>
+            <div className="mt-4">
+              <label className="mb-1 block text-sm font-medium text-gray-700">Template name</label>
+              <input
+                value={builderTemplateNameDraft}
+                onChange={(e) => setBuilderTemplateNameDraft(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="Template name"
+              />
+            </div>
+            {builderTemplateSaveMessage ? (
+              <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                {builderTemplateSaveMessage}
+              </div>
+            ) : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowBuilderTemplateSaveDialog(false)}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveCurrentBuilderAsTemplate}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Save template
+              </button>
             </div>
           </div>
         </div>

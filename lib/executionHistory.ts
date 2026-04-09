@@ -16,7 +16,7 @@ export type ExecutionHistoryStatus =
 export type ExecutionHistoryPath = "graph" | "fallback";
 export type ExecutionHistoryItemType = "email" | "reminder" | "meeting" | "teams_meeting";
 export type ExecutionHistoryFallbackExportKind = "eml" | "ics" | null;
-export type ExecutionHistoryProvider = "outlook" | "local_export";
+export type ExecutionHistoryProvider = "outlook" | "gmail" | "local_export";
 export type ExecutionHistoryProviderObjectType = "message" | "event" | "file" | null;
 
 export type ExecutionHistoryRecord = {
@@ -110,7 +110,7 @@ function readBoolean(value: unknown, fallback = false) {
 }
 
 function normalizeProvider(value: unknown): ExecutionHistoryProvider {
-  return value === "local_export" ? "local_export" : "outlook";
+  return value === "local_export" || value === "gmail" ? value : "outlook";
 }
 
 function normalizeProviderObjectType(value: unknown): ExecutionHistoryProviderObjectType {

@@ -36,6 +36,7 @@ export type PersistedTemplateRow = {
     endTime?: string;
     isAllDay?: boolean;
     teamsMeeting?: boolean;
+    addGoogleMeet?: boolean;
   };
 };
 
@@ -183,6 +184,8 @@ function normalizeTemplateRow(value: unknown): PersistedTemplateRow | null {
           isAllDay: typeof value.meetingDraft.isAllDay === "boolean" ? value.meetingDraft.isAllDay : undefined,
           teamsMeeting:
             typeof value.meetingDraft.teamsMeeting === "boolean" ? value.meetingDraft.teamsMeeting : undefined,
+          addGoogleMeet:
+            typeof value.meetingDraft.addGoogleMeet === "boolean" ? value.meetingDraft.addGoogleMeet : undefined,
         }
       : undefined,
   };

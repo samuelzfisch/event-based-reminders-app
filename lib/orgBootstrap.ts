@@ -53,6 +53,43 @@ function deriveOrganizationName(email: string | null | undefined) {
   return `${label}'s Organization`;
 }
 
+async function fetchExistingMembership(userId: string) {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return { context: null, error: null };
+
+  const membershipQuery = await supabase
+    .from("org_members")
+    .select("org_id,role,created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (membershipQuery.error) {
+    return { context: null, error: membershipQuery.error };
+  }
+
+  console.info("[orgBootstrap] membership query result", {
+    userId,
+    hasRow: Boolean(membershipQuery.data?.org_id),
+    orgId: membershipQuery.data?.org_id ?? null,
+  });
+
+  if (!membershipQuery.data?.org_id) {
+    return { context: null, error: null };
+  }
+
+  const context = {
+    userId,
+    orgId: membershipQuery.data.org_id,
+    role: normalizeString(membershipQuery.data.role) || "member",
+  } satisfies BootstrappedOrgContext;
+
+  cacheOrgContext(context);
+  console.info("[orgBootstrap] bootstrap success from membership", { userId, orgId: context.orgId });
+  return { context, error: null };
+}
+
 async function runBootstrapCurrentOrgForUser(input: {
   userId: string;
   email?: string | null;
@@ -74,58 +111,21 @@ async function runBootstrapCurrentOrgForUser(input: {
       sessionUserId,
     });
 
-    const {
-      data: { user: authenticatedUser },
-      error: getUserError,
-    } = await supabase.auth.getUser();
-
-    if (getUserError) {
-      console.error("[orgBootstrap] auth.getUser failed", getUserError);
-    }
-
-    const effectiveUserId = sessionUserId || authenticatedUser?.id || null;
-    if (!effectiveUserId || effectiveUserId !== input.userId) {
+    if (!sessionUserId || sessionUserId !== input.userId) {
       console.error("[orgBootstrap] authenticated user mismatch", {
         expectedUserId: input.userId,
         sessionUserId,
-        actualUserId: authenticatedUser?.id ?? null,
       });
       return null;
     }
 
-    const cached = getCachedOrgContext();
-    if (cached?.userId === input.userId) {
-      return cached;
-    }
-
-    const membershipQuery = await supabase
-      .from("org_members")
-      .select("org_id,role,created_at")
-      .eq("user_id", input.userId)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (membershipQuery.error) {
-      console.error("[orgBootstrap] membership query failed", membershipQuery.error);
+    const initialMembership = await fetchExistingMembership(input.userId);
+    if (initialMembership.error) {
+      console.error("[orgBootstrap] membership query failed", initialMembership.error);
       return null;
     }
-
-    console.info("[orgBootstrap] membership query result", {
-      userId: input.userId,
-      hasRow: Boolean(membershipQuery.data?.org_id),
-      orgId: membershipQuery.data?.org_id ?? null,
-    });
-
-    if (membershipQuery.data?.org_id) {
-      const context = {
-        userId: input.userId,
-        orgId: membershipQuery.data.org_id,
-        role: normalizeString(membershipQuery.data.role) || "member",
-      } satisfies BootstrappedOrgContext;
-      cacheOrgContext(context);
-      console.info("[orgBootstrap] bootstrap success from membership", { userId: input.userId, orgId: context.orgId });
-      return context;
+    if (initialMembership.context) {
+      return initialMembership.context;
     }
 
     console.info("[orgBootstrap] creating organization", { userId: input.userId });
@@ -140,6 +140,8 @@ async function runBootstrapCurrentOrgForUser(input: {
 
     if (createOrg.error || !createOrg.data?.id) {
       console.error("[orgBootstrap] organization insert failed", createOrg.error ?? null);
+      const recoveredMembership = await fetchExistingMembership(input.userId);
+      if (recoveredMembership.context) return recoveredMembership.context;
       return null;
     }
 
@@ -155,6 +157,8 @@ async function runBootstrapCurrentOrgForUser(input: {
 
     if (membershipInsert.error) {
       console.error("[orgBootstrap] org_members insert failed", membershipInsert.error);
+      const recoveredMembership = await fetchExistingMembership(input.userId);
+      if (recoveredMembership.context) return recoveredMembership.context;
       return null;
     }
 
@@ -176,11 +180,6 @@ export async function bootstrapCurrentOrgForUser(input: {
   userId: string;
   email?: string | null;
 }) {
-  const cached = getCachedOrgContext();
-  if (cached?.userId === input.userId) {
-    return cached;
-  }
-
   const existingPromise = activeBootstrapPromises.get(input.userId);
   if (existingPromise) {
     console.info("[orgBootstrap] bootstrap reused", { userId: input.userId });

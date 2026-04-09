@@ -39,6 +39,7 @@ export type TemplateItem = {
     endTime?: string;
     isAllDay?: boolean;
     teamsMeeting?: boolean;
+    addGoogleMeet?: boolean;
   };
 };
 

@@ -31,6 +31,7 @@ export type TemplateSnapshotRow = {
     endTime?: string;
     isAllDay?: boolean;
     teamsMeeting?: boolean;
+    addGoogleMeet?: boolean;
   };
 };
 
@@ -120,6 +121,8 @@ function parseSnapshotRow(value: unknown): TemplateSnapshotRow | null {
           isAllDay: typeof value.meetingDraft.isAllDay === "boolean" ? value.meetingDraft.isAllDay : undefined,
           teamsMeeting:
             typeof value.meetingDraft.teamsMeeting === "boolean" ? value.meetingDraft.teamsMeeting : undefined,
+          addGoogleMeet:
+            typeof value.meetingDraft.addGoogleMeet === "boolean" ? value.meetingDraft.addGoogleMeet : undefined,
         }
       : undefined,
   };

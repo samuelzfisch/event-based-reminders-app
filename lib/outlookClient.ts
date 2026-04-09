@@ -140,9 +140,22 @@ export const OUTLOOK_SCOPES = [
   "Calendars.ReadWrite",
 ] as const;
 
+const outlookResolutionCache = new Map<string, Promise<OutlookConnectionState>>();
+
 function emitOutlookConnectionUpdated() {
   if (typeof window === "undefined") return;
+  outlookResolutionCache.clear();
   window.dispatchEvent(new CustomEvent(OUTLOOK_CONNECTION_UPDATED_EVENT));
+}
+
+function getOutlookResolutionCacheKey(expectedEmail?: string, requiredScopes: string[] = []) {
+  const cachedOrgContext = getCachedOrgContext();
+  return JSON.stringify({
+    orgId: cachedOrgContext?.orgId ?? "",
+    userId: cachedOrgContext?.userId ?? "",
+    expectedEmail: normalizeOutlookEmail(expectedEmail),
+    requiredScopes: [...requiredScopes].sort(),
+  });
 }
 
 function migrateOutlookStorage() {
@@ -334,7 +347,7 @@ function saveStoredOutlookIdentity(identity: OutlookConnectedIdentity) {
   emitOutlookConnectionUpdated();
 }
 
-function clearStoredOutlookState() {
+function clearStoredOutlookState(options?: { emitEvent?: boolean }) {
   if (typeof window === "undefined") return;
   const removedSession = removePersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, LEGACY_OUTLOOK_SESSION_STORAGE_KEYS);
   const removedIdentity = removePersistedValue("localStorage", OUTLOOK_IDENTITY_STORAGE_KEY, LEGACY_OUTLOOK_IDENTITY_STORAGE_KEYS);
@@ -345,7 +358,9 @@ function clearStoredOutlookState() {
     LEGACY_OUTLOOK_OAUTH_VERIFIER_KEYS
   );
   if (!removedSession && !removedIdentity && !removedOAuthState && !removedOAuthVerifier) return;
-  emitOutlookConnectionUpdated();
+  if (options?.emitEvent !== false) {
+    emitOutlookConnectionUpdated();
+  }
 }
 
 type CanonicalOutlookIntegrationRecord = {
@@ -399,6 +414,28 @@ function buildCanonicalOutlookPayload(input: {
     updated_by: input.userId,
     updated_at: new Date().toISOString(),
   };
+}
+
+function logOutlookCanonicalDisconnectError(
+  step: "load_existing_row" | "clear_existing_row",
+  context: { orgId: string; userId: string },
+  error: {
+    code?: string | null;
+    details?: string | null;
+    hint?: string | null;
+    message?: string | null;
+  } | null
+) {
+  console.error("[outlook] canonical disconnect failed", {
+    step,
+    orgId: context.orgId,
+    userId: context.userId,
+    provider: OUTLOOK_PROVIDER_NAME,
+    message: error?.message ?? null,
+    code: error?.code ?? null,
+    details: error?.details ?? null,
+    hint: error?.hint ?? null,
+  });
 }
 
 async function loadCanonicalOutlookIntegration() {
@@ -467,18 +504,50 @@ async function clearCanonicalOutlookIntegration() {
   const context = getCanonicalIntegrationContext();
   if (!context) return;
 
-  await context.supabase
+  const { data: existingRecord, error: loadError } = await context.supabase
     .from("provider_integrations")
-    .upsert(
-      buildCanonicalOutlookPayload({
-        orgId: context.orgId,
-        userId: context.userId,
-        session: null,
-        identity: null,
-        status: "not_connected",
-      }),
-      { onConflict: "org_id,provider" }
-    );
+    .select("id")
+    .eq("org_id", context.orgId)
+    .eq("provider", OUTLOOK_PROVIDER_NAME)
+    .maybeSingle();
+
+  if (loadError) {
+    logOutlookCanonicalDisconnectError("load_existing_row", context, loadError);
+    throw new Error("Failed to disconnect Outlook.");
+  }
+
+  if (!existingRecord?.id) {
+    console.info("[outlook] canonical disconnect skipped; provider row already absent", {
+      orgId: context.orgId,
+      userId: context.userId,
+      provider: OUTLOOK_PROVIDER_NAME,
+    });
+    return;
+  }
+
+  const { error: clearError } = await context.supabase
+    .from("provider_integrations")
+    .update({
+      connection_status: "not_connected",
+      provider_account_id: null,
+      provider_account_email: null,
+      provider_display_name: null,
+      access_token: null,
+      refresh_token: null,
+      expires_at: null,
+      scope: null,
+      identity: {},
+      updated_by: context.userId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", existingRecord.id)
+    .eq("org_id", context.orgId)
+    .eq("provider", OUTLOOK_PROVIDER_NAME);
+
+  if (clearError) {
+    logOutlookCanonicalDisconnectError("clear_existing_row", context, clearError);
+    throw new Error("Failed to disconnect Outlook.");
+  }
 }
 
 function hydrateLocalOutlookStateFromCanonical(record: CanonicalOutlookIntegrationRecord) {
@@ -748,31 +817,47 @@ async function refreshStoredOutlookSession(requiredScopes: string[] = []) {
 }
 
 export async function resolveOutlookConnectionState(expectedEmail?: string, requiredScopes: string[] = []) {
-  await ensureCanonicalOutlookIntegrationSynchronized();
-  let state = getOutlookConnectionState(expectedEmail);
-  let refreshAttempted = false;
-  let refreshSucceeded = false;
-  let reconnectRequired = state.debug.reconnectRequired;
-
-  const validSession = loadStoredOutlookSession(requiredScopes);
-  if (!validSession && state.identity) {
-    refreshAttempted = true;
-    const refreshedSession = await refreshStoredOutlookSession(requiredScopes);
-    refreshSucceeded = Boolean(refreshedSession);
-    state = getOutlookConnectionState(expectedEmail);
-    reconnectRequired = !refreshSucceeded && Boolean(state.identity);
+  const cacheKey = getOutlookResolutionCacheKey(expectedEmail, requiredScopes);
+  const cachedResolution = outlookResolutionCache.get(cacheKey);
+  if (cachedResolution) {
+    return cachedResolution;
   }
 
-  return {
-    ...state,
-    status: state.connected ? "connected" : reconnectRequired ? "reconnect_required" : "not_connected",
-    debug: {
-      ...state.debug,
-      refreshAttempted,
-      refreshSucceeded,
-      reconnectRequired,
-    },
-  } satisfies OutlookConnectionState;
+  const resolutionPromise = (async () => {
+    await ensureCanonicalOutlookIntegrationSynchronized();
+    let state = getOutlookConnectionState(expectedEmail);
+    let refreshAttempted = false;
+    let refreshSucceeded = false;
+    let reconnectRequired = state.debug.reconnectRequired;
+
+    const validSession = loadStoredOutlookSession(requiredScopes);
+    if (!validSession && state.identity) {
+      refreshAttempted = true;
+      const refreshedSession = await refreshStoredOutlookSession(requiredScopes);
+      refreshSucceeded = Boolean(refreshedSession);
+      state = getOutlookConnectionState(expectedEmail);
+      reconnectRequired = !refreshSucceeded && Boolean(state.identity);
+    }
+
+    return {
+      ...state,
+      status: state.connected ? "connected" : reconnectRequired ? "reconnect_required" : "not_connected",
+      debug: {
+        ...state.debug,
+        refreshAttempted,
+        refreshSucceeded,
+        reconnectRequired,
+      },
+    } satisfies OutlookConnectionState;
+  })();
+
+  outlookResolutionCache.set(cacheKey, resolutionPromise);
+  try {
+    return await resolutionPromise;
+  } catch (error) {
+    outlookResolutionCache.delete(cacheKey);
+    throw error;
+  }
 }
 
 async function requireStoredOutlookAccessToken(input: {
@@ -916,9 +1001,10 @@ export async function connectOutlook(expectedEmail?: string) {
   return getOutlookConnectionState(expectedEmail || identity.normalizedEmail);
 }
 
-export function disconnectOutlook() {
-  clearStoredOutlookState();
-  void clearCanonicalOutlookIntegration();
+export async function disconnectOutlook() {
+  clearStoredOutlookState({ emitEvent: false });
+  await clearCanonicalOutlookIntegration();
+  emitOutlookConnectionUpdated();
 }
 
 export async function createOutlookDraftFromEmailDraft(input: {

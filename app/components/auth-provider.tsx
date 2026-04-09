@@ -60,10 +60,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function resolveOrgContextInBackground(user: User, source: string) {
     const cachedContext = getCachedOrgContext();
+    const matchingCachedContext = cachedContext?.userId === user.id ? cachedContext : null;
     if (mountedRef.current) {
-      if (cachedContext?.userId === user.id) {
-        console.info("[auth] currentOrgId set from cache", { source, orgId: cachedContext.orgId });
-        setOrgContext(cachedContext);
+      if (matchingCachedContext) {
+        console.info("[auth] currentOrgId set from cache", { source, orgId: matchingCachedContext.orgId });
+        setOrgContext(matchingCachedContext);
       } else {
         setOrgContext(null);
         console.info("[auth] currentOrgId is null", { source, reason: "no_matching_cached_org_context" });
@@ -77,16 +78,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     orgBootstrapStartedRef.current = user.id;
     try {
+      console.info("[auth] background org bootstrap start", {
+        source,
+        userId: user.id,
+        cachedOrgId: matchingCachedContext?.orgId ?? null,
+      });
       const nextOrgContext = await bootstrapCurrentOrgForUser({
         userId: user.id,
         email: user.email,
       });
       if (!mountedRef.current) return;
-      setOrgContext(nextOrgContext);
       if (nextOrgContext?.orgId) {
+        setOrgContext(nextOrgContext);
         console.info("[auth] currentOrgId set", { source, orgId: nextOrgContext.orgId });
         orgBootstrapRetriedRef.current = null;
       } else {
+        if (matchingCachedContext) {
+          setOrgContext(matchingCachedContext);
+          console.info("[auth] preserving cached currentOrgId after null bootstrap result", {
+            source,
+            orgId: matchingCachedContext.orgId,
+          });
+        } else {
+          setOrgContext(null);
+        }
         console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_returned_null" });
         if (orgBootstrapRetriedRef.current !== user.id) {
           orgBootstrapRetriedRef.current = user.id;
@@ -99,7 +114,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       if (!mountedRef.current) return;
-      setOrgContext(null);
+      if (matchingCachedContext) {
+        setOrgContext(matchingCachedContext);
+        console.info("[auth] preserving cached currentOrgId after bootstrap failure", {
+          source,
+          orgId: matchingCachedContext.orgId,
+        });
+      } else {
+        setOrgContext(null);
+      }
       console.error("[auth] background org bootstrap failed", { source, error });
       console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_failed" });
     } finally {
@@ -112,6 +135,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function applyResolvedSession(session: Session | null, source: string) {
     if (!mountedRef.current) return;
 
+    const cachedContext = session?.user ? getCachedOrgContext() : null;
+
     console.info("[auth] applying session", {
       source,
       hasSession: Boolean(session),
@@ -120,6 +145,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     setCurrentSession(session ?? null);
     setCurrentUser(session?.user ?? null);
+    console.info("[auth] auth resolved", {
+      source,
+      userId: session?.user?.id ?? null,
+      orgId: cachedContext?.userId === session?.user?.id ? cachedContext?.orgId ?? null : null,
+    });
 
     if (!session?.user) {
       console.info("[auth] signed-out state applied", { source });
@@ -146,9 +176,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const resolutionPromise = (async () => {
       console.info("[auth] auth resolution start", { source });
+      console.info("[auth] loading start", { source });
 
       try {
         const session = await resolver();
+        if (!session && currentSessionRef.current?.user) {
+          console.info("[auth] ignoring stale null session result", {
+            source,
+            currentUserId: currentSessionRef.current.user.id,
+          });
+          if (mountedRef.current) {
+            setLoading(false);
+            console.info("[auth] loading cleared", { source });
+          }
+          return;
+        }
         await applyResolvedSession(session, source);
         console.info("[auth] auth resolution success", {
           source,
@@ -167,12 +209,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
     const guardedResolutionPromise: Promise<void> = Promise.race([
       (async () => {
         await resolutionPromise;
       })(),
       new Promise<void>((resolve) => {
-        setTimeout(() => {
+        timeoutHandle = setTimeout(() => {
           console.warn("[auth] auth resolution timed out");
           if (mountedRef.current) {
             setLoading(false);
@@ -185,6 +229,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     authResolutionRef.current = guardedResolutionPromise;
     await guardedResolutionPromise;
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
     authResolutionRef.current = null;
   }
 
@@ -237,6 +284,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await refreshAuthContext();
   });
 
+  const applyResolvedSessionEffect = useEffectEvent(async (session: Session | null, source: string) => {
+    await applyResolvedSession(session, source);
+  });
+
   const resolveWithSingleFlightEffect = useEffectEvent(async (source: string, resolver: () => Promise<Session | null>) => {
     await resolveWithSingleFlight(source, resolver);
   });
@@ -275,14 +326,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.info("[auth] auth event received", { event });
 
       if (event === "INITIAL_SESSION") {
-        if (session && !currentSessionRef.current) {
-          await resolveWithSingleFlightEffect("INITIAL_SESSION", async () => session);
-        }
+        await applyResolvedSessionEffect(session ?? null, "INITIAL_SESSION");
         return;
       }
 
       if (event === "SIGNED_IN") {
-        await resolveWithSingleFlightEffect("SIGNED_IN", async () => session ?? null);
+        await applyResolvedSessionEffect(session ?? null, "SIGNED_IN");
         return;
       }
 
@@ -292,6 +341,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } else {
           console.warn("[auth] session refresh returned no session");
         }
+        await applyResolvedSessionEffect(session ?? null, "TOKEN_REFRESHED");
         return;
       }
 
@@ -302,6 +352,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     console.info("[auth] mount auth check start");
+    console.info("[auth] loading start", { source: "mount" });
     void refreshAuthContextEffect();
 
     return () => {

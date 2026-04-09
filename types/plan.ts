@@ -44,6 +44,7 @@ export interface PlanItem {
     endTime?: string;
     isAllDay?: boolean;
     teamsMeeting?: boolean;
+    addGoogleMeet?: boolean;
   };
   status: PlanItemStatus;
 }
