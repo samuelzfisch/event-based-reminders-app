@@ -183,10 +183,13 @@ export default function SettingsPage() {
 
     void hydrateSettings();
     void refreshConnection();
-    window.addEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, refreshConnection as EventListener);
+    function handleOutlookConnectionUpdated() {
+      void refreshConnection();
+    }
+    window.addEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, handleOutlookConnectionUpdated);
     return () => {
       active = false;
-      window.removeEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, refreshConnection as EventListener);
+      window.removeEventListener(OUTLOOK_CONNECTION_UPDATED_EVENT, handleOutlookConnectionUpdated);
     };
   }, []);
 
@@ -203,10 +206,13 @@ export default function SettingsPage() {
     }
 
     void refreshGmailConnection();
-    window.addEventListener(GMAIL_CONNECTION_UPDATED_EVENT, refreshGmailConnection as EventListener);
+    function handleGmailConnectionUpdated() {
+      void refreshGmailConnection();
+    }
+    window.addEventListener(GMAIL_CONNECTION_UPDATED_EVENT, handleGmailConnectionUpdated);
     return () => {
       active = false;
-      window.removeEventListener(GMAIL_CONNECTION_UPDATED_EVENT, refreshGmailConnection as EventListener);
+      window.removeEventListener(GMAIL_CONNECTION_UPDATED_EVENT, handleGmailConnectionUpdated);
     };
   }, []);
 
