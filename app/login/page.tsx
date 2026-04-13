@@ -4,93 +4,13 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { useAuthContext } from "../components/auth-provider";
-import { getSupabaseBrowserClient } from "../../lib/supabaseClient";
 
 export default function LoginPage() {
-  const { authEnabled, authBypassEnabled, loading, currentUser, refreshAuthContext, sendMagicLink } = useAuthContext();
+  const { authEnabled, authBypassEnabled, loading, currentUser, sendMagicLink } = useAuthContext();
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-
-  useEffect(() => {
-    if (!authEnabled || authBypassEnabled || currentUser) return;
-
-    let cancelled = false;
-
-    async function processAuthReturn() {
-      if (typeof window === "undefined") return;
-
-      const supabase = getSupabaseBrowserClient();
-      if (!supabase) return;
-
-      const currentUrl = new URL(window.location.href);
-      const hashParams = new URLSearchParams(currentUrl.hash.replace(/^#/, ""));
-      const accessToken = hashParams.get("access_token");
-      const refreshToken = hashParams.get("refresh_token");
-      const code = currentUrl.searchParams.get("code");
-      const tokenHash = currentUrl.searchParams.get("token_hash");
-      const type = currentUrl.searchParams.get("type");
-
-      const cleanupUrl = () => {
-        const cleanedUrl = `${currentUrl.pathname}${currentUrl.search}`;
-        window.history.replaceState({}, document.title, cleanedUrl);
-      };
-
-      try {
-        if (accessToken && refreshToken) {
-          const { error: setSessionError } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-          });
-          if (setSessionError) throw setSessionError;
-          cleanupUrl();
-          if (!cancelled) {
-            await refreshAuthContext();
-          }
-          return;
-        }
-
-        if (code) {
-          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-          if (exchangeError) throw exchangeError;
-          currentUrl.searchParams.delete("code");
-          currentUrl.searchParams.delete("type");
-          currentUrl.searchParams.delete("next");
-          cleanupUrl();
-          if (!cancelled) {
-            await refreshAuthContext();
-          }
-          return;
-        }
-
-        if (tokenHash && type) {
-          const { error: verifyError } = await supabase.auth.verifyOtp({
-            token_hash: tokenHash,
-            type: type as "email" | "magiclink" | "signup" | "recovery" | "invite" | "email_change",
-          });
-          if (verifyError) throw verifyError;
-          currentUrl.searchParams.delete("token_hash");
-          currentUrl.searchParams.delete("type");
-          currentUrl.searchParams.delete("next");
-          cleanupUrl();
-          if (!cancelled) {
-            await refreshAuthContext();
-          }
-        }
-      } catch (processingError) {
-        if (!cancelled) {
-          setError(processingError instanceof Error ? processingError.message : "Could not complete sign-in.");
-        }
-      }
-    }
-
-    void processAuthReturn();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authBypassEnabled, authEnabled, currentUser, refreshAuthContext]);
 
   useEffect(() => {
     console.info("[loginPage] mount", {

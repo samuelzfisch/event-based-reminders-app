@@ -63,26 +63,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const matchingCachedContext = cachedContext?.userId === user.id ? cachedContext : null;
     if (mountedRef.current) {
       if (matchingCachedContext) {
-        console.info("[auth] currentOrgId set from cache", { source, orgId: matchingCachedContext.orgId });
         setOrgContext(matchingCachedContext);
       } else {
         setOrgContext(null);
-        console.info("[auth] currentOrgId is null", { source, reason: "no_matching_cached_org_context" });
       }
     }
 
     if (orgBootstrapStartedRef.current === user.id) {
-      console.info("[auth] org bootstrap already in progress", { source, userId: user.id });
       return;
     }
 
     orgBootstrapStartedRef.current = user.id;
     try {
-      console.info("[auth] background org bootstrap start", {
-        source,
-        userId: user.id,
-        cachedOrgId: matchingCachedContext?.orgId ?? null,
-      });
       const nextOrgContext = await bootstrapCurrentOrgForUser({
         userId: user.id,
         email: user.email,
@@ -90,24 +82,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!mountedRef.current) return;
       if (nextOrgContext?.orgId) {
         setOrgContext(nextOrgContext);
-        console.info("[auth] currentOrgId set", { source, orgId: nextOrgContext.orgId });
         orgBootstrapRetriedRef.current = null;
       } else {
         if (matchingCachedContext) {
           setOrgContext(matchingCachedContext);
-          console.info("[auth] preserving cached currentOrgId after null bootstrap result", {
-            source,
-            orgId: matchingCachedContext.orgId,
-          });
         } else {
           setOrgContext(null);
         }
-        console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_returned_null" });
         if (orgBootstrapRetriedRef.current !== user.id) {
           orgBootstrapRetriedRef.current = user.id;
           window.setTimeout(() => {
             if (!mountedRef.current || currentUserIdRef.current !== user.id) return;
-            console.info("[auth] retrying org bootstrap", { source, userId: user.id });
             void resolveOrgContextInBackground(user, `${source}:retry`);
           }, ORG_CONTEXT_RETRY_DELAY_MS);
         }
@@ -116,15 +101,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!mountedRef.current) return;
       if (matchingCachedContext) {
         setOrgContext(matchingCachedContext);
-        console.info("[auth] preserving cached currentOrgId after bootstrap failure", {
-          source,
-          orgId: matchingCachedContext.orgId,
-        });
       } else {
         setOrgContext(null);
       }
       console.error("[auth] background org bootstrap failed", { source, error });
-      console.info("[auth] currentOrgId is null", { source, reason: "org_bootstrap_failed" });
     } finally {
       if (orgBootstrapStartedRef.current === user.id) {
         orgBootstrapStartedRef.current = null;
@@ -135,68 +115,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function applyResolvedSession(session: Session | null, source: string) {
     if (!mountedRef.current) return;
 
-    const cachedContext = session?.user ? getCachedOrgContext() : null;
-
-    console.info("[auth] applying session", {
-      source,
-      hasSession: Boolean(session),
-      userId: session?.user?.id ?? null,
-    });
-
     setCurrentSession(session ?? null);
     setCurrentUser(session?.user ?? null);
-    console.info("[auth] auth resolved", {
-      source,
-      userId: session?.user?.id ?? null,
-      orgId: cachedContext?.userId === session?.user?.id ? cachedContext?.orgId ?? null : null,
-    });
 
     if (!session?.user) {
-      console.info("[auth] signed-out state applied", { source });
       clearCachedOrgContext();
       setOrgContext(null);
       orgBootstrapStartedRef.current = null;
       setLoading(false);
-      console.info("[auth] loading cleared", { source });
       return;
     }
 
     setLoading(false);
-    console.info("[auth] loading cleared", { source });
     void resolveOrgContextInBackground(session.user, source);
   }
 
   async function resolveWithSingleFlight(source: string, resolver: () => Promise<Session | null>) {
     const existingResolution = authResolutionRef.current;
     if (existingResolution) {
-      console.info("[auth] auth resolution reused", { source });
       await existingResolution;
       return;
     }
 
     const resolutionPromise = (async () => {
-      console.info("[auth] auth resolution start", { source });
-      console.info("[auth] loading start", { source });
-
       try {
         const session = await resolver();
         if (!session && currentSessionRef.current?.user) {
-          console.info("[auth] ignoring stale null session result", {
-            source,
-            currentUserId: currentSessionRef.current.user.id,
-          });
           if (mountedRef.current) {
             setLoading(false);
-            console.info("[auth] loading cleared", { source });
           }
           return;
         }
         await applyResolvedSession(session, source);
-        console.info("[auth] auth resolution success", {
-          source,
-          hasSession: Boolean(session),
-          userId: session?.user?.id ?? null,
-        });
       } catch (error) {
         console.error("[auth] auth resolution failed", { source, error });
         if (mountedRef.current) {
@@ -204,7 +154,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setCurrentUser(null);
           setOrgContext(null);
           setLoading(false);
-          console.info("[auth] loading cleared", { source });
         }
       }
     });
@@ -220,7 +169,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.warn("[auth] auth resolution timed out");
           if (mountedRef.current) {
             setLoading(false);
-            console.log("[auth] loading cleared");
           }
           resolve();
         }, AUTH_RESOLUTION_TIMEOUT_MS);
@@ -270,12 +218,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return null;
       }
 
-      if (session) {
-        console.info("[auth] session restored on mount", { userId: session.user.id });
-      } else {
-        console.info("[auth] no session found on mount");
-      }
-
       return session ?? null;
     });
   }
@@ -297,7 +239,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (authBypassEnabled) {
       setLoading(false);
-      console.info("[auth] auth bypass enabled");
       return () => {
         mountedRef.current = false;
       };
@@ -313,7 +254,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) {
       setLoading(false);
-      console.info("[auth] loading cleared", { source: "mount_no_client" });
       return () => {
         mountedRef.current = false;
       };
@@ -323,7 +263,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mountedRef.current) return;
-      console.info("[auth] auth event received", { event });
 
       if (event === "INITIAL_SESSION") {
         await applyResolvedSessionEffect(session ?? null, "INITIAL_SESSION");
@@ -336,9 +275,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (event === "TOKEN_REFRESHED") {
-        if (session) {
-          console.info("[auth] session refresh success", { userId: session.user.id });
-        } else {
+        if (!session) {
           console.warn("[auth] session refresh returned no session");
         }
         await applyResolvedSessionEffect(session ?? null, "TOKEN_REFRESHED");
@@ -351,8 +288,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    console.info("[auth] mount auth check start");
-    console.info("[auth] loading start", { source: "mount" });
     void refreshAuthContextEffect();
 
     return () => {
@@ -368,7 +303,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const redirectTo =
-      typeof window !== "undefined" ? `${window.location.origin}/login` : undefined;
+      typeof window !== "undefined" ? `${window.location.origin}/auth/callback` : undefined;
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
