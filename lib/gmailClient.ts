@@ -56,6 +56,58 @@ export type GoogleCalendarEventResult = {
   hasOnlineMeeting: boolean;
 };
 
+export type GoogleCalendarRecallResult = "recalled" | "already_removed";
+
+type GoogleCalendarEventCreateInput = {
+  subject: string;
+  bodyText?: string;
+  startISO: string;
+  endISO: string;
+  timeZone: string;
+  isAllDay?: boolean;
+  location?: string;
+  attendees?: string[];
+  teamsMeeting?: boolean;
+  addGoogleMeet?: boolean;
+};
+
+type GoogleCalendarEventUpdateInput = GoogleCalendarEventCreateInput & {
+  eventId: string;
+};
+
+type GoogleCalendarEventCreatePayload = {
+  summary: string;
+  description?: string;
+  location?: string;
+  start:
+    | {
+        date: string;
+      }
+    | {
+        dateTime: string;
+        timeZone: string;
+      };
+  end:
+    | {
+        date: string;
+      }
+    | {
+        dateTime: string;
+        timeZone: string;
+      };
+  attendees?: Array<{
+    email: string;
+  }>;
+  conferenceData?: {
+    createRequest: {
+      requestId: string;
+      conferenceSolutionKey: {
+        type: "hangoutsMeet";
+      };
+    };
+  };
+};
+
 export type GmailAvailabilityDebugSnapshot = {
   providerRowFound: boolean;
   providerValue: string | null;
@@ -66,6 +118,17 @@ export type GmailAvailabilityDebugSnapshot = {
   finalAvailable: boolean;
   rejectionReason: string | null;
 };
+
+type GoogleApiErrorPayload = {
+  error?: {
+    message?: string;
+    status?: string;
+    errors?: Array<{
+      reason?: string;
+      message?: string;
+    }>;
+  };
+} | null;
 
 const GMAIL_SESSION_STORAGE_KEY = "event_based_reminders_app_gmail_session_v1";
 const GMAIL_IDENTITY_STORAGE_KEY = "event_based_reminders_app_gmail_identity_v1";
@@ -149,6 +212,23 @@ function normalizeGmailEmail(value: string | null | undefined) {
     .toLowerCase();
 }
 
+function getSafeErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) {
+    if (error.message) return error.message;
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (typeof cause === "string" && cause.trim()) return cause;
+    if (cause instanceof Error && cause.message) return cause.message;
+  }
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") return serialized;
+    } catch {}
+  }
+  return fallback;
+}
+
 function buildLocalApiUrl(path: string) {
   if (typeof window === "undefined") return path;
   return new URL(path, window.location.origin).toString();
@@ -162,6 +242,48 @@ function normalizeGoogleCalendarAttendees(raw: string[] | undefined) {
     .map((email) => ({ email }));
 }
 
+function buildGoogleCalendarCreatePayload(input: GoogleCalendarEventCreateInput) {
+  const trimmedDescription = String(input.bodyText ?? "").trim();
+  const trimmedLocation = String(input.location ?? "").trim();
+  const attendees = normalizeGoogleCalendarAttendees(input.attendees);
+  const payload: GoogleCalendarEventCreatePayload = {
+    summary: input.subject.trim() || "Calendar event",
+    ...(trimmedDescription ? { description: trimmedDescription } : {}),
+    ...(trimmedLocation ? { location: trimmedLocation } : {}),
+    ...(input.isAllDay
+      ? {
+          start: { date: input.startISO.slice(0, 10) },
+          end: { date: input.endISO.slice(0, 10) },
+        }
+      : {
+          start: {
+            dateTime: input.startISO,
+            timeZone: input.timeZone,
+          },
+          end: {
+            dateTime: input.endISO,
+            timeZone: input.timeZone,
+          },
+        }),
+    ...(attendees.length > 0 ? { attendees } : {}),
+    ...(input.addGoogleMeet
+      ? {
+          conferenceData: {
+            createRequest: {
+              requestId: crypto.randomUUID(),
+              conferenceSolutionKey: { type: "hangoutsMeet" as const },
+            },
+          },
+        }
+      : {}),
+  };
+
+  return {
+    payload,
+    conferenceDataVersion: input.addGoogleMeet ? 1 : 0,
+  };
+}
+
 function isGoogleCalendarScopeError(responseStatus: number, responsePayload: { error?: { message?: string } } | null) {
   if (responseStatus !== 403) return false;
   const message = String(responsePayload?.error?.message ?? "").toLowerCase();
@@ -170,6 +292,25 @@ function isGoogleCalendarScopeError(responseStatus: number, responsePayload: { e
     message.includes("permission") ||
     message.includes("scope") ||
     message.includes("calendar.events")
+  );
+}
+
+function isGoogleApiAuthError(responseStatus: number, responsePayload: GoogleApiErrorPayload) {
+  if (responseStatus === 401) return true;
+  if (responseStatus !== 403) return false;
+
+  const message = String(responsePayload?.error?.message ?? "").toLowerCase();
+  const status = String(responsePayload?.error?.status ?? "").toLowerCase();
+  const reasons = Array.isArray(responsePayload?.error?.errors)
+    ? responsePayload?.error?.errors.map((entry) => String(entry?.reason ?? "").toLowerCase())
+    : [];
+
+  return (
+    status === "unauthenticated" ||
+    reasons.includes("autherror") ||
+    message.includes("invalid authentication credentials") ||
+    message.includes("invalid credentials") ||
+    message.includes("login required")
   );
 }
 
@@ -248,8 +389,30 @@ function loadStoredGmailSession(requiredScopes: string[] = []): GmailSession | n
   return parsed;
 }
 
+function writeStoredValueIfChanged(storageKey: string, nextValue: string) {
+  const currentValue = readPersistedValue("localStorage", storageKey);
+  if (currentValue === nextValue) return false;
+  writePersistedValue("localStorage", storageKey, nextValue);
+  return true;
+}
+
+function areStoredGmailSessionsEquivalent(left: GmailSession | null, right: GmailSession | null) {
+  if (!left || !right) return left === right;
+  return (
+    left.accessToken === right.accessToken &&
+    left.refreshToken === right.refreshToken &&
+    left.expiresAt === right.expiresAt &&
+    left.scope === right.scope
+  );
+}
+
 function saveStoredGmailSession(session: GmailSession) {
-  writePersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY, JSON.stringify(session));
+  const currentSession = loadRawStoredGmailSession();
+  if (areStoredGmailSessionsEquivalent(currentSession, session)) {
+    return;
+  }
+  const serializedSession = JSON.stringify(session);
+  writePersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY, serializedSession);
   emitGmailConnectionUpdated();
 }
 
@@ -293,16 +456,21 @@ function loadStoredGmailIdentity(): GmailConnectedIdentity | null {
 }
 
 function saveStoredGmailIdentity(identity: GmailConnectedIdentity) {
-  writePersistedValue("localStorage", GMAIL_IDENTITY_STORAGE_KEY, JSON.stringify(identity));
+  const serializedIdentity = JSON.stringify(identity);
+  if (!writeStoredValueIfChanged(GMAIL_IDENTITY_STORAGE_KEY, serializedIdentity)) {
+    return;
+  }
   emitGmailConnectionUpdated();
 }
 
-function clearStoredGmailState() {
+function clearStoredGmailState(options?: { emitEvent?: boolean }) {
   removePersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY);
   removePersistedValue("localStorage", GMAIL_IDENTITY_STORAGE_KEY);
   removePersistedValue("sessionStorage", GMAIL_OAUTH_STATE_KEY);
   removePersistedValue("sessionStorage", GMAIL_OAUTH_VERIFIER_KEY);
-  emitGmailConnectionUpdated();
+  if (options?.emitEvent !== false) {
+    emitGmailConnectionUpdated();
+  }
 }
 
 function getCanonicalIntegrationContext() {
@@ -484,6 +652,27 @@ async function refreshStoredGmailSession(requiredScopes: string[] = []) {
     return null;
   }
   return session;
+}
+
+async function getGmailSessionForExecution(requiredScopes: string[], missingMessage: string) {
+  const connection = await resolveGmailConnectionState(undefined, requiredScopes);
+  let session = loadStoredGmailSession(requiredScopes);
+
+  if (!session?.accessToken && connection.connected && !connection.stale) {
+    session = loadStoredGmailSession(requiredScopes);
+  }
+
+  if (!session?.accessToken) {
+    throw new Error(missingMessage);
+  }
+
+  return session;
+}
+
+async function refreshGmailSessionForExecution(requiredScopes: string[]) {
+  const refreshedSession = await refreshStoredGmailSession(requiredScopes);
+  if (!refreshedSession?.accessToken) return null;
+  return refreshedSession;
 }
 
 export async function resolveGmailConnectionState(expectedEmail?: string, requiredScopes: string[] = []) {
@@ -777,9 +966,9 @@ export async function connectGmail(expectedEmail?: string) {
   return getGmailConnectionState(expectedEmail || identity.normalizedEmail);
 }
 
-export function disconnectGmail() {
+export async function disconnectGmail() {
+  await clearCanonicalGmailIntegration();
   clearStoredGmailState();
-  void clearCanonicalGmailIntegration();
 }
 
 function normalizeRecipients(raw: string[] | undefined) {
@@ -822,44 +1011,53 @@ export async function createGmailDraftFromEmailDraft(input: {
   draft: GmailEmailDraft;
   fallbackSubject: string;
 }) {
-  const connection = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
-  let session = loadStoredGmailSession([GMAIL_COMPOSE_SCOPE]);
+  let session = await getGmailSessionForExecution([GMAIL_COMPOSE_SCOPE], "Connect Gmail in Settings before continuing.");
 
-  console.info("[gmail] draft creation preflight", {
-    provider: GMAIL_PROVIDER_NAME,
-    connectionStatus: connection.status,
-    connected: connection.connected,
-    stale: connection.stale,
-    tokenPresent: Boolean(session?.accessToken),
-  });
-
-  if (!session?.accessToken && connection.connected && !connection.stale) {
-    session = loadStoredGmailSession([GMAIL_COMPOSE_SCOPE]);
-  }
-
-  if (!session?.accessToken) {
-    throw new Error("Connect Gmail in Settings before continuing.");
-  }
-
-  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${session.accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      message: {
-        raw: buildRawMimeMessage(input),
+  const sendRequest = async (accessToken: string) => {
+    return await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
       },
-    }),
-  });
+      body: JSON.stringify({
+        message: {
+          raw: buildRawMimeMessage(input),
+        },
+      }),
+    });
+  };
 
-  const payload = (await response.json().catch(() => null)) as
+  let response: Response;
+  try {
+    response = await sendRequest(session.accessToken);
+  } catch (error) {
+    console.error("[gmail] draft request failed before response", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+
+  let payload = (await response.json().catch(() => null)) as
     | {
         id?: string;
         error?: { message?: string };
       }
     | null;
+
+  if (!response.ok && isGoogleApiAuthError(response.status, payload)) {
+    const refreshedSession = await refreshGmailSessionForExecution([GMAIL_COMPOSE_SCOPE]);
+    if (refreshedSession?.accessToken && refreshedSession.accessToken !== session.accessToken) {
+      session = refreshedSession;
+      response = await sendRequest(session.accessToken);
+      payload = (await response.json().catch(() => null)) as
+        | {
+            id?: string;
+            error?: { message?: string };
+          }
+        | null;
+    }
+  }
 
   if (!response.ok || !payload?.id) {
     throw new Error(payload?.error?.message || "Gmail draft creation failed.");
@@ -875,60 +1073,51 @@ export async function sendGmailEmailFromEmailDraft(input: {
   draft: GmailEmailDraft;
   fallbackSubject: string;
 }) {
-  const connection = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
-  let session = loadStoredGmailSession([GMAIL_COMPOSE_SCOPE]);
+  let session = await getGmailSessionForExecution([GMAIL_COMPOSE_SCOPE], "Connect Gmail in Settings before continuing.");
 
-  if (!session?.accessToken && connection.connected && !connection.stale) {
-    session = loadStoredGmailSession([GMAIL_COMPOSE_SCOPE]);
-  }
-
-  if (!session?.accessToken) {
-    throw new Error("Connect Gmail in Settings before continuing.");
-  }
-
-  const endpoint = buildLocalApiUrl("/api/provider-mail/send");
-  const requestBody = {
-    accessToken: session.accessToken,
-    raw: buildRawMimeMessage(input),
+  const sendRequest = async (accessToken: string) => {
+    return await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        raw: buildRawMimeMessage(input),
+      }),
+    });
   };
-  console.info("[gmail] send request start", {
-    endpoint,
-    tokenPresent: Boolean(session.accessToken),
-    toCount: normalizeRecipients(input.draft.to).length,
-    ccCount: normalizeRecipients(input.draft.cc).length,
-    bccCount: normalizeRecipients(input.draft.bcc).length,
-    subject: input.draft.subject?.trim() || input.fallbackSubject.trim() || "Email draft",
-  });
 
   let response: Response;
   try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-    });
+    response = await sendRequest(session.accessToken);
   } catch (error) {
     console.error("[gmail] send request failed before response", {
-      endpoint,
       error: error instanceof Error ? error.message : String(error),
     });
     throw error;
   }
 
-  console.info("[gmail] send response received", {
-    endpoint,
-    ok: response.ok,
-    status: response.status,
-  });
-
-  const payload = (await response.json().catch(() => null)) as
+  let payload = (await response.json().catch(() => null)) as
     | {
         id?: string;
         error?: { message?: string };
       }
     | null;
+
+  if (!response.ok && isGoogleApiAuthError(response.status, payload)) {
+    const refreshedSession = await refreshGmailSessionForExecution([GMAIL_COMPOSE_SCOPE]);
+    if (refreshedSession?.accessToken && refreshedSession.accessToken !== session.accessToken) {
+      session = refreshedSession;
+      response = await sendRequest(session.accessToken);
+      payload = (await response.json().catch(() => null)) as
+        | {
+            id?: string;
+            error?: { message?: string };
+          }
+        | null;
+    }
+  }
 
   if (!response.ok || !payload?.id) {
     throw new Error(payload?.error?.message || "Gmail email send failed.");
@@ -939,112 +1128,45 @@ export async function sendGmailEmailFromEmailDraft(input: {
   } satisfies GmailSendResult;
 }
 
-export async function createGoogleCalendarEvent(input: {
-  subject: string;
-  bodyText?: string;
-  startISO: string;
-  endISO: string;
-  timeZone: string;
-  isAllDay?: boolean;
-  location?: string;
-  attendees?: string[];
-  teamsMeeting?: boolean;
-  addGoogleMeet?: boolean;
-}) {
-  const connection = await resolveGmailConnectionState(undefined, [GOOGLE_CALENDAR_EVENTS_SCOPE]);
-  let session = loadStoredGmailSession([GOOGLE_CALENDAR_EVENTS_SCOPE]);
+export async function createGoogleCalendarEvent(input: GoogleCalendarEventCreateInput) {
+  let session = await getGmailSessionForExecution(
+    [GOOGLE_CALENDAR_EVENTS_SCOPE],
+    "Reconnect Google in Settings to continue."
+  );
 
-  if (!session?.accessToken && connection.connected && !connection.stale) {
-    session = loadStoredGmailSession([GOOGLE_CALENDAR_EVENTS_SCOPE]);
-  }
+  const { payload, conferenceDataVersion } = buildGoogleCalendarCreatePayload(input);
+  const endpoint = buildLocalApiUrl("/api/provider-calendar/events");
 
-  if (!session?.accessToken) {
-    throw new Error("Reconnect Google in Settings to continue.");
-  }
-
-  const trimmedDescription = String(input.bodyText ?? "").trim();
-  const googleAttendees = normalizeGoogleCalendarAttendees(input.attendees);
-  const payload = {
-    summary: input.subject.trim() || "Calendar event",
-    ...(trimmedDescription ? { description: trimmedDescription } : {}),
-    ...(input.location?.trim() ? { location: input.location.trim() } : {}),
-    ...(input.isAllDay
-      ? {
-          start: { date: input.startISO.slice(0, 10) },
-          end: { date: input.endISO.slice(0, 10) },
-        }
-      : {
-          start: {
-            dateTime: input.startISO,
-            timeZone: input.timeZone,
-          },
-          end: {
-            dateTime: input.endISO,
-            timeZone: input.timeZone,
-          },
-        }),
-    ...(googleAttendees.length > 0
-      ? {
-          attendees: googleAttendees,
-        }
-      : {}),
-    ...(input.addGoogleMeet
-      ? {
-          conferenceData: {
-            createRequest: {
-              requestId: crypto.randomUUID(),
-              conferenceSolutionKey: { type: "hangoutsMeet" },
-            },
-          },
-        }
-      : {}),
-  };
-
-  const endpoint = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
-  if (input.addGoogleMeet) {
-    endpoint.searchParams.set("conferenceDataVersion", "1");
-  }
-
-  const proxyEndpoint = buildLocalApiUrl("/api/provider-calendar/events");
-  const requestBody = {
-    accessToken: session.accessToken,
-    payload,
-    conferenceDataVersion: input.addGoogleMeet ? 1 : 0,
-  };
-  console.info("[googleCalendar] create request start", {
-    endpoint: proxyEndpoint,
-    tokenPresent: Boolean(session.accessToken),
-    subject: payload.summary,
-    attendeeCount: googleAttendees.length,
-    addGoogleMeet: Boolean(input.addGoogleMeet),
-    isAllDay: Boolean(input.isAllDay),
-    requestPayload: payload,
-  });
-
-  let response: Response;
-  try {
-    response = await fetch(proxyEndpoint, {
+  const sendRequest = async (accessToken: string) => {
+    return await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({
+        accessToken,
+        payload,
+        conferenceDataVersion,
+      }),
+      cache: "no-store",
+      credentials: "same-origin",
     });
+  };
+
+  let response: Response;
+  try {
+    response = await sendRequest(session.accessToken);
   } catch (error) {
+    const message = getSafeErrorMessage(error, "Google Calendar request failed before a response was received.");
     console.error("[googleCalendar] create request failed before response", {
-      endpoint: proxyEndpoint,
-      error: error instanceof Error ? error.message : String(error),
+      endpoint,
+      method: "POST",
+      error: message,
     });
-    throw error;
+    throw new Error(message);
   }
 
-  console.info("[googleCalendar] create response received", {
-    endpoint: proxyEndpoint,
-    ok: response.ok,
-    status: response.status,
-  });
-
-  const responsePayload = (await response.json().catch(() => null)) as
+  let responsePayload = (await response.json().catch(() => null)) as
     | {
         id?: string;
         htmlLink?: string;
@@ -1059,11 +1181,27 @@ export async function createGoogleCalendarEvent(input: {
       }
     | null;
 
-  console.info("[googleCalendar] create response payload", {
-    status: response.status,
-    ok: response.ok,
-    responsePayload,
-  });
+  if (!response.ok && isGoogleApiAuthError(response.status, responsePayload)) {
+    const refreshedSession = await refreshGmailSessionForExecution([GOOGLE_CALENDAR_EVENTS_SCOPE]);
+    if (refreshedSession?.accessToken && refreshedSession.accessToken !== session.accessToken) {
+      session = refreshedSession;
+      response = await sendRequest(session.accessToken);
+      responsePayload = (await response.json().catch(() => null)) as
+        | {
+            id?: string;
+            htmlLink?: string;
+            hangoutLink?: string;
+            conferenceData?: {
+              entryPoints?: Array<{
+                entryPointType?: string;
+                uri?: string;
+              }>;
+            };
+            error?: { message?: string };
+          }
+        | null;
+    }
+  }
 
   const eventId = typeof responsePayload?.id === "string" && responsePayload.id.trim() ? responsePayload.id : undefined;
   const webLink =
@@ -1076,7 +1214,8 @@ export async function createGoogleCalendarEvent(input: {
     if (isGoogleCalendarScopeError(response.status, responsePayload)) {
       throw new Error("Reconnect Google to enable calendar access.");
     }
-    throw new Error(responsePayload?.error?.message || "Google Calendar event creation failed.");
+    const apiMessage = String(responsePayload?.error?.message ?? "").trim();
+    throw new Error(apiMessage || `Google Calendar event creation failed (${response.status}).`);
   }
 
   const successPayload = responsePayload ?? {};
@@ -1086,11 +1225,100 @@ export async function createGoogleCalendarEvent(input: {
   const googleMeetEntryPoint = conferenceEntryPoints.find((entry) => entry.entryPointType === "video" && entry.uri);
   const joinUrl = googleMeetEntryPoint?.uri ?? successPayload.hangoutLink ?? "";
 
-  console.info("[googleCalendar] calendar success", {
-    eventId: eventId ?? null,
-    htmlLink: webLink || null,
-    joinUrl: joinUrl || null,
-  });
+  return {
+    id: eventId,
+    success: true,
+    webLink,
+    joinUrl,
+    hasOnlineMeeting: Boolean(joinUrl),
+  } satisfies GoogleCalendarEventResult;
+}
+
+export async function updateGoogleCalendarEvent(input: GoogleCalendarEventUpdateInput) {
+  let session = await getGmailSessionForExecution(
+    [GOOGLE_CALENDAR_EVENTS_SCOPE],
+    "Reconnect Google in Settings to continue."
+  );
+
+  const { payload, conferenceDataVersion } = buildGoogleCalendarCreatePayload(input);
+  const endpoint = buildLocalApiUrl("/api/provider-calendar/events");
+
+  const sendRequest = async (accessToken: string) => {
+    return await fetch(endpoint, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        accessToken,
+        eventId: input.eventId,
+        payload,
+        conferenceDataVersion,
+      }),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+  };
+
+  let response = await sendRequest(session.accessToken);
+  let responsePayload = (await response.json().catch(() => null)) as
+    | {
+        id?: string;
+        htmlLink?: string;
+        hangoutLink?: string;
+        conferenceData?: {
+          entryPoints?: Array<{
+            entryPointType?: string;
+            uri?: string;
+          }>;
+        };
+        error?: { message?: string };
+      }
+    | null;
+
+  if (!response.ok && isGoogleApiAuthError(response.status, responsePayload)) {
+    const refreshedSession = await refreshGmailSessionForExecution([GOOGLE_CALENDAR_EVENTS_SCOPE]);
+    if (refreshedSession?.accessToken && refreshedSession.accessToken !== session.accessToken) {
+      session = refreshedSession;
+      response = await sendRequest(session.accessToken);
+      responsePayload = (await response.json().catch(() => null)) as
+        | {
+            id?: string;
+            htmlLink?: string;
+            hangoutLink?: string;
+            conferenceData?: {
+              entryPoints?: Array<{
+                entryPointType?: string;
+                uri?: string;
+              }>;
+            };
+            error?: { message?: string };
+          }
+        | null;
+    }
+  }
+
+  const eventId = typeof responsePayload?.id === "string" && responsePayload.id.trim() ? responsePayload.id : input.eventId;
+  const webLink =
+    typeof responsePayload?.htmlLink === "string" && responsePayload.htmlLink.trim() ? responsePayload.htmlLink : "";
+
+  if (response.status !== 200 || !eventId) {
+    if (isGoogleCalendarApiDisabledError(response.status, responsePayload)) {
+      throw new Error("Google Calendar API is not enabled for this Google connection yet. Enable it, then retry.");
+    }
+    if (isGoogleCalendarScopeError(response.status, responsePayload)) {
+      throw new Error("Reconnect Google to enable calendar access.");
+    }
+    const apiMessage = String(responsePayload?.error?.message ?? "").trim();
+    throw new Error(apiMessage || `Google Calendar event update failed (${response.status}).`);
+  }
+
+  const successPayload = responsePayload ?? {};
+  const conferenceEntryPoints = Array.isArray(successPayload.conferenceData?.entryPoints)
+    ? successPayload.conferenceData?.entryPoints ?? []
+    : [];
+  const googleMeetEntryPoint = conferenceEntryPoints.find((entry) => entry.entryPointType === "video" && entry.uri);
+  const joinUrl = googleMeetEntryPoint?.uri ?? successPayload.hangoutLink ?? "";
 
   return {
     id: eventId,
@@ -1099,4 +1327,58 @@ export async function createGoogleCalendarEvent(input: {
     joinUrl,
     hasOnlineMeeting: Boolean(joinUrl),
   } satisfies GoogleCalendarEventResult;
+}
+
+export async function deleteGoogleCalendarEvent(input: { eventId: string }): Promise<GoogleCalendarRecallResult> {
+  let session = await getGmailSessionForExecution(
+    [GOOGLE_CALENDAR_EVENTS_SCOPE],
+    "Reconnect Google in Settings to continue."
+  );
+
+  const endpoint = buildLocalApiUrl("/api/provider-calendar/events");
+
+  const sendRequest = async (accessToken: string) => {
+    return await fetch(endpoint, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        accessToken,
+        eventId: input.eventId,
+      }),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+  };
+
+  let response = await sendRequest(session.accessToken);
+  let responsePayload = (await response.json().catch(() => null)) as GoogleApiErrorPayload | { success?: boolean } | null;
+
+  if (!response.ok && isGoogleApiAuthError(response.status, responsePayload as GoogleApiErrorPayload)) {
+    const refreshedSession = await refreshGmailSessionForExecution([GOOGLE_CALENDAR_EVENTS_SCOPE]);
+    if (refreshedSession?.accessToken && refreshedSession.accessToken !== session.accessToken) {
+      session = refreshedSession;
+      response = await sendRequest(session.accessToken);
+      responsePayload = (await response.json().catch(() => null)) as GoogleApiErrorPayload | { success?: boolean } | null;
+    }
+  }
+
+  if (response.status === 204) {
+    return "recalled";
+  }
+
+  if (response.status === 404 || response.status === 410) {
+    return "already_removed";
+  }
+
+  if (isGoogleCalendarApiDisabledError(response.status, responsePayload as GoogleApiErrorPayload)) {
+    throw new Error("Google Calendar API is not enabled for this Google connection yet. Enable it, then retry.");
+  }
+  if (isGoogleCalendarScopeError(response.status, responsePayload as GoogleApiErrorPayload)) {
+    throw new Error("Reconnect Google to enable calendar access.");
+  }
+
+  const apiMessage = String((responsePayload as GoogleApiErrorPayload | null)?.error?.message ?? "").trim();
+  throw new Error(apiMessage || `Google Calendar event deletion failed (${response.status}).`);
 }

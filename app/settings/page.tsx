@@ -56,7 +56,7 @@ function inferConnectionProvider(email: string, choice: ConnectionProviderChoice
 }
 
 export default function SettingsPage() {
-  const { authEnabled, authBypassEnabled, currentUser, currentOrgId, signOut } = useAuthContext();
+  const { authEnabled, authBypassEnabled, currentUser, signOut } = useAuthContext();
   const [settings, setSettings] = useState<AppSettings>(() => loadAppSettings());
   const [savedSettings, setSavedSettings] = useState<AppSettings>(() => loadAppSettings());
   const [planBuilderSaveMessage, setPlanBuilderSaveMessage] = useState<string | null>(null);
@@ -284,12 +284,17 @@ export default function SettingsPage() {
     }
   }
 
-  function onDisconnectGmail() {
-    setGmailError(null);
-    disconnectGmail();
-    const connection = getGmailConnectionState();
-    setGmailConnection((current) => (areGmailConnectionStatesEqual(current, connection) ? current : connection));
-    return true;
+  async function onDisconnectGmail() {
+    try {
+      setGmailError(null);
+      await disconnectGmail();
+      const connection = getGmailConnectionState();
+      setGmailConnection((current) => (areGmailConnectionStatesEqual(current, connection) ? current : connection));
+      return true;
+    } catch (error) {
+      setGmailError(error instanceof Error ? error.message : "Failed to disconnect Gmail.");
+      return false;
+    }
   }
 
   async function onSignOut() {
@@ -352,6 +357,8 @@ export default function SettingsPage() {
         : "Not connected";
   const primaryConnectedLabel =
     primaryConnectedProvider === "outlook" ? "Outlook" : primaryConnectedProvider === "gmail" ? "Google" : "No provider connected";
+  const showProviderRefreshingStatus =
+    (providerLoading.outlook || providerLoading.gmail) && (!outlookConnection || !gmailConnection);
 
   function clearConnectionFeedback() {
     setConnectionMessage(null);
@@ -387,7 +394,7 @@ export default function SettingsPage() {
             : "outlook";
 
     if (provider === "gmail") {
-      const succeeded = onDisconnectGmail();
+      const succeeded = await onDisconnectGmail();
       if (succeeded) {
         setConnectionMessage("Google account disconnected.");
       } else {
@@ -506,9 +513,11 @@ export default function SettingsPage() {
               <p className="mt-1 text-sm text-gray-900">{primaryConnectedEmail}</p>
               <p className="mt-3 text-xs text-gray-500">Connection status</p>
               <p className="mt-1 text-sm font-medium text-gray-900">{primaryConnectedStatus}</p>
-              {providerLoading.outlook || providerLoading.gmail ? (
-                <p className="mt-2 text-xs text-gray-500">Refreshing provider status…</p>
-              ) : null}
+              <div className="mt-2 min-h-4">
+                {showProviderRefreshingStatus ? (
+                  <p className="text-xs text-gray-500">Refreshing provider status…</p>
+                ) : null}
+              </div>
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Outlook</div>
@@ -600,9 +609,6 @@ export default function SettingsPage() {
               <div className="space-y-2 text-sm text-gray-600">
                 <div>
                   Signed in as: <span className="text-gray-900">{currentUser.email || "—"}</span>
-                </div>
-                <div>
-                  Org ID: <span className="text-gray-900">{currentOrgId || "—"}</span>
                 </div>
               </div>
               <div>

@@ -156,11 +156,35 @@ export function getExecutionHistoryRecallState(record: Pick<
     };
   }
 
-  if (record.provider !== "outlook" || !record.providerObjectId) {
+  if (!record.providerObjectId) {
     return {
       canRecall: false,
       recallImplemented: false,
-      recallReason: "This item cannot be recalled.",
+      recallReason:
+        record.provider === "gmail"
+          ? "This Google history item is missing its event id, so it cannot be recalled from History."
+          : record.provider === "local_export"
+            ? "Local export items do not create provider-backed objects, so they cannot be recalled from History."
+            : "This item cannot be recalled.",
+    };
+  }
+
+  if (record.provider === "gmail" && record.providerObjectType === "event") {
+    return {
+      canRecall: true,
+      recallImplemented: true,
+      recallReason: null,
+    };
+  }
+
+  if (record.provider !== "outlook") {
+    return {
+      canRecall: false,
+      recallImplemented: false,
+      recallReason:
+        record.provider === "gmail"
+          ? "History recall currently supports Google Calendar events only."
+          : "This item cannot be recalled.",
     };
   }
 
@@ -225,11 +249,35 @@ export function getExecutionHistoryModifyState(record: Pick<
     };
   }
 
-  if (record.provider !== "outlook" || !record.providerObjectId) {
+  if (!record.providerObjectId) {
     return {
       canModify: false,
       modifyImplemented: false,
-      modifyReason: "This item cannot be modified.",
+      modifyReason:
+        record.provider === "gmail"
+          ? "This Google history item is missing its event id, so it cannot be changed from History."
+          : record.provider === "local_export"
+            ? "Local export items do not create provider-backed objects, so they cannot be modified from History."
+            : "This item cannot be modified.",
+    };
+  }
+
+  if (record.provider === "gmail" && record.providerObjectType === "event") {
+    return {
+      canModify: true,
+      modifyImplemented: true,
+      modifyReason: null,
+    };
+  }
+
+  if (record.provider !== "outlook") {
+    return {
+      canModify: false,
+      modifyImplemented: false,
+      modifyReason:
+        record.provider === "gmail"
+          ? "History edit currently supports Google Calendar events only."
+          : "This item cannot be modified.",
     };
   }
 

@@ -33,9 +33,7 @@ import {
   GOOGLE_CALENDAR_EVENTS_SCOPE,
   getConnectedGmailMailboxEmail,
   getGmailConnectionState,
-  getLastGmailAvailabilityDebugSnapshot,
   sendGmailEmailFromEmailDraft,
-  type GmailAvailabilityDebugSnapshot,
   type GmailConnectionState,
   resolveGmailConnectionState,
 } from "../../lib/gmailClient";
@@ -190,24 +188,9 @@ type ExecutionNotice = {
   details?: string[];
 };
 
-type ExportDebugSnapshot = {
-  rowType: string | null;
-  executionPath: "email" | "calendar" | null;
-  requestedEmailAction: "draft" | "send" | "schedule" | null;
-  authEnabled: boolean;
-  authLoading: boolean;
-  currentUserPresent: boolean;
-  currentOrgId: string | null;
-  outlookConnected: boolean;
-  outlookAvailable: boolean;
-  outlookUnavailableReason: string | null;
-  gmail: GmailAvailabilityDebugSnapshot;
-  chosenProvider: "outlook" | "gmail" | null;
-  fallbackTriggered: boolean;
-  fallbackReason: string | null;
-  gmailExecutionRan: boolean;
-  gmailExecutionThrew: boolean;
-  gmailExecutionError: string | null;
+type ExecutionNoticeEntry = {
+  id: string;
+  notice: ExecutionNotice;
 };
 
 type AIConversationMessage = {
@@ -660,52 +643,6 @@ function ExportDoneBadge() {
   );
 }
 
-function ExportDebugCard({ debug }: { debug: ExportDebugSnapshot }) {
-  return (
-    <div className="rounded-xl border border-dashed border-red-300 bg-red-50 p-4 text-xs text-red-950">
-      <div className="font-semibold uppercase tracking-wide">Temporary Export Debug</div>
-      <div className="mt-3 grid gap-4 md:grid-cols-2">
-        <div className="space-y-1">
-          <div className="font-semibold">Auth / Org</div>
-          <div>auth enabled: {String(debug.authEnabled)}</div>
-          <div>auth loading: {String(debug.authLoading)}</div>
-          <div>current user present: {String(debug.currentUserPresent)}</div>
-          <div>currentOrgId: {debug.currentOrgId || "—"}</div>
-        </div>
-        <div className="space-y-1">
-          <div className="font-semibold">Outlook</div>
-          <div>connected: {String(debug.outlookConnected)}</div>
-          <div>available: {String(debug.outlookAvailable)}</div>
-          <div>reason unavailable: {debug.outlookUnavailableReason || "—"}</div>
-        </div>
-        <div className="space-y-1">
-          <div className="font-semibold">Gmail</div>
-          <div>provider row found: {String(debug.gmail.providerRowFound)}</div>
-          <div>provider value: {debug.gmail.providerValue || "—"}</div>
-          <div>connection_status: {debug.gmail.connectionStatus || "—"}</div>
-          <div>compose scope present: {String(debug.gmail.scopesPresent)}</div>
-          <div>token present: {String(debug.gmail.tokenPresent)}</div>
-          <div>identity present: {String(debug.gmail.identityPresent)}</div>
-          <div>final available: {String(debug.gmail.finalAvailable)}</div>
-          <div>reason unavailable: {debug.gmail.rejectionReason || "—"}</div>
-        </div>
-        <div className="space-y-1">
-          <div className="font-semibold">Decision / Execution</div>
-          <div>row type: {debug.rowType || "—"}</div>
-          <div>execution path: {debug.executionPath || "—"}</div>
-          <div>requested action: {debug.requestedEmailAction || "—"}</div>
-          <div>chosen provider: {debug.chosenProvider || "—"}</div>
-          <div>fallback triggered: {String(debug.fallbackTriggered)}</div>
-          <div>fallback reason: {debug.fallbackReason || "—"}</div>
-          <div>gmail helper ran: {String(debug.gmailExecutionRan)}</div>
-          <div>gmail helper threw: {String(debug.gmailExecutionThrew)}</div>
-          <div>gmail helper error: {debug.gmailExecutionError || "—"}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function getSeedTemplateName(type: PlanType) {
   if (type === "press_release") return "Press Release";
   return type.charAt(0).toUpperCase() + type.slice(1);
@@ -798,6 +735,34 @@ function normalizeMeetingDraft(draft?: BuilderRow["meetingDraft"] | null) {
     teamsMeeting: Boolean(draft.teamsMeeting),
     addGoogleMeet: Boolean(draft.addGoogleMeet),
   };
+}
+
+function getNextMeetingLocationOnToggle(params: {
+  currentLocation?: string;
+  checked: boolean;
+  enabledLocation: string;
+  disabledLocation: string;
+}) {
+  const currentLocation = typeof params.currentLocation === "string" ? params.currentLocation.trim() : "";
+  if (params.checked) return params.enabledLocation;
+  return currentLocation === params.enabledLocation ? params.disabledLocation : params.currentLocation ?? "";
+}
+
+function getMeetingLocationValue(
+  draft: BuilderRow["meetingDraft"] | null | undefined,
+  activeProvider: "outlook" | "gmail" | null
+) {
+  const normalizedDraft = normalizeMeetingDraft(draft);
+  if (!normalizedDraft) return "";
+  if (normalizedDraft.teamsMeeting) return TEAMS_MEETING_LOCATION;
+  if (activeProvider === "gmail" && normalizedDraft.addGoogleMeet) return GOOGLE_MEET_LOCATION;
+
+  const trimmedLocation = normalizedDraft.location.trim();
+  if (trimmedLocation === TEAMS_MEETING_LOCATION || trimmedLocation === GOOGLE_MEET_LOCATION) {
+    return "";
+  }
+
+  return normalizedDraft.location ?? "";
 }
 
 function normalizeDurationDraft(draft?: BuilderRow["durationDraft"] | null) {
@@ -1549,29 +1514,12 @@ export default function PlansPage() {
   const [expandedPreviewEmailRowIds, setExpandedPreviewEmailRowIds] = useState<string[]>([]);
   const [expandedPreviewMeetingRowIds, setExpandedPreviewMeetingRowIds] = useState<string[]>([]);
   const [openPreviewRowMenuId, setOpenPreviewRowMenuId] = useState<string | null>(null);
-  const [executionNotice, setExecutionNotice] = useState<ExecutionNotice | null>(null);
+  const [executionNotices, setExecutionNotices] = useState<ExecutionNoticeEntry[]>([]);
   const [executionState, setExecutionState] = useState<"pending" | "success" | "failure" | null>(null);
+  const exportQueueRef = useRef(Promise.resolve());
+  const activeExportCountRef = useRef(0);
   const [providerLoading, setProviderLoading] = useState({ outlook: true, gmail: true });
   const [previewLoading, setPreviewLoading] = useState(true);
-  const [exportDebug, setExportDebug] = useState<ExportDebugSnapshot>({
-    rowType: null,
-    executionPath: null,
-    requestedEmailAction: null,
-    authEnabled,
-    authLoading: loading,
-    currentUserPresent: Boolean(currentUser),
-    currentOrgId: currentOrgId ?? null,
-    outlookConnected: false,
-    outlookAvailable: false,
-    outlookUnavailableReason: null,
-    gmail: getLastGmailAvailabilityDebugSnapshot(),
-    chosenProvider: null,
-    fallbackTriggered: false,
-    fallbackReason: null,
-    gmailExecutionRan: false,
-    gmailExecutionThrew: false,
-    gmailExecutionError: null,
-  });
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
   const [aiComposer, setAiComposer] = useState("");
   const [aiGenerating, setAiGenerating] = useState(false);
@@ -1607,18 +1555,6 @@ export default function PlansPage() {
   const aiComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const builderSectionRef = useRef<HTMLElement | null>(null);
   const rowsRef = useRef<BuilderRow[]>(rows);
-  const showExportDebugPanel = process.env.NODE_ENV === "development";
-
-  function updateExportDebug(patch: Partial<ExportDebugSnapshot>) {
-    setExportDebug((current) => ({
-      ...current,
-      authEnabled,
-      authLoading: loading,
-      currentUserPresent: Boolean(currentUser),
-      currentOrgId: currentOrgId ?? null,
-      ...patch,
-    }));
-  }
 
   function getLatestPreviewPlan() {
     return resolvePlanAnchors(
@@ -1652,16 +1588,6 @@ export default function PlansPage() {
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
-
-  useEffect(() => {
-    setExportDebug((current) => ({
-      ...current,
-      authEnabled,
-      authLoading: loading,
-      currentUserPresent: Boolean(currentUser),
-      currentOrgId: currentOrgId ?? null,
-    }));
-  }, [authEnabled, loading, currentUser, currentOrgId]);
 
   useEffect(() => {
     if (!isAiPanelOpen) return;
@@ -2450,6 +2376,19 @@ export default function PlansPage() {
     }
 
     if (provider === "gmail") {
+      if (providerObjectType === "event") {
+        return {
+          provider: "gmail" as const,
+          providerObjectType,
+          providerObjectId,
+          canRecall: true,
+          canModify: true,
+          recallImplemented: true,
+          modifyImplemented: true,
+          recallReason: null,
+          modifyReason: null,
+        };
+      }
       return {
         provider: "gmail" as const,
         providerObjectType,
@@ -2458,8 +2397,8 @@ export default function PlansPage() {
         canModify: false,
         recallImplemented: false,
         modifyImplemented: false,
-        recallReason: "Google actions cannot be recalled from History yet.",
-        modifyReason: "Google actions cannot be modified from History yet.",
+        recallReason: "This Google item cannot be recalled from History.",
+        modifyReason: "This Google item cannot be modified from History.",
       };
     }
 
@@ -2631,16 +2570,7 @@ export default function PlansPage() {
           : "draft";
     const outlookConnected = Boolean(outlookConnection?.connected);
 
-    console.info("[plans] checking email execution availability", {
-      requestedEmailAction,
-      outlookExpectedEmail: appSettings.outlookAccountEmail,
-    });
-
     if (authEnabled && currentUser && !currentOrgId) {
-      console.info("[plans] refreshing org context before gmail availability check", {
-        requestedEmailAction,
-        userId: currentUser.id,
-      });
       await refreshAuthContext();
     }
 
@@ -2648,33 +2578,6 @@ export default function PlansPage() {
       const outlookAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
       const gmailAvailability = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
       const gmailConnected = gmailAvailability.connected && !gmailAvailability.stale;
-      console.info("[plans] outlook availability result", {
-        requestedEmailAction,
-        canUseGraph: outlookAvailability.canUseGraph,
-        reason: outlookAvailability.reason ?? null,
-      });
-      console.info("[plans] final chosen email provider", {
-        requestedEmailAction,
-        provider: outlookAvailability.canUseGraph ? "outlook" : gmailConnected ? "gmail" : "outlook",
-        canExecute: outlookAvailability.canUseGraph || gmailConnected,
-        outlookAvailable: outlookAvailability.canUseGraph,
-        gmailAvailable: gmailConnected,
-        reason: outlookAvailability.canUseGraph ? null : gmailConnected ? null : outlookAvailability.reason ?? "Connect Outlook or Gmail to continue.",
-      });
-      updateExportDebug({
-        executionPath: "email",
-        requestedEmailAction,
-        outlookConnected,
-        outlookAvailable: outlookAvailability.canUseGraph,
-        outlookUnavailableReason: outlookAvailability.canUseGraph ? null : outlookAvailability.reason ?? null,
-        gmail: getLastGmailAvailabilityDebugSnapshot(),
-        chosenProvider: outlookAvailability.canUseGraph ? "outlook" : gmailConnected ? "gmail" : "outlook",
-        fallbackTriggered: false,
-        fallbackReason: null,
-        gmailExecutionRan: false,
-        gmailExecutionThrew: false,
-        gmailExecutionError: null,
-      });
       const chosenProvider: "outlook" | "gmail" = outlookAvailability.canUseGraph
         ? "outlook"
         : gmailConnected
@@ -2690,37 +2593,7 @@ export default function PlansPage() {
     }
 
     const outlookAvailability = await getGraphExecutionAvailability(["Mail.ReadWrite", "Mail.Send"]);
-    console.info("[plans] outlook availability result", {
-      requestedEmailAction,
-      canUseGraph: outlookAvailability.canUseGraph,
-      reason: outlookAvailability.reason ?? null,
-    });
     if (outlookAvailability.canUseGraph) {
-      console.info("[plans] final chosen email provider", {
-        requestedEmailAction,
-        provider: "outlook",
-        canExecute: true,
-        outlookAvailable: true,
-        gmailAvailable: false,
-        reason: null,
-      });
-      updateExportDebug({
-        executionPath: "email",
-        requestedEmailAction,
-        outlookConnected,
-        outlookAvailable: true,
-        outlookUnavailableReason: null,
-        gmail: {
-          ...getLastGmailAvailabilityDebugSnapshot(),
-          finalAvailable: false,
-        },
-        chosenProvider: "outlook",
-        fallbackTriggered: false,
-        fallbackReason: null,
-        gmailExecutionRan: false,
-        gmailExecutionThrew: false,
-        gmailExecutionError: null,
-      });
       return {
         provider: "outlook" as const,
         canExecute: true,
@@ -2730,37 +2603,7 @@ export default function PlansPage() {
     }
 
     const gmailAvailability = await resolveGmailConnectionState(undefined, [GMAIL_COMPOSE_SCOPE]);
-    console.info("[plans] gmail availability result", {
-      requestedEmailAction,
-      status: gmailAvailability.status,
-      connected: gmailAvailability.connected,
-      stale: gmailAvailability.stale,
-      connectedEmail: gmailAvailability.normalizedConnectedEmail,
-    });
     if (gmailAvailability.connected && !gmailAvailability.stale) {
-      const gmailDebugSnapshot = getLastGmailAvailabilityDebugSnapshot();
-      console.info("[plans] final chosen email provider", {
-        requestedEmailAction,
-        provider: "gmail",
-        canExecute: true,
-        outlookAvailable: false,
-        gmailAvailable: true,
-        reason: null,
-      });
-      updateExportDebug({
-        executionPath: "email",
-        requestedEmailAction,
-        outlookConnected,
-        outlookAvailable: false,
-        outlookUnavailableReason: outlookAvailability.reason ?? null,
-        gmail: gmailDebugSnapshot,
-        chosenProvider: "gmail",
-        fallbackTriggered: false,
-        fallbackReason: null,
-        gmailExecutionRan: false,
-        gmailExecutionThrew: false,
-        gmailExecutionError: null,
-      });
       return {
         provider: "gmail" as const,
         canExecute: true,
@@ -2776,29 +2619,6 @@ export default function PlansPage() {
           ? "Reconnect Outlook or Gmail in Settings to continue."
           : "Connect Outlook or Gmail to continue.";
 
-    console.info("[plans] final chosen email provider", {
-      requestedEmailAction,
-      provider: "outlook",
-      canExecute: false,
-      outlookAvailable: false,
-      gmailAvailable: false,
-      reason,
-    });
-    updateExportDebug({
-      executionPath: "email",
-      requestedEmailAction,
-      outlookConnected,
-      outlookAvailable: false,
-      outlookUnavailableReason: outlookAvailability.reason ?? null,
-      gmail: getLastGmailAvailabilityDebugSnapshot(),
-      chosenProvider: "outlook",
-      fallbackTriggered: false,
-      fallbackReason: null,
-      gmailExecutionRan: false,
-      gmailExecutionThrew: false,
-      gmailExecutionError: null,
-    });
-
     return {
       provider: "outlook" as const,
       canExecute: false,
@@ -2811,25 +2631,6 @@ export default function PlansPage() {
   async function getCalendarExecutionAvailability(): Promise<ProviderExecutionAvailability> {
     const outlookAvailability = await getGraphExecutionAvailability(["Calendars.ReadWrite"]);
     if (outlookAvailability.canUseGraph) {
-      console.info("[plans] calendar availability result", {
-        outlookAvailable: true,
-        gmailAvailable: false,
-        provider: "outlook",
-        reason: null,
-      });
-      updateExportDebug({
-        executionPath: "calendar",
-        outlookConnected: Boolean(outlookConnection?.connected),
-        outlookAvailable: true,
-        outlookUnavailableReason: null,
-        gmail: {
-          ...getLastGmailAvailabilityDebugSnapshot(),
-          finalAvailable: false,
-        },
-        chosenProvider: "outlook",
-        fallbackTriggered: false,
-        fallbackReason: null,
-      });
       return {
         provider: "outlook" as const,
         canExecute: true,
@@ -2852,23 +2653,6 @@ export default function PlansPage() {
         ? "Reconnect Google in Settings to enable Google Calendar, or connect Outlook to continue."
         : "Connect Outlook to continue.";
 
-    console.info("[plans] calendar availability result", {
-      outlookAvailable: false,
-      gmailAvailable: gmailConnected,
-      provider: gmailConnected ? "gmail" : "outlook",
-      reason: reason ?? null,
-    });
-    updateExportDebug({
-      executionPath: "calendar",
-      outlookConnected: Boolean(outlookConnection?.connected),
-      outlookAvailable: false,
-      outlookUnavailableReason: outlookAvailability.reason ?? null,
-      gmail: getLastGmailAvailabilityDebugSnapshot(),
-      chosenProvider: gmailConnected ? "gmail" : "outlook",
-      fallbackTriggered: false,
-      fallbackReason: null,
-    });
-
     return {
       provider: gmailConnected ? ("gmail" as const) : ("outlook" as const),
       canExecute: gmailConnected,
@@ -2882,11 +2666,17 @@ export default function PlansPage() {
     const details = [result.title];
 
     setExecutionState("success");
-    setExecutionNotice({
-      tone: "success",
-      title: result.message,
-      details,
-    });
+    setExecutionNotices((current) => [
+      {
+        id: crypto.randomUUID(),
+        notice: {
+          tone: "success",
+          title: result.message,
+          details,
+        },
+      },
+      ...current,
+    ]);
   }
 
   function setExecutionNoticeForUnavailable(options: {
@@ -2895,12 +2685,18 @@ export default function PlansPage() {
     detail?: string;
   }) {
     setExecutionState("failure");
-    setExecutionNotice({
-      tone: "warning",
-      title: options.title,
-      message: options.reason,
-      details: options.detail ? [options.detail] : undefined,
-    });
+    setExecutionNotices((current) => [
+      {
+        id: crypto.randomUUID(),
+        notice: {
+          tone: "warning",
+          title: options.title,
+          message: options.reason,
+          details: options.detail ? [options.detail] : undefined,
+        },
+      },
+      ...current,
+    ]);
   }
 
   function setExecutionNoticeForExportSummary(options: {
@@ -2908,29 +2704,73 @@ export default function PlansPage() {
     graphResults: ProviderExecutionResult[];
     failedEmailItems: Plan["items"];
     failedCalendarItems: Plan["items"];
-    draftCount: number;
-    scheduledCount: number;
-    sentCount: number;
-    reminderCount: number;
-    meetingCount: number;
     gmailScheduledDraftCount: number;
   }) {
     const details: string[] = [];
+    const countResults = (filter: (result: ProviderExecutionResult) => boolean) =>
+      options.graphResults.filter(filter).length;
+    const draftCount = countResults((result) => result.kind === "email" && result.action === "draft_created");
+    const gmailDraftCount = countResults(
+      (result) =>
+        result.provider === "gmail" &&
+        result.kind === "email" &&
+        result.action === "draft_created"
+    );
+    const outlookDraftCount = draftCount - gmailDraftCount;
+    const gmailSentCount = countResults(
+      (result) => result.provider === "gmail" && result.kind === "email" && result.action === "email_sent"
+    );
+    const outlookSentCount = countResults(
+      (result) => result.provider === "outlook" && result.kind === "email" && result.action === "email_sent"
+    );
+    const gmailScheduledCount = countResults(
+      (result) => result.provider === "gmail" && result.kind === "email" && result.action === "email_scheduled"
+    );
+    const outlookScheduledCount = countResults(
+      (result) => result.provider === "outlook" && result.kind === "email" && result.action === "email_scheduled"
+    );
+    const gmailReminderCount = countResults(
+      (result) => result.provider === "gmail" && result.kind === "reminder" && result.action === "reminder_created"
+    );
+    const outlookReminderCount = countResults(
+      (result) => result.provider === "outlook" && result.kind === "reminder" && result.action === "reminder_created"
+    );
+    const gmailMeetingCount = countResults(
+      (result) => result.provider === "gmail" && result.kind === "meeting" && result.action === "meeting_created"
+    );
+    const outlookMeetingCount = countResults(
+      (result) => result.provider === "outlook" && result.kind === "meeting" && result.action === "meeting_created"
+    );
 
-    if (options.draftCount > 0) {
-      details.push(`${options.draftCount} email draft${options.draftCount === 1 ? "" : "s"} created`);
+    if (gmailDraftCount > 0) {
+      details.push(`${gmailDraftCount} Gmail email draft${gmailDraftCount === 1 ? "" : "s"} created`);
     }
-    if (options.scheduledCount > 0) {
-      details.push(`${options.scheduledCount} Outlook email${options.scheduledCount === 1 ? "" : "s"} scheduled`);
+    if (outlookDraftCount > 0) {
+      details.push(`${outlookDraftCount} Outlook email draft${outlookDraftCount === 1 ? "" : "s"} created`);
     }
-    if (options.sentCount > 0) {
-      details.push(`${options.sentCount} Outlook email${options.sentCount === 1 ? "" : "s"} sent`);
+    if (gmailScheduledCount > 0) {
+      details.push(`${gmailScheduledCount} Gmail email${gmailScheduledCount === 1 ? "" : "s"} scheduled`);
     }
-    if (options.reminderCount > 0) {
-      details.push(`${options.reminderCount} Outlook reminder${options.reminderCount === 1 ? "" : "s"} created`);
+    if (outlookScheduledCount > 0) {
+      details.push(`${outlookScheduledCount} Outlook email${outlookScheduledCount === 1 ? "" : "s"} scheduled`);
     }
-    if (options.meetingCount > 0) {
-      details.push(`${options.meetingCount} Outlook meeting${options.meetingCount === 1 ? "" : "s"} created`);
+    if (gmailSentCount > 0) {
+      details.push(`${gmailSentCount} Gmail email${gmailSentCount === 1 ? "" : "s"} sent`);
+    }
+    if (outlookSentCount > 0) {
+      details.push(`${outlookSentCount} Outlook email${outlookSentCount === 1 ? "" : "s"} sent`);
+    }
+    if (gmailReminderCount > 0) {
+      details.push(`${gmailReminderCount} Google reminder${gmailReminderCount === 1 ? "" : "s"} created`);
+    }
+    if (outlookReminderCount > 0) {
+      details.push(`${outlookReminderCount} Outlook reminder${outlookReminderCount === 1 ? "" : "s"} created`);
+    }
+    if (gmailMeetingCount > 0) {
+      details.push(`${gmailMeetingCount} Google meeting${gmailMeetingCount === 1 ? "" : "s"} created`);
+    }
+    if (outlookMeetingCount > 0) {
+      details.push(`${outlookMeetingCount} Outlook meeting${outlookMeetingCount === 1 ? "" : "s"} created`);
     }
     if (options.gmailScheduledDraftCount > 0) {
       details.push(
@@ -2963,16 +2803,22 @@ export default function PlansPage() {
     const hasGraphSuccesses = options.graphResults.length > 0;
 
     setExecutionState(hasFallbacks ? (hasGraphSuccesses ? "success" : "failure") : "success");
-    setExecutionNotice({
-      tone: !hasGraphSuccesses && hasFallbacks ? "warning" : hasFallbacks ? "mixed" : "success",
-      title: hasFallbacks
-        ? hasGraphSuccesses
-          ? "Some actions could not be completed"
-          : "Export could not be completed"
-        : "Export completed",
-      message: options.graphUnavailableReason,
-      details,
-    });
+    setExecutionNotices((current) => [
+      {
+        id: crypto.randomUUID(),
+        notice: {
+          tone: !hasGraphSuccesses && hasFallbacks ? "warning" : hasFallbacks ? "mixed" : "success",
+          title: hasFallbacks
+            ? hasGraphSuccesses
+              ? "Some actions could not be completed"
+              : "Export could not be completed"
+            : "Export completed",
+          message: options.graphUnavailableReason,
+          details,
+        },
+      },
+      ...current,
+    ]);
   }
 
   function setExecutionNoticePending(options: {
@@ -2980,13 +2826,44 @@ export default function PlansPage() {
     message: string;
     details?: string[];
   }) {
+    const noticeId = crypto.randomUUID();
     setExecutionState("pending");
-    setExecutionNotice({
-      tone: "pending",
-      title: options.title,
-      message: options.message,
-      details: options.details,
-    });
+    setExecutionNotices((current) => [
+      {
+        id: noticeId,
+        notice: {
+          tone: "pending",
+          title: options.title,
+          message: options.message,
+          details: options.details,
+        },
+      },
+      ...current,
+    ]);
+    return noticeId;
+  }
+
+  function dismissExecutionNotice(id: string) {
+    setExecutionNotices((current) => current.filter((entry) => entry.id !== id));
+  }
+
+  async function runQueuedExport(task: () => Promise<void>) {
+    const runTask = async () => {
+      activeExportCountRef.current += 1;
+      setExecutionState("pending");
+      try {
+        await task();
+      } finally {
+        activeExportCountRef.current = Math.max(0, activeExportCountRef.current - 1);
+        if (activeExportCountRef.current === 0) {
+          setExecutionState(null);
+        }
+      }
+    };
+
+    const nextTask = exportQueueRef.current.then(runTask, runTask);
+    exportQueueRef.current = nextTask.catch(() => undefined);
+    await nextTask;
   }
 
   async function executePreviewEmailViaProvider(item: Plan["items"][number], provider: "outlook" | "gmail") {
@@ -2995,19 +2872,6 @@ export default function PlansPage() {
     const title = fallbackSubject;
 
     if (provider === "gmail") {
-      console.info("[gmail] payload from plans", {
-        action: appSettings.emailHandlingMode,
-        subject: draft.subject,
-        bodyPreview: draft.body.slice(0, 120),
-        to: draft.to,
-        cc: draft.cc,
-        bcc: draft.bcc,
-      });
-      updateExportDebug({
-        gmailExecutionRan: true,
-        gmailExecutionThrew: false,
-        gmailExecutionError: null,
-      });
       try {
         if (appSettings.emailHandlingMode === "send") {
           const result = await sendGmailEmailFromEmailDraft({
@@ -3040,10 +2904,11 @@ export default function PlansPage() {
           webLink: result.webLink,
         } satisfies ProviderExecutionResult;
       } catch (error) {
-        updateExportDebug({
-          gmailExecutionRan: true,
-          gmailExecutionThrew: true,
-          gmailExecutionError: error instanceof Error ? error.message : String(error),
+        console.error("[plans] gmail email execution failed", {
+          itemId: item.id,
+          provider,
+          action: appSettings.emailHandlingMode,
+          error: error instanceof Error ? error.message : String(error),
         });
         throw error;
       }
@@ -3105,19 +2970,6 @@ export default function PlansPage() {
   async function executePreviewCalendarViaProvider(item: Plan["items"][number], provider: "outlook" | "gmail") {
     const timing = buildPreviewItemGraphTiming(item);
     const rowKind = classifyPlanRow(item);
-    console.info("[plans] executing calendar item", {
-      itemId: item.id,
-      provider,
-      rowKind,
-      title: item.customTitle ?? item.title,
-      startISO: timing.startISO,
-      endISO: timing.endISO,
-      isAllDay: timing.isAllDay,
-      attendees: item.meetingDraft?.attendees ?? [],
-      location: item.meetingDraft?.location ?? "",
-      addGoogleMeet: Boolean(item.meetingDraft?.addGoogleMeet),
-      teamsMeeting: Boolean(item.meetingDraft?.teamsMeeting),
-    });
     if (provider === "gmail") {
       const result = await createGoogleCalendarEvent({
         subject: item.customTitle ?? item.title,
@@ -3130,12 +2982,6 @@ export default function PlansPage() {
         attendees: item.meetingDraft?.attendees ?? [],
         teamsMeeting: item.meetingDraft?.teamsMeeting,
         addGoogleMeet: item.meetingDraft?.addGoogleMeet,
-      });
-      console.info("[plans] calendar execution result", {
-        itemId: item.id,
-        provider,
-        rowKind,
-        result,
       });
       return {
         provider: "gmail",
@@ -3160,12 +3006,6 @@ export default function PlansPage() {
       teamsMeeting: item.meetingDraft?.teamsMeeting,
       expectedEmail: appSettings.outlookAccountEmail,
     });
-    console.info("[plans] calendar execution result", {
-      itemId: item.id,
-      provider,
-      rowKind,
-      result,
-    });
     return {
       provider: "outlook",
       kind: rowKind === "meeting" ? "meeting" : "reminder",
@@ -3179,40 +3019,106 @@ export default function PlansPage() {
   }
 
   async function exportPreviewEmailItem(itemId: string) {
-    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
-    if (!item) return;
-    updateExportDebug({
-      rowType: "email",
-      executionPath: "email",
-    });
-    if (validateEmailRowsForExport([itemId], { usePopup: true })) return;
-    if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
-    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
-    if (!confirmExport()) return;
-    const executionGroupId = crypto.randomUUID();
-    setExecutionNoticePending({
-      title: "Starting email export",
-      message:
-        appSettings.emailHandlingMode === "send"
-          ? "Sending email..."
-          : "Creating email draft...",
-      details: [item.customTitle ?? item.title],
-    });
+    await runQueuedExport(async () => {
+      const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
+      if (!item) return;
+      if (validateEmailRowsForExport([itemId], { usePopup: true })) return;
+      if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+      if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
+      if (!confirmExport()) return;
+      const executionGroupId = crypto.randomUUID();
+      const pendingNoticeId = setExecutionNoticePending({
+        title: "Starting email export",
+        message:
+          appSettings.emailHandlingMode === "send"
+            ? "Sending email..."
+            : "Creating email draft...",
+        details: [item.customTitle ?? item.title],
+      });
 
-    const emailAvailability = await getEmailExecutionAvailability();
-    console.info("[plans] single email export decision", {
-      requestedEmailAction: appSettings.emailHandlingMode,
-      provider: emailAvailability.provider,
-      canExecute: emailAvailability.canExecute,
-      outlookAvailable: emailAvailability.outlookAvailable,
-      gmailAvailable: emailAvailability.gmailAvailable,
-      reason: emailAvailability.reason ?? null,
-      itemId,
+      const emailAvailability = await getEmailExecutionAvailability();
+      if (emailAvailability.canExecute) {
+        try {
+          const result = await executePreviewEmailViaProvider(item, emailAvailability.provider);
+          if (result.provider === "outlook") {
+            await recordExecutionHistory({
+              item,
+              status: "success",
+              path: "graph",
+              executionGroupId,
+              result,
+            });
+          }
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForResult(result);
+          return;
+        } catch (error) {
+          console.error("[plans] single email export unavailable", {
+            requestedEmailAction: appSettings.emailHandlingMode,
+            provider: emailAvailability.provider,
+            outlookAvailable: emailAvailability.outlookAvailable,
+            gmailAvailable: emailAvailability.gmailAvailable,
+            itemId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          const userFixableMessage = getUserFixableEmailExecutionMessage(error);
+          if (userFixableMessage) {
+            if (typeof window !== "undefined") {
+              window.alert(userFixableMessage);
+            }
+            return;
+          }
+          const reason = error instanceof Error ? error.message : "Email action failed.";
+          await recordExecutionHistory({
+            item,
+            status: "failed",
+            path: "graph",
+            executionGroupId,
+            reason,
+          });
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForUnavailable({
+            title: "Email action could not be completed",
+            reason,
+          });
+          return;
+        }
+      }
+
+      await recordExecutionHistory({
+        item,
+        status: "failed",
+        path: "graph",
+        executionGroupId,
+        reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
+      });
+      dismissExecutionNotice(pendingNoticeId);
+      setExecutionNoticeForUnavailable({
+        title: "Email action is not available",
+        reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
+      });
     });
-    if (emailAvailability.canExecute) {
-      try {
-        const result = await executePreviewEmailViaProvider(item, emailAvailability.provider);
-        if (result.provider === "outlook") {
+  }
+
+  async function exportPreviewMeetingItem(itemId: string) {
+    await runQueuedExport(async () => {
+      const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
+      if (!item) return;
+      if (validateMeetingRowsForExport([itemId], { usePopup: true })) return;
+      if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+      if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
+      if (!confirmExport()) return;
+      const executionGroupId = crypto.randomUUID();
+      const pendingNoticeId = setExecutionNoticePending({
+        title: "Starting calendar export",
+        message: "Creating calendar event...",
+        details: [item.customTitle ?? item.title],
+      });
+
+      const calendarAvailability = await getCalendarExecutionAvailability();
+      if (calendarAvailability.canExecute) {
+        try {
+          const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
           await recordExecutionHistory({
             item,
             status: "success",
@@ -3220,132 +3126,39 @@ export default function PlansPage() {
             executionGroupId,
             result,
           });
-        }
-        setExecutionNoticeForResult(result);
-        return;
-      } catch (error) {
-        console.error("[plans] single email export unavailable", {
-          requestedEmailAction: appSettings.emailHandlingMode,
-          provider: emailAvailability.provider,
-          outlookAvailable: emailAvailability.outlookAvailable,
-          gmailAvailable: emailAvailability.gmailAvailable,
-          itemId,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-        updateExportDebug({
-          fallbackTriggered: true,
-          fallbackReason: error instanceof Error ? error.message : String(error),
-        });
-        const userFixableMessage = getUserFixableEmailExecutionMessage(error);
-        if (userFixableMessage) {
-          if (typeof window !== "undefined") {
-            window.alert(userFixableMessage);
-          }
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForResult(result);
+          return;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
+          await recordExecutionHistory({
+            item,
+            status: "failed",
+            path: "graph",
+            executionGroupId,
+            reason,
+          });
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForUnavailable({
+            title: "Meeting action could not be completed",
+            reason,
+          });
           return;
         }
-        const reason = error instanceof Error ? error.message : "Email action failed.";
-        await recordExecutionHistory({
-          item,
-          status: "failed",
-          path: "graph",
-          executionGroupId,
-          reason,
-        });
-        setExecutionNoticeForUnavailable({
-          title: "Email action could not be completed",
-          reason,
-        });
-        return;
       }
-    }
 
-    console.info("[plans] single email export unavailable", {
-      requestedEmailAction: appSettings.emailHandlingMode,
-      provider: emailAvailability.provider,
-      outlookAvailable: emailAvailability.outlookAvailable,
-      gmailAvailable: emailAvailability.gmailAvailable,
-      itemId,
-      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
-    });
-    updateExportDebug({
-      fallbackTriggered: true,
-      fallbackReason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
-    });
-    await recordExecutionHistory({
-      item,
-      status: "failed",
-      path: "graph",
-      executionGroupId,
-      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
-    });
-    setExecutionNoticeForUnavailable({
-      title: "Email action is not available",
-      reason: emailAvailability.reason ?? "Connect Outlook or Gmail to continue.",
-    });
-  }
-
-  async function exportPreviewMeetingItem(itemId: string) {
-    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
-    if (!item) return;
-    updateExportDebug({
-      rowType: "meeting",
-      executionPath: "calendar",
-      requestedEmailAction: null,
-      gmailExecutionRan: false,
-      gmailExecutionThrew: false,
-      gmailExecutionError: null,
-    });
-    if (validateMeetingRowsForExport([itemId], { usePopup: true })) return;
-    if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
-    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
-    if (!confirmExport()) return;
-    const executionGroupId = crypto.randomUUID();
-    setExecutionNoticePending({
-      title: "Starting calendar export",
-      message: "Creating calendar event...",
-      details: [item.customTitle ?? item.title],
-    });
-
-    const calendarAvailability = await getCalendarExecutionAvailability();
-    if (calendarAvailability.canExecute) {
-      try {
-        const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
-        await recordExecutionHistory({
-          item,
-          status: "success",
-          path: "graph",
-          executionGroupId,
-          result,
-        });
-        setExecutionNoticeForResult(result);
-        return;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
-        await recordExecutionHistory({
-          item,
-          status: "failed",
-          path: "graph",
-          executionGroupId,
-          reason,
-        });
-        setExecutionNoticeForUnavailable({
-          title: "Meeting action could not be completed",
-          reason,
-        });
-        return;
-      }
-    }
-
-    await recordExecutionHistory({
-      item,
-      status: "failed",
-      path: "graph",
-      executionGroupId,
-      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
-    });
-    setExecutionNoticeForUnavailable({
-      title: "Meeting action is not available",
-      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      await recordExecutionHistory({
+        item,
+        status: "failed",
+        path: "graph",
+        executionGroupId,
+        reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      });
+      dismissExecutionNotice(pendingNoticeId);
+      setExecutionNoticeForUnavailable({
+        title: "Meeting action is not available",
+        reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      });
     });
   }
 
@@ -4338,66 +4151,63 @@ export default function PlansPage() {
   }
 
   async function exportPreviewReminderItem(itemId: string) {
-    const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
-    if (!item) return;
-    updateExportDebug({
-      rowType: "reminder",
-      executionPath: "calendar",
-      requestedEmailAction: null,
-      gmailExecutionRan: false,
-      gmailExecutionThrew: false,
-      gmailExecutionError: null,
-    });
-    if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
-    if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
-    if (!confirmExport()) return;
-    const executionGroupId = crypto.randomUUID();
-    setExecutionNoticePending({
-      title: "Starting calendar export",
-      message: "Creating calendar event...",
-      details: [item.customTitle ?? item.title],
-    });
+    await runQueuedExport(async () => {
+      const item = getLatestPreviewPlan().items.find((entry) => entry.id === itemId);
+      if (!item) return;
+      if (warnIfMissingReminderTimes({ usePopup: true, itemIds: [itemId] })) return;
+      if (warnIfPastScheduledItems({ usePopup: true, itemIds: [itemId] })) return;
+      if (!confirmExport()) return;
+      const executionGroupId = crypto.randomUUID();
+      const pendingNoticeId = setExecutionNoticePending({
+        title: "Starting calendar export",
+        message: "Creating calendar event...",
+        details: [item.customTitle ?? item.title],
+      });
 
-    const calendarAvailability = await getCalendarExecutionAvailability();
-    if (calendarAvailability.canExecute) {
-      try {
-        const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
-        await recordExecutionHistory({
-          item,
-          status: "success",
-          path: "graph",
-          executionGroupId,
-          result,
-        });
-        setExecutionNoticeForResult(result);
-        return;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
-        await recordExecutionHistory({
-          item,
-          status: "failed",
-          path: "graph",
-          executionGroupId,
-          reason,
-        });
-        setExecutionNoticeForUnavailable({
-          title: "Reminder action could not be completed",
-          reason,
-        });
-        return;
+      const calendarAvailability = await getCalendarExecutionAvailability();
+      if (calendarAvailability.canExecute) {
+        try {
+          const result = await executePreviewCalendarViaProvider(item, calendarAvailability.provider);
+          await recordExecutionHistory({
+            item,
+            status: "success",
+            path: "graph",
+            executionGroupId,
+            result,
+          });
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForResult(result);
+          return;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "Outlook calendar event creation failed.";
+          await recordExecutionHistory({
+            item,
+            status: "failed",
+            path: "graph",
+            executionGroupId,
+            reason,
+          });
+          dismissExecutionNotice(pendingNoticeId);
+          setExecutionNoticeForUnavailable({
+            title: "Reminder action could not be completed",
+            reason,
+          });
+          return;
+        }
       }
-    }
 
-    await recordExecutionHistory({
-      item,
-      status: "failed",
-      path: "graph",
-      executionGroupId,
-      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
-    });
-    setExecutionNoticeForUnavailable({
-      title: "Reminder action is not available",
-      reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      await recordExecutionHistory({
+        item,
+        status: "failed",
+        path: "graph",
+        executionGroupId,
+        reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      });
+      dismissExecutionNotice(pendingNoticeId);
+      setExecutionNoticeForUnavailable({
+        title: "Reminder action is not available",
+        reason: calendarAvailability.reason ?? "Connect Outlook to continue.",
+      });
     });
   }
 
@@ -4408,7 +4218,7 @@ export default function PlansPage() {
 
     const latestPreviewPlan = getLatestPreviewPlan();
     const { emailItems, calendarItems } = partitionPlanItemsByKind(latestPreviewPlan.items);
-    setExecutionNoticePending({
+    const pendingNoticeId = setExecutionNoticePending({
       title: "Starting export",
       message:
         emailItems.length > 0 && calendarItems.length === 0
@@ -4443,59 +4253,15 @@ export default function PlansPage() {
           outlookAvailable: false,
           gmailAvailable: false,
         };
-    if (emailItems.length > 0) {
-      console.info("[plans] bulk email export decision", {
-        requestedEmailAction: appSettings.emailHandlingMode,
-        provider: emailAvailability.provider,
-        canExecute: emailAvailability.canExecute,
-        outlookAvailable: emailAvailability.outlookAvailable,
-        gmailAvailable: emailAvailability.gmailAvailable,
-        reason: emailAvailability.reason ?? null,
-        emailItemCount: emailItems.length,
-      });
-    }
-    if (calendarItems.length > 0) {
-      console.info("[plans] bulk calendar export decision", {
-        provider: calendarAvailability.provider,
-        canExecute: calendarAvailability.canExecute,
-        outlookAvailable: calendarAvailability.outlookAvailable,
-        gmailAvailable: calendarAvailability.gmailAvailable,
-        reason: calendarAvailability.reason ?? null,
-        calendarItemCount: calendarItems.length,
-      });
-    }
-    updateExportDebug({
-      rowType:
-        emailItems.length > 0 && calendarItems.length > 0
-          ? "mixed"
-          : emailItems.length > 0
-            ? "email"
-            : latestPreviewPlan.items.some((item) => classifyPlanRow(item) === "meeting")
-              ? latestPreviewPlan.items.some((item) => classifyPlanRow(item) === "reminder")
-                ? "calendar_mixed"
-                : "meeting"
-              : "reminder",
-      executionPath:
-        emailItems.length > 0 && calendarItems.length === 0
-          ? "email"
-          : calendarItems.length > 0 && emailItems.length === 0
-            ? "calendar"
-            : null,
-    });
-    let draftCount = 0;
-    let scheduledCount = 0;
-    let sentCount = 0;
-    let reminderCount = 0;
-    let meetingCount = 0;
     let gmailScheduledDraftCount = 0;
     const executableItems = latestPreviewPlan.items.filter((item) => {
       const rowKind = classifyPlanRow(item);
       return rowKind === "email" ? emailAvailability.canExecute : calendarAvailability.canExecute;
     });
 
-    const executionResults = await Promise.allSettled(
-      executableItems.map(async (item) => {
-        const rowKind = classifyPlanRow(item);
+    for (const item of executableItems) {
+      const rowKind = classifyPlanRow(item);
+      try {
         const result =
           rowKind === "email"
             ? await executePreviewEmailViaProvider(item, emailAvailability.provider)
@@ -4511,61 +4277,33 @@ export default function PlansPage() {
           });
         }
 
-        return { item, rowKind, result };
-      })
-    );
-
-    for (const settledResult of executionResults) {
-      if (settledResult.status === "fulfilled") {
-        const { rowKind, result } = settledResult.value;
         graphResults.push(result);
-        if (rowKind === "email") {
-          if (result.action === "email_sent") {
-            sentCount += 1;
-          } else if (result.action === "email_scheduled") {
-            scheduledCount += 1;
-          } else {
-            draftCount += 1;
-            if (appSettings.emailHandlingMode === "schedule" && result.provider === "gmail") {
-              gmailScheduledDraftCount += 1;
-            }
-          }
-        } else if (rowKind === "meeting") {
-          meetingCount += 1;
-        } else {
-          reminderCount += 1;
+        if (rowKind === "email" && result.action === "draft_created" && appSettings.emailHandlingMode === "schedule" && result.provider === "gmail") {
+          gmailScheduledDraftCount += 1;
         }
-        continue;
-      }
-
-      const failedItem = executableItems[executionResults.indexOf(settledResult)];
-      const rowKind = classifyPlanRow(failedItem);
-      const error = settledResult.reason;
-      if (rowKind === "email") {
-        console.error("[plans] bulk email export unavailable", {
-          requestedEmailAction: appSettings.emailHandlingMode,
-          provider: emailAvailability.provider,
-          outlookAvailable: emailAvailability.outlookAvailable,
-          gmailAvailable: emailAvailability.gmailAvailable,
-          itemId: failedItem.id,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-        updateExportDebug({
-          fallbackTriggered: true,
-          fallbackReason: error instanceof Error ? error.message : String(error),
-        });
-        failedEmailItems.push(failedItem);
-      } else {
-        const failureReason = error instanceof Error ? error.message : String(error);
-        console.error("[plans] bulk calendar export unavailable", {
-          provider: calendarAvailability.provider,
-          outlookAvailable: calendarAvailability.outlookAvailable,
-          gmailAvailable: calendarAvailability.gmailAvailable,
-          itemId: failedItem.id,
-          reason: failureReason,
-        });
-        failedCalendarItems.push(failedItem);
-        failedCalendarReasons.set(failedItem.id, failureReason);
+      } catch (error) {
+        if (rowKind === "email") {
+          console.error("[plans] bulk email export unavailable", {
+            requestedEmailAction: appSettings.emailHandlingMode,
+            provider: emailAvailability.provider,
+            outlookAvailable: emailAvailability.outlookAvailable,
+            gmailAvailable: emailAvailability.gmailAvailable,
+            itemId: item.id,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          failedEmailItems.push(item);
+        } else {
+          const failureReason = error instanceof Error ? error.message : String(error);
+          console.error("[plans] bulk calendar export unavailable", {
+            provider: calendarAvailability.provider,
+            outlookAvailable: calendarAvailability.outlookAvailable,
+            gmailAvailable: calendarAvailability.gmailAvailable,
+            itemId: item.id,
+            reason: failureReason,
+          });
+          failedCalendarItems.push(item);
+          failedCalendarReasons.set(item.id, failureReason);
+        }
       }
     }
 
@@ -4577,22 +4315,6 @@ export default function PlansPage() {
     }
 
     for (const item of failedEmailItems) {
-      console.info("[plans] bulk email export unavailable", {
-        requestedEmailAction: appSettings.emailHandlingMode,
-        provider: emailAvailability.provider,
-        outlookAvailable: emailAvailability.outlookAvailable,
-        gmailAvailable: emailAvailability.gmailAvailable,
-        itemId: item.id,
-        reason: emailAvailability.canExecute
-          ? `${emailAvailability.provider === "gmail" ? "Gmail" : "Outlook"} email action could not be completed.`
-          : emailAvailability.reason ?? null,
-      });
-      updateExportDebug({
-        fallbackTriggered: true,
-        fallbackReason: emailAvailability.canExecute
-          ? `${emailAvailability.provider === "gmail" ? "Gmail" : "Outlook"} email action could not be completed.`
-          : emailAvailability.reason ?? null,
-      });
       await recordExecutionHistory({
         item,
         status: "failed",
@@ -4621,16 +4343,12 @@ export default function PlansPage() {
       }
     }
 
+    dismissExecutionNotice(pendingNoticeId);
     setExecutionNoticeForExportSummary({
       graphUnavailableReason: calendarAvailability.canExecute ? undefined : calendarAvailability.reason,
       graphResults,
       failedEmailItems,
       failedCalendarItems,
-      draftCount,
-      scheduledCount,
-      sentCount,
-      reminderCount,
-      meetingCount,
       gmailScheduledDraftCount,
     });
   }
@@ -4799,6 +4517,33 @@ export default function PlansPage() {
         : "No connected email account";
   const accountButtonLabel =
     accountConnectionStatus === "connected" ? "Manage in Settings" : "Reconnect in Settings";
+
+  useEffect(() => {
+    setRows((currentRows) => {
+      let changed = false;
+      const nextRows = currentRows.map((row) => {
+        const normalizedMeetingDraft = normalizeMeetingDraft(row.meetingDraft);
+        if (!normalizedMeetingDraft) return row;
+
+        const nextLocation = getMeetingLocationValue(normalizedMeetingDraft, activeAccountProvider);
+        if ((normalizedMeetingDraft.location ?? "") === nextLocation) return row;
+
+        changed = true;
+        return {
+          ...row,
+          meetingDraft: {
+            ...normalizedMeetingDraft,
+            location: nextLocation,
+          },
+        };
+      });
+
+      if (!changed) return currentRows;
+      rowsRef.current = nextRows;
+      return nextRows;
+    });
+  }, [activeAccountProvider]);
+
   const aiSessionSourceDetails = getAiSessionSourceDetails(aiSessionSource);
   const aiDraftIdentityDetails = getAiDraftIdentityDetails(aiSessionSource);
   const latestAssistantMessage = [...aiChatMessages].reverse().find((message) => message.role === "assistant") ?? null;
@@ -4893,10 +4638,11 @@ export default function PlansPage() {
         </div>
       </section>
 
-      {executionNotice && !isBuilderPreviewOpen ? (
+      {executionNotices.length > 0 && !isBuilderPreviewOpen ? (
         <div className="space-y-3">
-          <OutlookExecutionNoticeCard notice={executionNotice} onDismiss={() => setExecutionNotice(null)} />
-          {showExportDebugPanel ? <ExportDebugCard debug={exportDebug} /> : null}
+          {executionNotices.map((entry) => (
+            <OutlookExecutionNoticeCard key={entry.id} notice={entry.notice} onDismiss={() => dismissExecutionNotice(entry.id)} />
+          ))}
         </div>
       ) : null}
 
@@ -5540,6 +5286,7 @@ export default function PlansPage() {
                                       type="button"
                                       onClick={() => {
                                         setOpenMeetingEditorRowId(row.id);
+                                        setOpenBodyEditorRowId(row.id);
                                         setOpenMenuRowId(null);
                                       }}
                                       className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
@@ -5549,61 +5296,18 @@ export default function PlansPage() {
                                     <div className="my-1 border-t-2 border-double border-gray-200" />
                                   </>
                                 ) : null}
-                                {row.rowType !== "email" && !normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting && (row.body ?? "").trim() ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenBodyEditorRowId((prev) => (prev === row.id ? null : row.id));
-                                        setOpenMenuRowId(null);
-                                      }}
-                                      className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
-                                    >
-                                      Edit Body
-                                    </button>
-                                    <div className="my-1 border-t-2 border-double border-gray-200" />
-                                  </>
-                                ) : null}
-                                {row.rowType !== "email" && !normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting && !(row.body ?? "").trim() ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenBodyEditorRowId((prev) => (prev === row.id ? null : row.id));
-                                        setOpenMenuRowId(null);
-                                      }}
-                                      className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
-                                    >
-                                      Edit Body
-                                    </button>
-                                    <div className="my-1 border-t-2 border-double border-gray-200" />
-                                  </>
-                                ) : null}
-                                {row.rowType === "calendar_event" ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setOpenMeetingEditorRowId(row.id);
-                                        setOpenMenuRowId(null);
-                                      }}
-                                      className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
-                                    >
-                                      Edit Duration
-                                    </button>
-                                  </>
-                                ) : null}
                                 {row.rowType !== "email" && row.rowType !== "calendar_event" ? (
                                   <>
                                     <button
                                       type="button"
                                       onClick={() => {
                                         setOpenDurationEditorRowId(row.id);
+                                        setOpenBodyEditorRowId(row.id);
                                         setOpenMenuRowId(null);
                                       }}
                                       className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
                                     >
-                                      Edit Duration
+                                      Edit Reminder
                                     </button>
                                   </>
                                 ) : null}
@@ -5843,6 +5547,37 @@ export default function PlansPage() {
                           </div>
                         ) : null}
 
+                        {openBodyEditorRowId === row.id ? (
+                          <div className="rounded-xl border bg-gray-50 p-4">
+                            {normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting ? (
+                              <div className="space-y-3">
+                                <label className="block text-sm font-medium text-gray-700">Teams Meeting Details</label>
+                                <div className="rounded-lg border bg-white px-3 py-3 text-sm text-gray-500">
+                                  Teams join info will appear here after the Outlook event is created.
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <label className="mb-2 block text-sm font-medium text-gray-700">Body</label>
+                                <textarea
+                                  className="min-h-32 w-full rounded-lg border px-3 py-2 text-sm"
+                                  value={row.body ?? ""}
+                                  onChange={(e) => updateRow(row.id, (current) => ({ ...current, body: e.target.value }))}
+                                />
+                              </>
+                            )}
+                            <div className="mt-4 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => setOpenBodyEditorRowId(null)}
+                                className="rounded-lg border px-3 py-2 text-sm hover:bg-white"
+                              >
+                                Done
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
                         {openDurationEditorRowId === row.id && row.rowType !== "email" && row.rowType !== "calendar_event" ? (
                           <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                             {(() => {
@@ -5864,7 +5599,7 @@ export default function PlansPage() {
                                   <div>
                                     <label className="mb-1 block text-sm font-medium text-gray-700">Duration</label>
                                     <select
-                                      className="w-full rounded-lg border bg-white px-3 py-2"
+                                      className="w-full max-w-[220px] rounded-lg border bg-white px-3 py-2 text-sm"
                                       value={normalizedDuration?.useCustomEnd ? "custom" : String(normalizedDuration?.durationMinutes ?? 30)}
                                       onChange={(e) =>
                                         e.target.value === "custom"
@@ -6007,11 +5742,7 @@ export default function PlansPage() {
                                   const isGoogleProviderActive = activeAccountProvider === "gmail";
                                   const isProviderManagedMeeting =
                                     normalizedMeetingDraft?.teamsMeeting || (isGoogleProviderActive && normalizedMeetingDraft?.addGoogleMeet);
-                                  const locationValue = normalizedMeetingDraft?.teamsMeeting
-                                    ? TEAMS_MEETING_LOCATION
-                                    : isGoogleProviderActive && normalizedMeetingDraft?.addGoogleMeet
-                                      ? GOOGLE_MEET_LOCATION
-                                      : normalizedMeetingDraft?.location ?? "";
+                                  const locationValue = getMeetingLocationValue(normalizedMeetingDraft, activeAccountProvider);
                                   return (
                                 <input
                                   className={`w-full rounded-lg border px-3 py-2 ${isProviderManagedMeeting ? "bg-gray-100 text-gray-600" : "bg-white"}`}
@@ -6033,7 +5764,7 @@ export default function PlansPage() {
                                   {meetingErrors?.duration ? <span className="ml-1 text-red-500">*</span> : null}
                                 </label>
                                 <select
-                                  className={`w-full rounded-lg border bg-white px-3 py-2 ${
+                                  className={`w-full max-w-[220px] rounded-lg border bg-white px-3 py-2 text-sm ${
                                     meetingErrors?.duration ? "border-red-400 ring-1 ring-red-100" : ""
                                   }`}
                                   value={
@@ -6088,17 +5819,20 @@ export default function PlansPage() {
                                     type="checkbox"
                                     checked={Boolean(normalizeMeetingDraft(row.meetingDraft)?.addGoogleMeet)}
                                     onChange={(e) =>
-                                      updateRow(row.id, (current) => ({
-                                        ...current,
-                                        meetingDraft: {
-                                          ...normalizeMeetingDraft(current.meetingDraft),
-                                          addGoogleMeet: e.target.checked,
-                                          teamsMeeting: false,
-                                          location: e.target.checked
-                                            ? GOOGLE_MEET_LOCATION
-                                            : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
-                                        },
-                                      }))
+                                          updateRow(row.id, (current) => ({
+                                            ...current,
+                                            meetingDraft: {
+                                              ...normalizeMeetingDraft(current.meetingDraft),
+                                              addGoogleMeet: e.target.checked,
+                                              teamsMeeting: false,
+                                              location: getNextMeetingLocationOnToggle({
+                                                currentLocation: normalizeMeetingDraft(current.meetingDraft)?.location,
+                                                checked: e.target.checked,
+                                                enabledLocation: GOOGLE_MEET_LOCATION,
+                                                disabledLocation: "",
+                                              }),
+                                            },
+                                          }))
                                     }
                                   />
                                   <span>Add Google Meet link</span>
@@ -6115,9 +5849,12 @@ export default function PlansPage() {
                                           ...normalizeMeetingDraft(current.meetingDraft),
                                           teamsMeeting: e.target.checked,
                                           addGoogleMeet: false,
-                                          location: e.target.checked
-                                            ? TEAMS_MEETING_LOCATION
-                                            : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                          location: getNextMeetingLocationOnToggle({
+                                            currentLocation: normalizeMeetingDraft(current.meetingDraft)?.location,
+                                            checked: e.target.checked,
+                                            enabledLocation: TEAMS_MEETING_LOCATION,
+                                            disabledLocation: "",
+                                          }),
                                         },
                                       }))
                                     }
@@ -6235,36 +5972,6 @@ export default function PlansPage() {
                           </div>
                         ) : null}
 
-                        {openBodyEditorRowId === row.id ? (
-                          <div className="rounded-xl border bg-gray-50 p-4">
-                            {normalizeMeetingDraft(row.meetingDraft)?.teamsMeeting ? (
-                              <div className="space-y-3">
-                                <label className="block text-sm font-medium text-gray-700">Teams Meeting Details</label>
-                                <div className="rounded-lg border bg-white px-3 py-3 text-sm text-gray-500">
-                                  Teams join info will appear here after the Outlook event is created.
-                                </div>
-                              </div>
-                            ) : (
-                              <>
-                                <label className="mb-2 block text-sm font-medium text-gray-700">Body</label>
-                                <textarea
-                                  className="min-h-32 w-full rounded-lg border px-3 py-2 text-sm"
-                                  value={row.body ?? ""}
-                                  onChange={(e) => updateRow(row.id, (current) => ({ ...current, body: e.target.value }))}
-                                />
-                              </>
-                            )}
-                            <div className="mt-4 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => setOpenBodyEditorRowId(null)}
-                                className="rounded-lg border px-3 py-2 text-sm hover:bg-white"
-                              >
-                                Done
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
                       </div>
                     );
                   })}
@@ -6438,7 +6145,7 @@ export default function PlansPage() {
                         >
                           Export
                         </button>
-                        {executionNotice?.tone === "success" ? (
+                        {executionNotices.some((entry) => entry.notice.tone === "success") ? (
                           <div className="flex justify-end">
                             <ExportDoneBadge />
                           </div>
@@ -6476,16 +6183,15 @@ export default function PlansPage() {
             </div>
 
             <div className="space-y-6 p-6">
-              {executionNotice ? (
+              {executionNotices.length > 0 ? (
                 <div className="space-y-3">
-                  <OutlookExecutionNoticeCard
-                    notice={executionNotice}
-                    onDismiss={() => {
-                      setExecutionNotice(null);
-                      setExecutionState(null);
-                    }}
-                  />
-                  {showExportDebugPanel ? <ExportDebugCard debug={exportDebug} /> : null}
+                  {executionNotices.map((entry) => (
+                    <OutlookExecutionNoticeCard
+                      key={entry.id}
+                      notice={entry.notice}
+                      onDismiss={() => dismissExecutionNotice(entry.id)}
+                    />
+                  ))}
                 </div>
               ) : null}
               {previewPlanForRender ? (
@@ -6711,11 +6417,7 @@ export default function PlansPage() {
                                   const isGoogleProviderActive = activeAccountProvider === "gmail";
                                   const isProviderManagedMeeting =
                                     isPreviewTeamsMeetingEnabled || (isGoogleProviderActive && isPreviewGoogleMeetEnabled);
-                                  const locationValue = isPreviewTeamsMeetingEnabled
-                                    ? TEAMS_MEETING_LOCATION
-                                    : isGoogleProviderActive && isPreviewGoogleMeetEnabled
-                                      ? GOOGLE_MEET_LOCATION
-                                      : previewMeetingDraft?.location ?? "";
+                                  const locationValue = getMeetingLocationValue(previewMeetingDraft, activeAccountProvider);
                                   return (
                                 <input
                                   className={`w-full rounded-lg border border-violet-200 px-3 py-2 text-sm ${
@@ -6738,7 +6440,7 @@ export default function PlansPage() {
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-violet-950">Meeting Duration</label>
                                 <select
-                                  className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
+                                  className="w-full max-w-[220px] rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-gray-900"
                                   value={String(previewMeetingDraft?.durationMinutes ?? 30)}
                                   onChange={(e) =>
                                     builderItem
@@ -6824,9 +6526,12 @@ export default function PlansPage() {
                                               ...normalizeMeetingDraft(current.meetingDraft),
                                               addGoogleMeet: e.target.checked,
                                               teamsMeeting: false,
-                                              location: e.target.checked
-                                                ? GOOGLE_MEET_LOCATION
-                                                : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                              location: getNextMeetingLocationOnToggle({
+                                                currentLocation: normalizeMeetingDraft(current.meetingDraft)?.location,
+                                                checked: e.target.checked,
+                                                enabledLocation: GOOGLE_MEET_LOCATION,
+                                                disabledLocation: "",
+                                              }),
                                             },
                                           }))
                                         : undefined
@@ -6847,9 +6552,12 @@ export default function PlansPage() {
                                               ...normalizeMeetingDraft(current.meetingDraft),
                                               teamsMeeting: e.target.checked,
                                               addGoogleMeet: false,
-                                              location: e.target.checked
-                                                ? TEAMS_MEETING_LOCATION
-                                                : normalizeMeetingDraft(current.meetingDraft)?.location ?? "",
+                                              location: getNextMeetingLocationOnToggle({
+                                                currentLocation: normalizeMeetingDraft(current.meetingDraft)?.location,
+                                                checked: e.target.checked,
+                                                enabledLocation: TEAMS_MEETING_LOCATION,
+                                                disabledLocation: "",
+                                              }),
                                             },
                                           }))
                                         : undefined
