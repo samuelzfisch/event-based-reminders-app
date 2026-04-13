@@ -120,15 +120,15 @@ export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
     return <LoadingScreen label="Loading workspace…" />;
   }
 
-  if (!authBypassEnabled && authEnabled && loading && !currentUser && !hasCachedWorkspaceContext) {
+  if (!authBypassEnabled && authEnabled && loading) {
     return <LoadingScreen label="Loading workspace…" />;
   }
 
-  if (!authBypassEnabled && authEnabled && !currentUser && !isLoginRoute) {
+  if (!authBypassEnabled && authEnabled && !loading && !currentUser && !isLoginRoute) {
     return <LoadingScreen label="Redirecting to login…" />;
   }
 
-  if (!authBypassEnabled && authEnabled && currentUser && isLoginRoute) {
+  if (!authBypassEnabled && authEnabled && !loading && currentUser && isLoginRoute) {
     return <LoadingScreen label="Redirecting to your workspace…" />;
   }
 
