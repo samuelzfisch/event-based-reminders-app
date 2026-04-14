@@ -39,6 +39,22 @@ function getCookieValue(request: Request, name: string) {
   return "";
 }
 
+function serializeError(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      stack: error.stack ?? null,
+      name: error.name,
+    };
+  }
+
+  return {
+    message: String(error),
+    stack: null,
+    name: null,
+  };
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
@@ -57,6 +73,20 @@ export async function GET(request: Request) {
   let scope: string | null = null;
   let resolvedError = error;
   let resolvedErrorDescription = errorDescription;
+  let tokenExchangeDebug:
+    | {
+        status: number;
+        ok: boolean;
+        payload: unknown;
+      }
+    | null = null;
+  let caughtErrorDebug:
+    | {
+        message: string;
+        stack: string | null;
+        name: string | null;
+      }
+    | null = null;
 
   console.info("[google-oauth] callback hit", {
     hasGoogleClientId: Boolean(clientId),
@@ -115,6 +145,12 @@ export async function GET(request: Request) {
             }
           | null;
 
+        tokenExchangeDebug = {
+          status: tokenResponse.status,
+          ok: tokenResponse.ok,
+          payload: tokenPayload,
+        };
+
         if (!tokenResponse.ok || !tokenPayload?.access_token) {
           resolvedError = tokenPayload?.error || "token_exchange_failed";
           resolvedErrorDescription = tokenPayload?.error_description || "Failed to connect Gmail.";
@@ -139,6 +175,7 @@ export async function GET(request: Request) {
         resolvedError = "token_exchange_failed";
         resolvedErrorDescription =
           tokenExchangeError instanceof Error ? tokenExchangeError.message : "Failed to connect Gmail.";
+        caughtErrorDebug = serializeError(tokenExchangeError);
         console.error("[google-oauth] token exchange threw", {
           error: tokenExchangeError instanceof Error ? tokenExchangeError.message : String(tokenExchangeError),
         });
@@ -150,6 +187,33 @@ export async function GET(request: Request) {
     console.error("[google-oauth] callback resolving with error", {
       error: resolvedError,
       errorDescription: resolvedErrorDescription ?? null,
+    });
+
+    const debugPayload = JSON.stringify({
+      error: {
+        code: resolvedError,
+        message: resolvedErrorDescription ?? resolvedError,
+      },
+      stack: caughtErrorDebug?.stack ?? null,
+      caughtError: caughtErrorDebug,
+      tokenExchangeResponse: tokenExchangeDebug,
+      env: {
+        GOOGLE_CLIENT_ID: clientId ? "present" : "missing",
+        GOOGLE_CLIENT_SECRET: clientSecret ? "present" : "missing",
+      },
+      redirect_uri: redirectUri,
+      requestUrlParams: Object.fromEntries(url.searchParams.entries()),
+      requestUrl: request.url,
+    });
+
+    const redirectUrl = new URL("/settings", origin);
+    redirectUrl.searchParams.set("google_error", debugPayload);
+
+    return NextResponse.redirect(redirectUrl, {
+      headers: {
+        "Cache-Control": "no-store",
+        "Set-Cookie": `${GMAIL_OAUTH_VERIFIER_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; Secure`,
+      },
     });
   }
 

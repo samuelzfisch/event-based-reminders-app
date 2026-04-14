@@ -47,6 +47,27 @@ type GmailConnectDebugState = {
   frontendErrorMessage: string;
 };
 
+type GoogleOAuthPageDebugPayload = {
+  error?: {
+    code?: string | null;
+    message?: string | null;
+  } | null;
+  stack?: string | null;
+  caughtError?: {
+    message?: string | null;
+    stack?: string | null;
+    name?: string | null;
+  } | null;
+  tokenExchangeResponse?: unknown;
+  env?: {
+    GOOGLE_CLIENT_ID?: string | null;
+    GOOGLE_CLIENT_SECRET?: string | null;
+  } | null;
+  redirect_uri?: string | null;
+  requestUrlParams?: Record<string, string>;
+  requestUrl?: string | null;
+};
+
 function normalizeConnectionEmail(value: string) {
   return value.trim().replace(/^mailto:/i, "").trim().toLowerCase();
 }
@@ -73,6 +94,7 @@ export default function SettingsPage() {
   const [gmailConnection, setGmailConnection] = useState<GmailConnectionState | null>(null);
   const [gmailError, setGmailError] = useState<string | null>(null);
   const [gmailConnectDebug, setGmailConnectDebug] = useState<GmailConnectDebugState | null>(null);
+  const [googleOAuthPageDebug, setGoogleOAuthPageDebug] = useState<GoogleOAuthPageDebugPayload | null>(null);
   const [connectingGmail, setConnectingGmail] = useState(false);
   const [providerLoading, setProviderLoading] = useState({ outlook: true, gmail: true });
   const [connectionEmailInput, setConnectionEmailInput] = useState<string>(() => loadAppSettings().outlookAccountEmail);
@@ -94,6 +116,36 @@ export default function SettingsPage() {
   useEffect(() => {
     savedSettingsRef.current = savedSettings;
   }, [savedSettings]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const encodedDebugPayload = new URLSearchParams(window.location.search).get("google_error");
+    if (!encodedDebugPayload) {
+      setGoogleOAuthPageDebug(null);
+      return;
+    }
+
+    try {
+      setGoogleOAuthPageDebug(JSON.parse(encodedDebugPayload) as GoogleOAuthPageDebugPayload);
+    } catch (error) {
+      setGoogleOAuthPageDebug({
+        error: {
+          code: "google_error_parse_failed",
+          message: error instanceof Error ? error.message : "Failed to parse Google OAuth debug payload.",
+        },
+        env: {
+          GOOGLE_CLIENT_ID: "unknown",
+          GOOGLE_CLIENT_SECRET: "unknown",
+        },
+        redirect_uri: null,
+        requestUrlParams: {},
+        requestUrl: typeof window === "undefined" ? null : window.location.href,
+        tokenExchangeResponse: null,
+        stack: error instanceof Error ? error.stack ?? null : null,
+      });
+    }
+  }, []);
 
   function persistSettings(nextSettings: AppSettings) {
     saveAppSettings(nextSettings);
@@ -377,6 +429,7 @@ export default function SettingsPage() {
     primaryConnectedProvider === "outlook" ? "Outlook" : primaryConnectedProvider === "gmail" ? "Google" : "No provider connected";
   const showProviderRefreshingStatus =
     (providerLoading.outlook || providerLoading.gmail) && (!outlookConnection || !gmailConnection);
+  const googleOAuthDebugRawJson = googleOAuthPageDebug ? JSON.stringify(googleOAuthPageDebug, null, 2) : "";
 
   function clearConnectionFeedback() {
     setConnectionMessage(null);
@@ -595,6 +648,22 @@ export default function SettingsPage() {
                     <div className="mt-1">Frontend message: {gmailConnectDebug.frontendErrorMessage}</div>
                   </div>
                 ) : null}
+              </div>
+            ) : null}
+            {googleOAuthPageDebug ? (
+              <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+                <div className="font-semibold">Google OAuth Debug</div>
+                <div className="mt-2">Error: {googleOAuthPageDebug.error?.message || "Unknown error"}</div>
+                <div className="mt-1">
+                  GOOGLE_CLIENT_ID: {googleOAuthPageDebug.env?.GOOGLE_CLIENT_ID || "missing"}
+                </div>
+                <div className="mt-1">
+                  GOOGLE_CLIENT_SECRET: {googleOAuthPageDebug.env?.GOOGLE_CLIENT_SECRET || "missing"}
+                </div>
+                <div className="mt-1">Redirect URI: {googleOAuthPageDebug.redirect_uri || "Not available"}</div>
+                <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-md border border-red-200 bg-white/70 p-3 text-[11px] text-red-950">
+                  {googleOAuthDebugRawJson}
+                </pre>
               </div>
             ) : null}
           </div>
