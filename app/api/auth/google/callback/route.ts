@@ -39,22 +39,6 @@ function getCookieValue(request: Request, name: string) {
   return "";
 }
 
-function serializeError(error: unknown) {
-  if (error instanceof Error) {
-    return {
-      message: error.message,
-      stack: error.stack ?? null,
-      name: error.name,
-    };
-  }
-
-  return {
-    message: String(error),
-    stack: null,
-    name: null,
-  };
-}
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
@@ -73,49 +57,14 @@ export async function GET(request: Request) {
   let scope: string | null = null;
   let resolvedError = error;
   let resolvedErrorDescription = errorDescription;
-  let tokenExchangeDebug:
-    | {
-        status: number;
-        ok: boolean;
-        payload: unknown;
-      }
-    | null = null;
-  let caughtErrorDebug:
-    | {
-        message: string;
-        stack: string | null;
-        name: string | null;
-      }
-    | null = null;
-
-  console.info("[google-oauth] callback hit", {
-    hasGoogleClientId: Boolean(clientId),
-    hasGoogleClientSecret: Boolean(clientSecret),
-    query: {
-      host: url.host,
-      pathname: url.pathname,
-      hasCode: Boolean(code),
-      hasState: Boolean(state),
-      error: error ?? null,
-      errorDescription: errorDescription ?? null,
-    },
-  });
 
   if (!resolvedError && code) {
     if (!clientId || !clientSecret) {
       resolvedError = "server_misconfigured";
       resolvedErrorDescription = "Gmail OAuth is missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET on the server.";
-      console.error("[google-oauth] token exchange blocked by config", {
-        hasGoogleClientId: Boolean(clientId),
-        hasGoogleClientSecret: Boolean(clientSecret),
-      });
     } else if (!codeVerifier) {
       resolvedError = "missing_code_verifier";
       resolvedErrorDescription = "Gmail sign-in could not be verified. Please try again.";
-      console.error("[google-oauth] missing code verifier", {
-        hasCode: Boolean(code),
-        hasState: Boolean(state),
-      });
     } else {
       const body = new URLSearchParams({
         client_id: clientId,
@@ -145,76 +94,21 @@ export async function GET(request: Request) {
             }
           | null;
 
-        tokenExchangeDebug = {
-          status: tokenResponse.status,
-          ok: tokenResponse.ok,
-          payload: tokenPayload,
-        };
-
         if (!tokenResponse.ok || !tokenPayload?.access_token) {
           resolvedError = tokenPayload?.error || "token_exchange_failed";
           resolvedErrorDescription = tokenPayload?.error_description || "Failed to connect Gmail.";
-          console.error("[google-oauth] token exchange failed", {
-            status: tokenResponse.status,
-            ok: tokenResponse.ok,
-            error: tokenPayload?.error ?? null,
-            errorDescription: tokenPayload?.error_description ?? null,
-          });
         } else {
           accessToken = tokenPayload.access_token;
           refreshToken = tokenPayload.refresh_token ?? null;
           expiresIn = tokenPayload.expires_in ?? null;
           scope = tokenPayload.scope ?? GMAIL_SCOPES.join(" ");
-          console.info("[google-oauth] token exchange succeeded", {
-            hasRefreshToken: Boolean(refreshToken),
-            expiresIn,
-            scope,
-          });
         }
       } catch (tokenExchangeError) {
         resolvedError = "token_exchange_failed";
         resolvedErrorDescription =
           tokenExchangeError instanceof Error ? tokenExchangeError.message : "Failed to connect Gmail.";
-        caughtErrorDebug = serializeError(tokenExchangeError);
-        console.error("[google-oauth] token exchange threw", {
-          error: tokenExchangeError instanceof Error ? tokenExchangeError.message : String(tokenExchangeError),
-        });
       }
     }
-  }
-
-  if (resolvedError) {
-    console.error("[google-oauth] callback resolving with error", {
-      error: resolvedError,
-      errorDescription: resolvedErrorDescription ?? null,
-    });
-
-    const debugPayload = JSON.stringify({
-      error: {
-        code: resolvedError,
-        message: resolvedErrorDescription ?? resolvedError,
-      },
-      stack: caughtErrorDebug?.stack ?? null,
-      caughtError: caughtErrorDebug,
-      tokenExchangeResponse: tokenExchangeDebug,
-      env: {
-        GOOGLE_CLIENT_ID: clientId ? "present" : "missing",
-        GOOGLE_CLIENT_SECRET: clientSecret ? "present" : "missing",
-      },
-      redirect_uri: redirectUri,
-      requestUrlParams: Object.fromEntries(url.searchParams.entries()),
-      requestUrl: request.url,
-    });
-
-    const redirectUrl = new URL("/settings", origin);
-    redirectUrl.searchParams.set("google_error", debugPayload);
-
-    return NextResponse.redirect(redirectUrl, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Set-Cookie": `${GMAIL_OAUTH_VERIFIER_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; Secure`,
-      },
-    });
   }
 
   const html = `<!doctype html>
