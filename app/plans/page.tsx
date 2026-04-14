@@ -648,10 +648,6 @@ function getSeedTemplateName(type: PlanType) {
   return type.charAt(0).toUpperCase() + type.slice(1);
 }
 
-function hasMeaningfulBody(body?: string | null) {
-  return Boolean(body?.trim());
-}
-
 function isProtectedTemplate(template: SavedPlanTemplate) {
   return (
     template.id === "seed:press_release" ||
@@ -1302,13 +1298,13 @@ function formatOffsetLabel(offsetDays: number | null | undefined, options?: { re
   const dayLabel = absoluteDays === 1 ? "day" : "days";
   const relativeToToday = options?.dateBasis === "today" || options?.relativeToToday;
   if (relativeToToday) {
-    if (offsetDays < 0) return absoluteDays === 1 ? "1 day ago" : `${absoluteDays} days ago`;
-    if (offsetDays > 0) return `${absoluteDays} ${dayLabel} from today`;
-    return "Today";
+    if (offsetDays < 0) return `-${absoluteDays} ${dayLabel} from today`;
+    if (offsetDays > 0) return `+${absoluteDays} ${dayLabel} from today`;
+    return "today";
   }
-  if (offsetDays < 0) return `${absoluteDays} ${dayLabel} before event`;
-  if (offsetDays > 0) return `${absoluteDays} ${dayLabel} after event`;
-  return "Day of event";
+  if (offsetDays < 0) return `-${absoluteDays} ${dayLabel} before event`;
+  if (offsetDays > 0) return `+${absoluteDays} ${dayLabel} after event`;
+  return "day of event";
 }
 
 function formatPreviewTime(time: string) {
@@ -1365,15 +1361,43 @@ function getEffectivePreviewItemDate(item: Plan["items"][number]) {
 function getBuilderRowTypeMeta(row: BuilderRow) {
   const rowKind = classifyPlanRow(row);
   if (rowKind === "email") {
-    return { label: "Email", className: "text-green-500" };
+    return {
+      label: "Email",
+      className: "text-green-600",
+      badgeClass: "border-green-200 bg-green-50 text-green-700",
+      borderClass: "border-l-green-400",
+      timingPanelClass: "border-green-100 bg-green-50/60",
+      timelineDotClass: "bg-green-500",
+    };
   }
   if (rowKind === "meeting") {
-    return { label: "Meeting", className: "text-violet-500" };
+    return {
+      label: "Meeting",
+      className: "text-violet-600",
+      badgeClass: "border-violet-200 bg-violet-50 text-violet-700",
+      borderClass: "border-l-violet-400",
+      timingPanelClass: "border-violet-100 bg-violet-50/60",
+      timelineDotClass: "bg-violet-500",
+    };
   }
   if (row.rowType === "calendar_event") {
-    return { label: "Calendar Event", className: "text-violet-500" };
+    return {
+      label: "Calendar Event",
+      className: "text-violet-600",
+      badgeClass: "border-violet-200 bg-violet-50 text-violet-700",
+      borderClass: "border-l-violet-400",
+      timingPanelClass: "border-violet-100 bg-violet-50/60",
+      timelineDotClass: "bg-violet-500",
+    };
   }
-  return { label: "Reminder", className: "text-blue-500" };
+  return {
+    label: "Reminder",
+    className: "text-blue-600",
+    badgeClass: "border-blue-200 bg-blue-50 text-blue-700",
+    borderClass: "border-l-blue-400",
+    timingPanelClass: "border-blue-100 bg-blue-50/60",
+    timelineDotClass: "bg-blue-500",
+  };
 }
 
 function EmailTokensInput({
@@ -1493,12 +1517,10 @@ export default function PlansPage() {
   const [guidedForm, setGuidedForm] = useState<GuidedFormState>(() => createEmptyGuidedForm());
   const [isTemplateManageMode, setIsTemplateManageMode] = useState(false);
   const [isTemplateCopyMode, setIsTemplateCopyMode] = useState(false);
-  const [areAnchorsHidden, setAreAnchorsHidden] = useState(false);
+  const [areAnchorsHidden, setAreAnchorsHidden] = useState(true);
   const [templateActionMessage, setTemplateActionMessage] = useState("");
   const [openMenuRowId, setOpenMenuRowId] = useState<string | null>(null);
   const [openEmailDraftRowId, setOpenEmailDraftRowId] = useState<string | null>(null);
-  const [openDetailIndicatorId, setOpenDetailIndicatorId] = useState<string | null>(null);
-  const [pinnedDetailIndicatorId, setPinnedDetailIndicatorId] = useState<string | null>(null);
   const [openMeetingEditorRowId, setOpenMeetingEditorRowId] = useState<string | null>(null);
   const [openDurationEditorRowId, setOpenDurationEditorRowId] = useState<string | null>(null);
   const [forcedOpenMeetingEditorRowIds, setForcedOpenMeetingEditorRowIds] = useState<string[]>([]);
@@ -1819,6 +1841,10 @@ export default function PlansPage() {
   );
   const selectedEditableTemplate =
     currentSelectedTemplate && !isProtectedTemplate(currentSelectedTemplate) ? currentSelectedTemplate : null;
+  const shouldRenderSimpleEventHeaderFields = !(
+    effectiveTemplateMode === "template" &&
+    (planType === "press_release" || planType === "earnings" || planType === "conference")
+  );
 
   function persistTemplateStateImmediately(nextTemplates: SavedPlanTemplate[], nextSelectedTemplateId: string | null) {
     const nextState = buildPersistedTemplateState(nextTemplates, nextSelectedTemplateId);
@@ -3166,8 +3192,6 @@ export default function PlansPage() {
     setTemplateActionMessage("");
     setOpenMenuRowId(null);
     setOpenEmailDraftRowId(null);
-    setOpenDetailIndicatorId(null);
-    setPinnedDetailIndicatorId(null);
     setOpenMeetingEditorRowId(null);
     setOpenDurationEditorRowId(null);
     setForcedOpenMeetingEditorRowIds([]);
@@ -3273,7 +3297,7 @@ export default function PlansPage() {
     setWeekendRule(snapshot.weekendRule);
     setRows(cloneTemplateRows(snapshot.rows));
     setAnchors(cloneAnchors(snapshot.anchors));
-    setAreAnchorsHidden(false);
+    setAreAnchorsHidden(true);
     setGuidedForm({ ...snapshot.guidedForm });
     clearTransientEditingState();
   }
@@ -4132,7 +4156,7 @@ export default function PlansPage() {
     setWeekendRule("prior_business_day");
     setRows([createEmptyBuilderRow(normalizedDefaultReminderTime)]);
     setAnchors(createGenericPresetAnchors());
-    setAreAnchorsHidden(false);
+    setAreAnchorsHidden(true);
     setGuidedForm(createEmptyGuidedForm());
     clearTransientEditingState();
   }
@@ -4433,6 +4457,35 @@ export default function PlansPage() {
     }
   }
 
+  function renameSavedTemplate(templateId: string) {
+    const template = savedTemplates.find((entry) => entry.id === templateId);
+    if (!template || isProtectedTemplate(template) || typeof window === "undefined") return;
+
+    const nextName = window.prompt("Rename template", template.name);
+    if (!nextName) return;
+
+    const trimmedName = nextName.trim();
+    if (!trimmedName) {
+      setTemplateActionMessage("Template name is required.");
+      return;
+    }
+
+    if (hasDuplicateTemplateName(trimmedName, { excludeTemplateId: template.id })) {
+      setTemplateActionMessage("That name is already taken. Please choose another name.");
+      return;
+    }
+
+    const nextTemplates = savedTemplates.map((entry) => (entry.id === template.id ? { ...entry, name: trimmedName } : entry));
+    hasLocalTemplateMutationRef.current = true;
+    setTemplateActionMessage(`Renamed "${template.name}" to "${trimmedName}".`);
+    setSavedTemplates(nextTemplates);
+    persistTemplateStateImmediately(nextTemplates, selectedTemplateId);
+
+    if (selectedTemplateId === template.id) {
+      setTemplateName(trimmedName);
+    }
+  }
+
   function addReminderRow() {
     setRows((current) => [...current, createEmptyBuilderRow(normalizedDefaultReminderTime)]);
   }
@@ -4647,10 +4700,20 @@ export default function PlansPage() {
       ) : null}
 
       <section className="rounded-2xl border bg-white shadow-sm">
-        <div className="space-y-5 p-6">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-gray-900">Templates</h2>
+        <div className="space-y-6 p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Templates</h2>
+              <p className="mt-1 text-sm text-gray-600">Choose a saved template or start a fresh plan.</p>
+            </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={startNewPlan}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:-translate-y-0.5 hover:border-slate-400 hover:bg-slate-50 hover:shadow-md"
+              >
+                + New Plan
+              </button>
               {isTemplateManageMode ? (
                 <button
                   type="button"
@@ -4661,8 +4724,8 @@ export default function PlansPage() {
                     setTemplateActionMessage("");
                     setIsTemplateCopyMode((prev) => !prev);
                   }}
-                  className={`rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 ${
-                    isTemplateCopyMode ? "border-blue-300 bg-blue-50 text-blue-700" : ""
+                  className={`rounded-xl border px-3 py-2 text-sm shadow-sm hover:-translate-y-0.5 hover:bg-gray-50 hover:shadow-md ${
+                    isTemplateCopyMode ? "border-blue-300 bg-blue-50 text-blue-700" : "border-slate-300 bg-white text-slate-700"
                   }`}
                 >
                   Copy
@@ -4675,7 +4738,7 @@ export default function PlansPage() {
                     setIsTemplateCopyMode(false);
                     setTemplateActionMessage("");
                   }}
-                  className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm hover:-translate-y-0.5 hover:bg-gray-50 hover:shadow-md"
                 >
                   {isTemplateManageMode ? "Done" : "Edit"}
                 </button>
@@ -4683,43 +4746,62 @@ export default function PlansPage() {
           </div>
           {templateActionMessage ? <p className="text-xs text-gray-500">{templateActionMessage}</p> : null}
 
-          <div className="grid justify-center gap-x-3 gap-y-5 md:grid-cols-[repeat(3,260px)]">
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
             {savedTemplates.map((template) => (
-              <div key={template.id} className="relative w-full max-w-[260px]">
+              <div key={template.id} className="relative min-w-0">
                 {isTemplateManageMode && !isProtectedTemplate(template) ? (
-                  <button
-                    type="button"
-                    onClick={() => deleteSavedTemplate(template.id)}
-                    className="absolute right-2 top-2 z-10 rounded-md border bg-white px-2 py-1 text-xs text-red-700 hover:bg-red-50"
-                  >
-                    Delete
-                  </button>
+                  <div className="absolute right-3 top-3 z-10 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => renameSavedTemplate(template.id)}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteSavedTemplate(template.id)}
+                      className="rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 shadow-sm hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 ) : null}
                 <button
                   type="button"
                   onClick={() => onSelectSavedTemplate(template.id)}
-                  className={`flex min-h-[72px] w-full items-center justify-center rounded-xl border px-4 py-4 text-center hover:bg-gray-50 ${
+                  className={`group flex min-h-[120px] w-full flex-col items-start justify-between rounded-[24px] border bg-white px-5 py-5 text-left shadow-sm transition duration-150 hover:-translate-y-1 hover:shadow-lg ${
                     selectedTemplateId === template.id
-                      ? "border-blue-300 bg-blue-50"
+                      ? "border-blue-300 bg-blue-50/80 shadow-[0_18px_38px_-24px_rgba(59,130,246,0.65)]"
                       : highlightedTemplateId === template.id
-                        ? "border-green-300 bg-green-50"
-                        : ""
+                        ? "border-green-300 bg-green-50/80 shadow-[0_18px_38px_-24px_rgba(34,197,94,0.55)]"
+                        : "border-slate-200 hover:border-slate-300"
                   }`}
                 >
-                  <div className="font-semibold text-gray-900">{template.name}</div>
+                  <div className="flex w-full items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="max-w-full break-words text-lg font-semibold leading-6 text-gray-900">{template.name}</div>
+                    </div>
+                    {selectedTemplateId === template.id ? (
+                      <span className="inline-flex h-7 w-7 flex-none items-center justify-center rounded-full bg-blue-600 text-sm font-semibold text-white">
+                        ✓
+                      </span>
+                    ) : highlightedTemplateId === template.id ? (
+                      <span className="inline-flex h-7 w-7 flex-none items-center justify-center rounded-full bg-green-600 text-sm font-semibold text-white">
+                        +
+                      </span>
+                    ) : (
+                      <span className="inline-flex h-7 w-7 flex-none items-center justify-center rounded-full border border-slate-200 text-xs font-semibold text-slate-400 transition group-hover:border-slate-300 group-hover:text-slate-500">
+                        →
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">
+                    {selectedTemplateId === template.id ? "Selected Template" : isTemplateManageMode ? "Manage Template" : "Open Template"}
+                  </div>
                 </button>
               </div>
             ))}
-          </div>
-
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={startNewPlan}
-              className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
-            >
-              New Plan
-            </button>
           </div>
         </div>
       </section>
@@ -4732,37 +4814,102 @@ export default function PlansPage() {
 
       <section ref={builderSectionRef} className="rounded-2xl border bg-white shadow-sm">
         <div className="space-y-5 p-6">
-              {shouldRenderBuilderSourceBanner ? (
-                <div className="flex flex-wrap justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={openBuilderTemplateSaveDialog}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Save current plan as template
-                  </button>
-                </div>
-              ) : null}
-              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div>
-                  <div className="text-sm font-semibold uppercase tracking-wide text-gray-500">Plan Builder</div>
-                  <h2 className="text-2xl font-semibold text-gray-900">{eventName || templateName || getSeedTemplateName(planType)}</h2>
-                </div>
-                <div className="w-full md:max-w-sm">
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Template Name</label>
-                  <input
-                    className="w-full rounded-lg border px-3 py-2"
-                    value={templateName}
-                    onChange={(e) => setTemplateName(e.target.value)}
-                    readOnly={Boolean(currentSelectedTemplate && isProtectedTemplate(currentSelectedTemplate))}
-                  />
-                  {currentSelectedTemplate && isProtectedTemplate(currentSelectedTemplate) ? (
-                    <p className="mt-1 text-xs text-gray-500">Protected templates keep their original template name.</p>
-                  ) : null}
-                </div>
+              <div>
+                <div className="text-sm font-semibold uppercase tracking-wide text-gray-500">Plan Builder</div>
+                <h2 className="text-2xl font-semibold text-gray-900">{eventName || "Untitled Plan"}</h2>
               </div>
 
-              <div className="space-y-4 border-b pb-6">
+              <div className="space-y-4 rounded-[28px] border border-slate-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-5 shadow-[0_18px_45px_-35px_rgba(15,23,42,0.65)]">
+                <div className="rounded-[24px] border border-slate-200 bg-[radial-gradient(circle_at_top_left,_rgba(191,219,254,0.45),_transparent_38%),linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-5 shadow-sm">
+                  <div>
+                    {shouldRenderSimpleEventHeaderFields ? (
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        <div className="md:col-span-2">
+                          <input
+                            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 shadow-sm"
+                            placeholder="Event Name"
+                            value={eventName}
+                            onChange={(e) => setEventName(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-sm font-medium text-gray-700">Event Date</label>
+                          {noEventDate ? (
+                            <>
+                              <input
+                                type="text"
+                                className="w-full rounded-2xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500 shadow-sm"
+                                value="Today"
+                                readOnly
+                              />
+                              <div className="mt-4">
+                                <label className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
+                                  <span>Weekend Handling</span>
+                                  <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+                                    i
+                                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+                                      If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
+                                    </span>
+                                  </span>
+                                </label>
+                                <select
+                                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm"
+                                  value={weekendRule}
+                                  onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+                                >
+                                  <option value="prior_business_day">Adjust to prior business day (Fri)</option>
+                                  <option value="none">Allow weekends (no adjustment)</option>
+                                </select>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <input
+                                type="date"
+                                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 shadow-sm"
+                                value={anchorDate}
+                                onChange={(e) => setAnchorDate(e.target.value)}
+                              />
+                              <div className="mt-4">
+                                <label className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
+                                  <span>Weekend Handling</span>
+                                  <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+                                    i
+                                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+                                      If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
+                                    </span>
+                                  </span>
+                                </label>
+                                <select
+                                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm"
+                                  value={weekendRule}
+                                  onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+                                >
+                                  <option value="prior_business_day">Adjust to prior business day (Fri)</option>
+                                  <option value="none">Allow weekends (no adjustment)</option>
+                                </select>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        <div>
+                          <div className="mb-1 block text-sm font-medium text-transparent select-none" aria-hidden="true">
+                            Event Date
+                          </div>
+                          <label className="inline-flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm">
+                            <input
+                              type="checkbox"
+                              checked={noEventDate}
+                              onChange={(e) => setNoEventDate(e.target.checked)}
+                            />
+                            No Event Date
+                          </label>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="space-y-4 border-b border-slate-200 pb-6">
                 {effectiveTemplateMode === "template" && planType === "press_release" ? (
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
                     <div className="md:col-span-2">
@@ -4947,60 +5094,17 @@ export default function PlansPage() {
                       </div>
                     </div>
                   </div>
-                ) : (
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-                    <div className="md:col-span-2">
-                      <label className="mb-1 block text-sm font-medium text-gray-700">Event Name</label>
-                      <input
-                        className="w-full rounded-lg border px-3 py-2"
-                        value={eventName}
-                        onChange={(e) => setEventName(e.target.value)}
-                      />
-                    </div>
-                    <div className="md:col-span-2">
-                      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                        <div className="w-full md:max-w-xs">
-                          {noEventDate ? (
-                            <div className="invisible" aria-hidden="true">
-                              <label className="mb-1 block text-sm font-medium text-gray-700">Event Date</label>
-                              <input
-                                type="date"
-                                className="w-full rounded-lg border px-3 py-2"
-                                value=""
-                                readOnly
-                              />
-                            </div>
-                          ) : (
-                            <>
-                              <label className="mb-1 block text-sm font-medium text-gray-700">Event Date</label>
-                              <input
-                                type="date"
-                                className="w-full rounded-lg border px-3 py-2"
-                                value={anchorDate}
-                                onChange={(e) => setAnchorDate(e.target.value)}
-                              />
-                            </>
-                          )}
-                        </div>
-                        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-                          <input
-                            type="checkbox"
-                            checked={noEventDate}
-                            onChange={(e) => setNoEventDate(e.target.checked)}
-                          />
-                          No Event Date
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                ) : null}
+                </div>
               </div>
 
-              <div className="space-y-2 border-b pb-6" ref={kebabMenuRef}>
-                <div className="space-y-2">
-                  <div className="grid grid-cols-1 gap-3 pr-2 text-[10px] font-semibold uppercase tracking-wide text-gray-600 md:grid-cols-[minmax(0,1.8fr)_120px_140px_88px]">
-                    <div className="flex min-h-[24px] items-center justify-center text-center" />
-                    <div className="flex min-h-[24px] items-center justify-center text-center">Days from event/today</div>
+              <div className="space-y-3 border-b border-slate-200 pb-8" ref={kebabMenuRef}>
+                <div className="space-y-3">
+                  <div className="hidden grid-cols-1 gap-3 px-6 text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500 md:grid md:grid-cols-[minmax(0,1.8fr)_120px_140px_88px]">
+                    <div className="flex min-h-[24px] items-center text-left">Item</div>
+                    <div className="flex min-h-[24px] items-center justify-center text-center">
+                      {noEventDate ? "Days from today" : "Days from event"}
+                    </div>
                     <div className="flex min-h-[24px] items-center justify-center text-center">Time</div>
                     <div className="flex min-h-[24px] items-center justify-center text-center">Actions</div>
                   </div>
@@ -5008,72 +5112,23 @@ export default function PlansPage() {
                   {rows.map((row, index) => {
                     const rowMeta = getBuilderRowTypeMeta(row);
                     const emailUsesTimingFields = row.rowType === "email" && appSettings.emailHandlingMode === "schedule";
-                    const hasAdditionalDetails = hasMeaningfulBody(row.body);
-                    const additionalDetailsText = hasAdditionalDetails
-                      ? row.rowType === "calendar_event"
-                        ? "This meeting includes a body"
-                        : row.rowType === "email"
-                          ? "This email includes a body"
-                          : "This reminder includes a body"
-                      : "";
-                    const isDetailIndicatorOpen = openDetailIndicatorId === row.id;
-                    const isDetailIndicatorPinned = pinnedDetailIndicatorId === row.id;
                     const meetingErrors = meetingValidationErrors[row.id];
                     return (
-                      <div key={row.id} className="space-y-3 py-2 pr-2">
+                      <div
+                        key={row.id}
+                        className={`cursor-pointer space-y-3 rounded-[24px] border border-slate-200 border-l-4 ${rowMeta.borderClass} bg-white p-4 shadow-[0_16px_35px_-30px_rgba(15,23,42,0.55)] transition duration-150 hover:-translate-y-0.5 hover:shadow-[0_22px_45px_-28px_rgba(15,23,42,0.62)] md:p-5`}
+                      >
                         <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1.8fr)_120px_140px_88px] md:items-start">
-                          <div className="relative flex min-h-[72px] items-center" data-detail-indicator-root="true">
-                            {hasAdditionalDetails ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="absolute -left-5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-full border border-gray-400 bg-white text-[10px] font-semibold text-gray-700 hover:border-gray-500 hover:text-gray-800"
-                                  aria-label={additionalDetailsText}
-                                  onMouseEnter={() => setOpenDetailIndicatorId(row.id)}
-                                  onMouseLeave={() => {
-                                    if (!isDetailIndicatorPinned) {
-                                      setOpenDetailIndicatorId((current) => (current === row.id ? null : current));
-                                    }
-                                  }}
-                                  onFocus={() => setOpenDetailIndicatorId(row.id)}
-                                  onBlur={() => {
-                                    if (!isDetailIndicatorPinned) {
-                                      setOpenDetailIndicatorId((current) => (current === row.id ? null : current));
-                                    }
-                                  }}
-                                  onClick={() => {
-                                    if (isDetailIndicatorPinned) {
-                                      setPinnedDetailIndicatorId(null);
-                                      setOpenDetailIndicatorId(null);
-                                    } else {
-                                      setPinnedDetailIndicatorId(row.id);
-                                      setOpenDetailIndicatorId(row.id);
-                                    }
-                                  }}
-                                >
-                                  i
-                                </button>
-                                {isDetailIndicatorOpen ? (
-                                  <div
-                                    className="absolute left-0 top-1/2 z-20 -translate-x-[calc(100%+0.5rem)] -translate-y-1/2 whitespace-nowrap rounded-lg border bg-white px-2 py-1 text-[11px] text-gray-700 shadow-sm"
-                                    onMouseEnter={() => setOpenDetailIndicatorId(row.id)}
-                                    onMouseLeave={() => {
-                                      if (!isDetailIndicatorPinned) {
-                                        setOpenDetailIndicatorId((current) => (current === row.id ? null : current));
-                                      }
-                                    }}
-                                  >
-                                    {additionalDetailsText}
-                                  </div>
-                                ) : null}
-                              </>
-                            ) : null}
-                            <div className={`pointer-events-none absolute -top-4 left-1/2 -translate-x-1/2 text-xs font-medium ${rowMeta.className}`}>
-                              {rowMeta.label}
+                          <div className="relative flex min-h-[72px] items-center">
+                            <div className="absolute left-4 top-3 flex items-center gap-2">
+                              <span className={`h-2.5 w-2.5 rounded-full ${rowMeta.timelineDotClass}`} />
+                              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${rowMeta.badgeClass}`}>
+                                {rowMeta.label}
+                              </span>
                             </div>
                             <textarea
                               rows={2}
-                              className="min-h-[72px] w-full rounded-lg border px-3 pb-3 pt-6 text-[13px] leading-5 [overflow-wrap:anywhere]"
+                              className="min-h-[88px] w-full rounded-[20px] border border-slate-200 bg-white px-4 pb-4 pt-11 text-[13px] leading-5 text-slate-900 shadow-sm [overflow-wrap:anywhere]"
                               style={{ fieldSizing: "content" }}
                               value={row.title}
                               placeholder={
@@ -5091,19 +5146,19 @@ export default function PlansPage() {
 
                           {!emailUsesTimingFields && row.rowType === "email" ? (
                             <div className="md:col-span-2">
-                              <div className="flex min-h-[72px] w-full items-center justify-center rounded-lg border bg-gray-50 px-4 py-3 text-center text-[13px] font-medium text-gray-600">
+                              <div className={`flex min-h-[88px] w-full items-center justify-center rounded-[20px] border px-4 py-3 text-center text-[13px] font-medium text-slate-600 ${rowMeta.timingPanelClass}`}>
                                 {getBuilderEmailModeMessage(appSettings.emailHandlingMode)}
                               </div>
                             </div>
                           ) : (
                             <>
                               <div className="flex flex-col items-center">
-                                <div className="flex min-h-[72px] w-full items-center rounded-lg border px-3 py-2">
+                                <div className={`flex min-h-[88px] w-full items-center rounded-[20px] border px-3 py-2 shadow-sm ${rowMeta.timingPanelClass}`}>
                                   {editingOffsetRowId === row.id ? (
                                     <input
                                       type="text"
                                       inputMode="numeric"
-                                      className="w-full border-0 bg-transparent p-0 text-center text-[13px] leading-5 focus:outline-none focus:ring-0"
+                                      className="w-full border-0 bg-transparent p-0 text-center text-[13px] leading-5 text-slate-900 focus:outline-none focus:ring-0"
                                       value={offsetDrafts[row.id] ?? (row.offsetDays == null ? "" : String(row.offsetDays))}
                                       onChange={(e) =>
                                         setOffsetDrafts((current) => ({
@@ -5123,7 +5178,7 @@ export default function PlansPage() {
                                   ) : (
                                     <button
                                       type="button"
-                                      className="flex min-h-[56px] w-full items-center justify-center bg-transparent p-0 text-center text-[13px] leading-5 text-gray-900"
+                                      className="flex min-h-[64px] w-full items-center justify-center bg-transparent p-0 text-center text-[13px] leading-5 text-slate-900"
                                       onClick={() => {
                                         setEditingOffsetRowId(row.id);
                                         setOffsetDrafts((current) => ({
@@ -5156,7 +5211,7 @@ export default function PlansPage() {
 
                               if (row.meetingDraft?.isAllDay || row.durationDraft?.isAllDay) {
                                 return (
-                                  <div className="flex min-h-[72px] w-full items-center justify-center rounded-lg border bg-gray-50 px-3 py-3 text-center text-[13px] font-medium text-gray-600">
+                                  <div className={`flex min-h-[88px] w-full items-center justify-center rounded-[20px] border px-3 py-3 text-center text-[13px] font-medium text-slate-600 ${rowMeta.timingPanelClass}`}>
                                     All day
                                   </div>
                                 );
@@ -5170,7 +5225,7 @@ export default function PlansPage() {
                                     }}
                                     type="text"
                                     inputMode="text"
-                                    className="h-[72px] w-full rounded-lg border px-3 text-center text-[13px] leading-5"
+                                    className={`h-[88px] w-full rounded-[20px] border px-4 text-center text-[13px] leading-5 text-slate-900 shadow-sm ${rowMeta.timingPanelClass}`}
                                     value={literalTimeEditorValue}
                                     placeholder={REMINDER_TIME_INPUT_MASK}
                                     onFocus={(e) => {
@@ -5229,8 +5284,8 @@ export default function PlansPage() {
                                     builderTimeInputRefs.current[row.id] = node;
                                   }}
                                   rows={shouldWrapTimeField ? 2 : 1}
-                                  className={`h-[72px] w-full resize-none rounded-lg border px-3 text-center text-[13px] leading-5 [overflow-wrap:anywhere] ${
-                                    shouldWrapTimeField ? "py-[14px]" : "py-[24px]"
+                                  className={`h-[88px] w-full resize-none rounded-[20px] border px-4 text-center text-[13px] leading-5 text-slate-900 shadow-sm [overflow-wrap:anywhere] ${rowMeta.timingPanelClass} ${
+                                    shouldWrapTimeField ? "py-[18px]" : "py-[32px]"
                                   }`}
                                   value={row.reminderTime ?? ""}
                                   placeholder={REMINDER_TIME_INPUT_MASK}
@@ -5253,13 +5308,13 @@ export default function PlansPage() {
                             </>
                           )}
 
-                          <div className="relative flex min-h-[72px] items-start justify-center pt-5 md:col-start-4 md:row-start-1 md:text-center">
+                          <div className="relative flex min-h-[88px] items-start justify-center pt-4 md:col-start-4 md:row-start-1 md:text-center">
                             <button
                               type="button"
                               onClick={() => setOpenMenuRowId((current) => (current === row.id ? null : row.id))}
                               title="Actions"
                               aria-label={`Actions for row ${index + 1}`}
-                              className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-700"
                             >
                               <span className="text-base leading-none">•••</span>
                             </button>
@@ -5980,32 +6035,32 @@ export default function PlansPage() {
 
               <div className="pt-2">
                 <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex flex-wrap items-center justify-center gap-3 rounded-[24px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.96)_0%,rgba(248,250,252,0.96)_100%)] p-5 shadow-[0_16px_38px_-28px_rgba(15,23,42,0.5)]">
                     <button
                       type="button"
                       onClick={addReminderRow}
-                      className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700 hover:bg-blue-100"
+                      className="rounded-2xl border border-blue-200 bg-white px-5 py-3 text-sm font-medium text-blue-700 shadow-md transition duration-150 hover:-translate-y-1 hover:bg-blue-50 hover:shadow-lg"
                     >
                       + Add a Reminder
                     </button>
                     <button
                       type="button"
                       onClick={addEmailRow}
-                      className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 hover:bg-green-100"
+                      className="rounded-2xl border border-green-200 bg-white px-5 py-3 text-sm font-medium text-green-700 shadow-md transition duration-150 hover:-translate-y-1 hover:bg-green-50 hover:shadow-lg"
                     >
                       + Add an Email
                     </button>
                     <button
                       type="button"
                       onClick={addMeetingRow}
-                      className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700 hover:bg-violet-100"
+                      className="rounded-2xl border border-violet-200 bg-white px-5 py-3 text-sm font-medium text-violet-700 shadow-md transition duration-150 hover:-translate-y-1 hover:bg-violet-50 hover:shadow-lg"
                     >
                       + Add a Meeting
                     </button>
                   </div>
 
                   <div className="space-y-4">
-                    <div className="text-lg font-semibold text-gray-900">Anchors</div>
+                    <div className="text-lg font-semibold text-gray-900">Dynamic Fields</div>
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
@@ -6015,7 +6070,7 @@ export default function PlansPage() {
                         }}
                         className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
                       >
-                        + Add Anchor
+                        + Add Dynamic Field
                       </button>
                       <button
                         type="button"
@@ -6026,7 +6081,7 @@ export default function PlansPage() {
                         disabled={anchors.length === 0}
                         className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {areAnchorsHidden ? "Show Anchors" : "Hide Anchors"}
+                        {areAnchorsHidden ? "Show Dynamic Fields" : "Hide Dynamic Fields"}
                       </button>
                     </div>
                     {!areAnchorsHidden ? (
@@ -6090,24 +6145,31 @@ export default function PlansPage() {
                     ) : null}
                   </div>
 
-                  <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-                    <div className="max-w-md">
-                      <label className="mb-1 block text-sm font-medium text-gray-700">Weekend handling</label>
-                      <select
-                        className="w-full rounded-lg border px-3 py-2"
-                        value={weekendRule}
-                        onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
-                      >
-                        <option value="prior_business_day">Adjust to prior business day (Fri)</option>
-                        <option value="none">Allow weekends (no adjustment)</option>
-                      </select>
-                      <p className="mt-1 text-xs text-gray-500">
-                        If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
-                      </p>
-                    </div>
+                  <div className="space-y-5 border-t border-slate-200 pt-6">
+                    {!shouldRenderSimpleEventHeaderFields ? (
+                      <div className="max-w-md">
+                        <label className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
+                          <span>Weekend Handling</span>
+                          <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+                            i
+                            <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+                              If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
+                            </span>
+                          </span>
+                        </label>
+                        <select
+                          className="w-full rounded-lg border px-3 py-2"
+                          value={weekendRule}
+                          onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+                        >
+                          <option value="prior_business_day">Adjust to prior business day (Fri)</option>
+                          <option value="none">Allow weekends (no adjustment)</option>
+                        </select>
+                      </div>
+                    ) : null}
 
-                    <div className="flex justify-end">
-                      <div className="flex w-full max-w-64 flex-col gap-2">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div className="flex flex-wrap items-center gap-3">
                         <button
                           type="button"
                           onClick={() => {
@@ -6124,18 +6186,29 @@ export default function PlansPage() {
                         </button>
                         <button
                           type="button"
-                          onClick={saveCurrentTemplate}
-                          className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
                           onClick={cancelEditing}
                           className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
                         >
                           Cancel
                         </button>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={saveCurrentTemplate}
+                          className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
+                        >
+                          Save
+                        </button>
+                        {shouldRenderBuilderSourceBanner ? (
+                          <button
+                            type="button"
+                            onClick={openBuilderTemplateSaveDialog}
+                            className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
+                          >
+                            Save As
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => {
@@ -6146,7 +6219,7 @@ export default function PlansPage() {
                           Export
                         </button>
                         {executionNotices.some((entry) => entry.notice.tone === "success") ? (
-                          <div className="flex justify-end">
+                          <div className="flex items-center">
                             <ExportDoneBadge />
                           </div>
                         ) : null}
