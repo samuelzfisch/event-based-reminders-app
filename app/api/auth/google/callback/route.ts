@@ -56,12 +56,15 @@ function serializeError(error: unknown) {
 }
 
 export async function GET(request: Request) {
+  const origin = new URL(request.url).origin;
+  return NextResponse.redirect(`${origin}/settings?google_error=HIT_CALLBACK`);
+
+  /*
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
   const errorDescription = url.searchParams.get("error_description");
-  const origin = `${url.protocol}//${url.host}`;
   const redirectUri = getGoogleRedirectUri(url);
   const clientId = getGoogleClientId();
   const clientSecret = getGoogleClientSecret();
@@ -253,4 +256,5 @@ export async function GET(request: Request) {
       "Set-Cookie": `${GMAIL_OAUTH_VERIFIER_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; Secure`,
     },
   });
+  */
 }
