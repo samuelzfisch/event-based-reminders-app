@@ -144,6 +144,11 @@ export const GMAIL_OAUTH_MESSAGE_TYPE = "event_based_reminders_app_gmail_oauth_r
 export const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 export const GOOGLE_CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
+type GmailOAuthDebugInfo = {
+  callbackHit: boolean;
+  backendErrorMessage?: string | null;
+};
+
 const GMAIL_SCOPES = [
   "openid",
   "email",
@@ -886,6 +891,7 @@ async function connectGmailInteractively() {
 
   return await new Promise<GmailSession>((resolve, reject) => {
     let settled = false;
+    let callbackHit = false;
 
     const cleanup = () => {
       settled = true;
@@ -893,9 +899,14 @@ async function connectGmailInteractively() {
       window.clearInterval(pollTimer);
     };
 
-    const fail = (message: string) => {
+    const fail = (message: string, debugInfo?: GmailOAuthDebugInfo) => {
       cleanup();
-      reject(new Error(message));
+      const error = new Error(message) as Error & { gmailOAuthDebug?: GmailOAuthDebugInfo };
+      error.gmailOAuthDebug = {
+        callbackHit,
+        backendErrorMessage: debugInfo?.backendErrorMessage ?? null,
+      };
+      reject(error);
     };
 
     const handleMessage = (event: MessageEvent) => {
@@ -914,6 +925,7 @@ async function connectGmailInteractively() {
         | undefined;
 
       if (data?.type !== GMAIL_OAUTH_MESSAGE_TYPE) return;
+      callbackHit = true;
 
       const expectedState = readPersistedValue("sessionStorage", GMAIL_OAUTH_STATE_KEY);
       removePersistedValue("sessionStorage", GMAIL_OAUTH_STATE_KEY);
@@ -921,7 +933,10 @@ async function connectGmailInteractively() {
       clearGmailOAuthVerifierCookie();
 
       if (data.error) {
-        fail(data.errorDescription || "Gmail permission was not granted.");
+        fail(data.errorDescription || "Gmail permission was not granted.", {
+          callbackHit: true,
+          backendErrorMessage: data.errorDescription || data.error || null,
+        });
         return;
       }
 
@@ -947,7 +962,7 @@ async function connectGmailInteractively() {
 
     const pollTimer = window.setInterval(() => {
       if (settled) return;
-      if (popup.closed) fail("Gmail sign-in was closed before it finished.");
+      if (popup.closed) fail("Gmail sign-in was closed before it finished.", { callbackHit: false });
     }, 500);
 
     window.addEventListener("message", handleMessage);

@@ -58,13 +58,34 @@ export async function GET(request: Request) {
   let resolvedError = error;
   let resolvedErrorDescription = errorDescription;
 
+  console.info("[google-oauth] callback hit", {
+    hasGoogleClientId: Boolean(clientId),
+    hasGoogleClientSecret: Boolean(clientSecret),
+    query: {
+      host: url.host,
+      pathname: url.pathname,
+      hasCode: Boolean(code),
+      hasState: Boolean(state),
+      error: error ?? null,
+      errorDescription: errorDescription ?? null,
+    },
+  });
+
   if (!resolvedError && code) {
     if (!clientId || !clientSecret) {
       resolvedError = "server_misconfigured";
       resolvedErrorDescription = "Gmail OAuth is missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET on the server.";
+      console.error("[google-oauth] token exchange blocked by config", {
+        hasGoogleClientId: Boolean(clientId),
+        hasGoogleClientSecret: Boolean(clientSecret),
+      });
     } else if (!codeVerifier) {
       resolvedError = "missing_code_verifier";
       resolvedErrorDescription = "Gmail sign-in could not be verified. Please try again.";
+      console.error("[google-oauth] missing code verifier", {
+        hasCode: Boolean(code),
+        hasState: Boolean(state),
+      });
     } else {
       const body = new URLSearchParams({
         client_id: clientId,
@@ -75,34 +96,61 @@ export async function GET(request: Request) {
         code_verifier: codeVerifier,
       });
 
-      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-        cache: "no-store",
-      });
+      try {
+        const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+          cache: "no-store",
+        });
 
-      const tokenPayload = (await tokenResponse.json().catch(() => null)) as
-        | {
-            access_token?: string;
-            refresh_token?: string;
-            expires_in?: number;
-            scope?: string;
-            error?: string;
-            error_description?: string;
-          }
-        | null;
+        const tokenPayload = (await tokenResponse.json().catch(() => null)) as
+          | {
+              access_token?: string;
+              refresh_token?: string;
+              expires_in?: number;
+              scope?: string;
+              error?: string;
+              error_description?: string;
+            }
+          | null;
 
-      if (!tokenResponse.ok || !tokenPayload?.access_token) {
-        resolvedError = tokenPayload?.error || "token_exchange_failed";
-        resolvedErrorDescription = tokenPayload?.error_description || "Failed to connect Gmail.";
-      } else {
-        accessToken = tokenPayload.access_token;
-        refreshToken = tokenPayload.refresh_token ?? null;
-        expiresIn = tokenPayload.expires_in ?? null;
-        scope = tokenPayload.scope ?? GMAIL_SCOPES.join(" ");
+        if (!tokenResponse.ok || !tokenPayload?.access_token) {
+          resolvedError = tokenPayload?.error || "token_exchange_failed";
+          resolvedErrorDescription = tokenPayload?.error_description || "Failed to connect Gmail.";
+          console.error("[google-oauth] token exchange failed", {
+            status: tokenResponse.status,
+            ok: tokenResponse.ok,
+            error: tokenPayload?.error ?? null,
+            errorDescription: tokenPayload?.error_description ?? null,
+          });
+        } else {
+          accessToken = tokenPayload.access_token;
+          refreshToken = tokenPayload.refresh_token ?? null;
+          expiresIn = tokenPayload.expires_in ?? null;
+          scope = tokenPayload.scope ?? GMAIL_SCOPES.join(" ");
+          console.info("[google-oauth] token exchange succeeded", {
+            hasRefreshToken: Boolean(refreshToken),
+            expiresIn,
+            scope,
+          });
+        }
+      } catch (tokenExchangeError) {
+        resolvedError = "token_exchange_failed";
+        resolvedErrorDescription =
+          tokenExchangeError instanceof Error ? tokenExchangeError.message : "Failed to connect Gmail.";
+        console.error("[google-oauth] token exchange threw", {
+          error: tokenExchangeError instanceof Error ? tokenExchangeError.message : String(tokenExchangeError),
+        });
       }
     }
+  }
+
+  if (resolvedError) {
+    console.error("[google-oauth] callback resolving with error", {
+      error: resolvedError,
+      errorDescription: resolvedErrorDescription ?? null,
+    });
   }
 
   const html = `<!doctype html>

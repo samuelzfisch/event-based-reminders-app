@@ -41,6 +41,12 @@ function areGmailConnectionStatesEqual(left: GmailConnectionState | null, right:
 
 type ConnectionProviderChoice = "auto" | "outlook" | "gmail";
 
+type GmailConnectDebugState = {
+  callbackHit: boolean;
+  backendErrorMessage: string | null;
+  frontendErrorMessage: string;
+};
+
 function normalizeConnectionEmail(value: string) {
   return value.trim().replace(/^mailto:/i, "").trim().toLowerCase();
 }
@@ -66,6 +72,7 @@ export default function SettingsPage() {
   const [connectingOutlook, setConnectingOutlook] = useState(false);
   const [gmailConnection, setGmailConnection] = useState<GmailConnectionState | null>(null);
   const [gmailError, setGmailError] = useState<string | null>(null);
+  const [gmailConnectDebug, setGmailConnectDebug] = useState<GmailConnectDebugState | null>(null);
   const [connectingGmail, setConnectingGmail] = useState(false);
   const [providerLoading, setProviderLoading] = useState({ outlook: true, gmail: true });
   const [connectionEmailInput, setConnectionEmailInput] = useState<string>(() => loadAppSettings().outlookAccountEmail);
@@ -271,13 +278,24 @@ export default function SettingsPage() {
     try {
       setConnectingGmail(true);
       setGmailError(null);
+      setGmailConnectDebug(null);
       const normalizedEmail = normalizeConnectionEmail(connectionEmailInput);
       const connection = await connectGmail(normalizedEmail || undefined);
       setGmailConnection((current) => (areGmailConnectionStatesEqual(current, connection) ? current : connection));
       setConnectionEmailInput(getConnectedGmailMailboxEmail(connection.identity) || normalizedEmail);
       return true;
     } catch (error) {
-      setGmailError(error instanceof Error ? error.message : "Failed to connect Gmail.");
+      const errorMessage = error instanceof Error ? error.message : "Failed to connect Gmail.";
+      const gmailOAuthDebug =
+        error && typeof error === "object" && "gmailOAuthDebug" in error
+          ? (error as { gmailOAuthDebug?: { callbackHit?: boolean; backendErrorMessage?: string | null } }).gmailOAuthDebug
+          : undefined;
+      setGmailError(errorMessage);
+      setGmailConnectDebug({
+        callbackHit: Boolean(gmailOAuthDebug?.callbackHit),
+        backendErrorMessage: gmailOAuthDebug?.backendErrorMessage ?? null,
+        frontendErrorMessage: errorMessage,
+      });
       return false;
     } finally {
       setConnectingGmail(false);
@@ -365,6 +383,7 @@ export default function SettingsPage() {
     setConnectionError(null);
     setOutlookError(null);
     setGmailError(null);
+    setGmailConnectDebug(null);
   }
 
   async function onConnectProvider() {
@@ -566,7 +585,17 @@ export default function SettingsPage() {
             ) : null}
             {connectionMessage ? <p className="text-xs text-green-700">{connectionMessage}</p> : null}
             {connectionError || outlookError || gmailError ? (
-              <p className="text-xs text-red-700">{connectionError || outlookError || gmailError}</p>
+              <div className="space-y-2">
+                <p className="text-xs text-red-700">{connectionError || outlookError || gmailError}</p>
+                {connectionError === "Failed to connect Google account." && gmailConnectDebug ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50/70 px-3 py-2 text-[11px] text-red-800">
+                    <div className="font-semibold uppercase tracking-wide">Google OAuth Debug</div>
+                    <div className="mt-1">Callback hit: {gmailConnectDebug.callbackHit ? "yes" : "no"}</div>
+                    <div className="mt-1">Backend message: {gmailConnectDebug.backendErrorMessage || "Not available"}</div>
+                    <div className="mt-1">Frontend message: {gmailConnectDebug.frontendErrorMessage}</div>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         </div>
