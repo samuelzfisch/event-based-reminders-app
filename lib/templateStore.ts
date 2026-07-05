@@ -1,8 +1,10 @@
 import { parseTemplateSnapshotFile } from "./templateSnapshots";
-import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
+import { readPersistedValue, writePersistedValue } from "./browserStorage";
+import { getScopedStorageKey } from "./clientPersistence";
 import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
+import { normalizeRecipientEntries, type RecipientEntry } from "./recipientGroups";
 import type { PlanType, WeekendRule } from "../types/plan";
 
 export type PersistedTemplateRow = {
@@ -13,10 +15,11 @@ export type PersistedTemplateRow = {
   dateBasis?: "event" | "today";
   rowType: "reminder" | "email" | "calendar_event";
   reminderTime?: string;
+  timeZone?: string;
   emailDraft?: {
-    to?: string[];
-    cc?: string[];
-    bcc?: string[];
+    to?: Array<RecipientEntry | string>;
+    cc?: Array<RecipientEntry | string>;
+    bcc?: Array<RecipientEntry | string>;
     subject?: string;
     body?: string;
   };
@@ -28,7 +31,7 @@ export type PersistedTemplateRow = {
     isAllDay?: boolean;
   };
   meetingDraft?: {
-    attendees?: string[];
+    attendees?: Array<RecipientEntry | string>;
     location?: string;
     durationMinutes?: number;
     useCustomEnd?: boolean;
@@ -40,6 +43,13 @@ export type PersistedTemplateRow = {
   };
 };
 
+export type PersistedTemplateAnchor = {
+  key: string;
+  value: string;
+  isImportant?: boolean;
+  lastUpdatedAt?: string | null;
+};
+
 export type PersistedPlanTemplate = {
   id: string;
   name: string;
@@ -47,10 +57,11 @@ export type PersistedPlanTemplate = {
   templateMode?: "template" | "custom";
   noEventDate?: boolean;
   weekendRule: WeekendRule;
-  anchors: Array<{ key: string; value: string }>;
+  anchors: PersistedTemplateAnchor[];
   items: PersistedTemplateRow[];
   isProtected: boolean;
   sortOrder: number;
+  lastDynamicFieldsExportAt?: string | null;
 };
 
 export type PersistedTemplateState = {
@@ -59,11 +70,11 @@ export type PersistedTemplateState = {
 };
 
 const TEMPLATE_CACHE_KEY = "event-based-reminders-app:template-cache-v1";
-const LEGACY_TEMPLATE_CACHE_KEYS = ["standalone-plans:template-cache-v1"];
 const NO_EVENT_DATE_ANCHOR_KEY = "__event_based_reminders_no_event_date__";
+const LAST_DYNAMIC_FIELDS_EXPORT_AT_ANCHOR_KEY = "__event_based_reminders_last_dynamic_fields_export_at__";
 
-function migrateTemplateCache() {
-  migrateLegacyPersistedValue("localStorage", TEMPLATE_CACHE_KEY, LEGACY_TEMPLATE_CACHE_KEYS);
+function getTemplateCacheStorageKey() {
+  return getScopedStorageKey(TEMPLATE_CACHE_KEY);
 }
 
 /**
@@ -117,20 +128,37 @@ function normalizeTemplateAnchors(value: unknown) {
         .map((anchor) => ({
           key: typeof anchor.key === "string" ? anchor.key : "",
           value: typeof anchor.value === "string" ? anchor.value : "",
+          isImportant: typeof anchor.isImportant === "boolean" ? anchor.isImportant : false,
+          lastUpdatedAt:
+            typeof anchor.lastUpdatedAt === "string"
+              ? anchor.lastUpdatedAt
+              : anchor.lastUpdatedAt === null
+                ? null
+                : null,
         }))
         .filter((anchor) => anchor.key)
     : [];
 
   const noEventDate = rawAnchors.some((anchor) => anchor.key === NO_EVENT_DATE_ANCHOR_KEY && anchor.value === "true");
-  const anchors = rawAnchors.filter((anchor) => anchor.key !== NO_EVENT_DATE_ANCHOR_KEY);
+  const lastDynamicFieldsExportAt =
+    rawAnchors.find((anchor) => anchor.key === LAST_DYNAMIC_FIELDS_EXPORT_AT_ANCHOR_KEY)?.value || null;
+  const anchors = rawAnchors.filter(
+    (anchor) => anchor.key !== NO_EVENT_DATE_ANCHOR_KEY && anchor.key !== LAST_DYNAMIC_FIELDS_EXPORT_AT_ANCHOR_KEY
+  );
 
-  return { anchors, noEventDate };
+  return { anchors, noEventDate, lastDynamicFieldsExportAt };
 }
 
 function serializeTemplateAnchors(template: PersistedPlanTemplate) {
   const anchors = template.anchors.map((anchor) => ({ ...anchor }));
   if (template.noEventDate) {
     anchors.push({ key: NO_EVENT_DATE_ANCHOR_KEY, value: "true" });
+  }
+  if (template.lastDynamicFieldsExportAt) {
+    anchors.push({
+      key: LAST_DYNAMIC_FIELDS_EXPORT_AT_ANCHOR_KEY,
+      value: template.lastDynamicFieldsExportAt,
+    });
   }
   return anchors;
 }
@@ -148,11 +176,12 @@ function normalizeTemplateRow(value: unknown): PersistedTemplateRow | null {
     dateBasis: value.dateBasis === "today" ? "today" : "event",
     rowType: value.rowType === "email" || value.rowType === "calendar_event" ? value.rowType : "reminder",
     reminderTime: typeof value.reminderTime === "string" ? value.reminderTime : "",
+    timeZone: typeof value.timeZone === "string" ? value.timeZone : "",
     emailDraft: isObject(value.emailDraft)
       ? {
-          to: Array.isArray(value.emailDraft.to) ? value.emailDraft.to.filter((entry): entry is string => typeof entry === "string") : [],
-          cc: Array.isArray(value.emailDraft.cc) ? value.emailDraft.cc.filter((entry): entry is string => typeof entry === "string") : [],
-          bcc: Array.isArray(value.emailDraft.bcc) ? value.emailDraft.bcc.filter((entry): entry is string => typeof entry === "string") : [],
+          to: normalizeRecipientEntries(value.emailDraft.to),
+          cc: normalizeRecipientEntries(value.emailDraft.cc),
+          bcc: normalizeRecipientEntries(value.emailDraft.bcc),
           subject: typeof value.emailDraft.subject === "string" ? value.emailDraft.subject : "",
           body: typeof value.emailDraft.body === "string" ? value.emailDraft.body : "",
         }
@@ -170,10 +199,7 @@ function normalizeTemplateRow(value: unknown): PersistedTemplateRow | null {
       : undefined,
     meetingDraft: isObject(value.meetingDraft)
       ? {
-          attendees:
-            Array.isArray(value.meetingDraft.attendees)
-              ? value.meetingDraft.attendees.filter((entry): entry is string => typeof entry === "string")
-              : [],
+          attendees: normalizeRecipientEntries(value.meetingDraft.attendees),
           location: typeof value.meetingDraft.location === "string" ? value.meetingDraft.location : "",
           durationMinutes:
             typeof value.meetingDraft.durationMinutes === "number" ? value.meetingDraft.durationMinutes : undefined,
@@ -199,6 +225,12 @@ function normalizePersistedTemplate(value: unknown, fallbackSortOrder = 0): Pers
   const normalizedAnchors = normalizeTemplateAnchors(value.anchors);
   const noEventDate = typeof value.noEventDate === "boolean" ? value.noEventDate : normalizedAnchors.noEventDate;
   const anchors = normalizedAnchors.anchors;
+  const lastDynamicFieldsExportAt =
+    typeof value.lastDynamicFieldsExportAt === "string"
+      ? value.lastDynamicFieldsExportAt
+      : value.lastDynamicFieldsExportAt === null
+        ? null
+        : normalizedAnchors.lastDynamicFieldsExportAt;
 
   const items = Array.isArray(value.items)
     ? value.items.map(normalizeTemplateRow).filter((row): row is PersistedTemplateRow => Boolean(row))
@@ -215,6 +247,7 @@ function normalizePersistedTemplate(value: unknown, fallbackSortOrder = 0): Pers
     items,
     isProtected: Boolean(value.isProtected),
     sortOrder: typeof value.sortOrder === "number" ? value.sortOrder : fallbackSortOrder,
+    lastDynamicFieldsExportAt,
   };
 }
 
@@ -226,8 +259,7 @@ export function loadCachedTemplateState(seedTemplates: PersistedPlanTemplate[]):
     };
   }
 
-  migrateTemplateCache();
-  const raw = readPersistedValue("localStorage", TEMPLATE_CACHE_KEY, LEGACY_TEMPLATE_CACHE_KEYS);
+  const raw = readPersistedValue("localStorage", getTemplateCacheStorageKey());
   if (!raw) {
     return {
       selectedTemplateId: seedTemplates[0]?.id ?? null,
@@ -265,7 +297,6 @@ export function loadCachedTemplateState(seedTemplates: PersistedPlanTemplate[]):
 
 export function saveCachedTemplateState(state: PersistedTemplateState) {
   if (typeof window === "undefined") return;
-  migrateTemplateCache();
 
   const snapshot = {
     version: 1 as const,
@@ -283,10 +314,11 @@ export function saveCachedTemplateState(state: PersistedTemplateState) {
         ...item,
         body: item.body ?? "",
       })),
+      lastDynamicFieldsExportAt: template.lastDynamicFieldsExportAt ?? null,
     })),
   };
 
-  writePersistedValue("localStorage", TEMPLATE_CACHE_KEY, JSON.stringify(snapshot));
+  writePersistedValue("localStorage", getTemplateCacheStorageKey(), JSON.stringify(snapshot));
 }
 
 export function mergeTemplateStates(
@@ -348,6 +380,7 @@ function hasMeaningfulTemplateState(state: PersistedTemplateState | null, seedTe
       items: template.items,
       isProtected: template.isProtected,
       sortOrder: template.sortOrder,
+      lastDynamicFieldsExportAt: template.lastDynamicFieldsExportAt ?? null,
     }))
   );
   const normalizedSeed = JSON.stringify(
@@ -362,6 +395,7 @@ function hasMeaningfulTemplateState(state: PersistedTemplateState | null, seedTe
       items: template.items,
       isProtected: template.isProtected,
       sortOrder: template.sortOrder,
+      lastDynamicFieldsExportAt: template.lastDynamicFieldsExportAt ?? null,
     }))
   );
   return normalizedCurrent !== normalizedSeed || state.selectedTemplateId !== (seedTemplates[0]?.id ?? null);
@@ -411,51 +445,9 @@ export async function loadTemplateStateFromSupabase(seedTemplates: PersistedPlan
       });
     }
 
-    const legacyRemoteState = userKey
-      ? await (async () => {
-          const { data: legacyData, error: legacyError } = await supabase
-            .from("plan_templates")
-            .select("id,name,base_type,template_mode,is_protected,weekend_rule,anchors,items,sort_order")
-            .eq("user_key", userKey)
-            .order("sort_order", { ascending: true });
-
-          if (legacyError || !legacyData) return null;
-
-          const legacyTemplates = legacyData
-            .map((row, index) =>
-              normalizePersistedTemplate(
-                {
-                  id: row.id,
-                  name: row.name,
-                  baseType: row.base_type,
-                  templateMode: row.template_mode,
-                  isProtected: row.is_protected,
-                  weekendRule: row.weekend_rule,
-                  anchors: row.anchors,
-                  items: row.items,
-                  sortOrder: row.sort_order,
-                },
-                index
-              )
-            )
-            .filter((template): template is PersistedPlanTemplate => Boolean(template));
-
-          return mergeTemplateStates(seedTemplates, {
-            selectedTemplateId: cachedState.selectedTemplateId,
-            templates: legacyTemplates,
-          });
-        })()
-      : null;
-
-    const sourceState = hasMeaningfulTemplateState(cachedState, seedTemplates)
+    return hasMeaningfulTemplateState(cachedState, seedTemplates)
       ? cachedState
-      : legacyRemoteState ?? cachedState;
-    if (sourceState) {
-      await saveTemplateStateToSupabase(sourceState);
-      return sourceState;
-    }
-
-    return mergeTemplateStates(seedTemplates, cachedState);
+      : mergeTemplateStates(seedTemplates, cachedState);
   }
 
   if (!userKey) return null;

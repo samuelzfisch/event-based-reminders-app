@@ -18,6 +18,7 @@ import {
   bootstrapCurrentOrgForUser,
 } from "../../lib/orgBootstrap";
 import { isAuthBypassEnabled } from "../../lib/authBypass";
+import { clearAllLocalAppState } from "../../lib/clientPersistence";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
 type AuthContextValue = {
@@ -320,18 +321,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function signOut() {
     const supabase = getSupabaseBrowserClient();
     clearCachedOrgContext();
-    if (!supabase) {
+    try {
+      if (supabase) {
+        await supabase.auth.signOut();
+      }
+    } finally {
+      clearAllLocalAppState();
+      if (!mountedRef.current) return;
       setCurrentSession(null);
       setCurrentUser(null);
       setOrgContext(null);
-      return;
     }
-
-    await supabase.auth.signOut();
-    if (!mountedRef.current) return;
-    setCurrentSession(null);
-    setCurrentUser(null);
-    setOrgContext(null);
   }
 
   return (

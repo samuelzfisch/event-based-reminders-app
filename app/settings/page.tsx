@@ -222,7 +222,7 @@ export default function SettingsPage() {
       defaultReminderTime: settings.defaultReminderTime,
       emailHandlingMode: settings.emailHandlingMode,
     });
-    setPlanBuilderSaveMessage("Plan builder defaults saved.");
+    setPlanBuilderSaveMessage("New plan defaults saved.");
   }
 
   function onSaveEmailSignatureSettings() {
@@ -232,7 +232,7 @@ export default function SettingsPage() {
       emailSignatureEnabled: Boolean(normalizedSignatureText.trim()),
       emailSignatureText: normalizedSignatureText,
     });
-    setEmailSignatureSaveMessage("Email signature saved.");
+    setEmailSignatureSaveMessage("Signature saved.");
   }
 
   async function onConnectOutlook() {
@@ -411,18 +411,18 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="space-y-8 text-gray-900">
+    <div className="space-y-6 text-gray-900">
       <section className="space-y-2">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-[30px] font-bold text-gray-900">Settings</h1>
             <p className="mt-2 max-w-2xl text-sm text-gray-600">
-              Configure local defaults and preview behavior for the Event-Based Reminders app.
+              Manage your connected account and the defaults used when you build and export event plans.
             </p>
           </div>
-          <div className="rounded-xl border bg-white px-4 py-3 text-sm shadow-sm md:min-w-[280px] md:max-w-[320px]">
+          <div className="w-full rounded-xl border bg-white px-4 py-3 text-sm shadow-sm lg:min-w-[280px] lg:max-w-[320px]">
             <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Navigation</div>
-            <div className="mt-1 font-medium text-gray-900">Event-Based Reminders configuration</div>
+            <div className="mt-1 font-medium text-gray-900">App settings</div>
             <div className="mt-3 flex flex-wrap gap-2">
               <Link href="/plans" className="rounded-lg border px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Back to Plans
@@ -432,12 +432,12 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <div className="rounded-2xl border bg-white shadow-sm">
-          <div className="space-y-5 p-6">
+          <div className="space-y-4 p-4">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Plan Builder Defaults</h2>
-              <p className="mt-2 text-sm text-gray-600">Controls the default reminder time and email behavior used when building new plans.</p>
+              <h2 className="text-lg font-semibold text-gray-900">New Plan Defaults</h2>
+              <p className="mt-2 text-sm text-gray-600">Set the default reminder time and email behavior used when you start a new event plan.</p>
             </div>
             <label className="block space-y-1 text-sm">
               <span className="font-medium text-gray-700">Default reminder time</span>
@@ -460,14 +460,14 @@ export default function SettingsPage() {
                 <option value="send">Send Immediately</option>
               </select>
             </label>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={onSavePlanBuilderSettings}
                 disabled={!hasUnsavedPlanBuilderChanges}
                 className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:text-gray-900"
               >
-                Save Plan Builder Defaults
+                Save Defaults
               </button>
             </div>
             {planBuilderSaveMessage ? <p className="text-xs text-green-700">{planBuilderSaveMessage}</p> : null}
@@ -475,14 +475,14 @@ export default function SettingsPage() {
         </div>
 
         <div className="rounded-2xl border bg-white shadow-sm">
-          <div className="space-y-5 p-6">
+          <div className="space-y-4 p-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Connected Account</h2>
               <p className="mt-2 text-sm text-gray-600">
-                Enter the account email once, then connect with Outlook or Google from the same box.
+                Connect the account you want to use for exports. Outlook and Google status are shown below.
               </p>
             </div>
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px]">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
               <label className="block space-y-1 text-sm">
                 <span className="font-medium text-gray-700">Account email</span>
                 <input
@@ -509,8 +509,8 @@ export default function SettingsPage() {
             <div className="rounded-lg border border-gray-200 p-4">
               <p className="text-xs text-gray-500">Active provider</p>
               <p className="mt-1 text-sm font-medium text-gray-900">{primaryConnectedLabel}</p>
-              <p className="mt-3 text-xs text-gray-500">Connected account email</p>
-              <p className="mt-1 text-sm text-gray-900">{primaryConnectedEmail}</p>
+              <p className="mt-3 text-xs text-gray-500">Connected account</p>
+              <p className="mt-1 break-all text-sm text-gray-900">{primaryConnectedEmail}</p>
               <p className="mt-3 text-xs text-gray-500">Connection status</p>
               <p className="mt-1 text-sm font-medium text-gray-900">{primaryConnectedStatus}</p>
               <div className="mt-2 min-h-4">
@@ -518,18 +518,18 @@ export default function SettingsPage() {
                   <p className="text-xs text-gray-500">Refreshing provider status…</p>
                 ) : null}
               </div>
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
                 <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Outlook</div>
                   <div className="mt-1 text-sm font-medium text-gray-900">{connectionStatusLabel}</div>
-                  <div className="mt-1 text-xs text-gray-600">{connectedAccountEmail}</div>
-                  <div className="mt-1 text-xs text-gray-500">{connectedDisplayName}</div>
+                  <div className="mt-1 break-all text-xs text-gray-600">{connectedAccountEmail}</div>
+                  <div className="mt-1 break-all text-xs text-gray-500">{connectedDisplayName}</div>
                 </div>
                 <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Google</div>
                   <div className="mt-1 text-sm font-medium text-gray-900">{gmailConnectionStatusLabel}</div>
-                  <div className="mt-1 text-xs text-gray-600">{connectedGmailEmail}</div>
-                  <div className="mt-1 text-xs text-gray-500">{connectedGmailDisplayName}</div>
+                  <div className="mt-1 break-all text-xs text-gray-600">{connectedGmailEmail}</div>
+                  <div className="mt-1 break-all text-xs text-gray-500">{connectedGmailDisplayName}</div>
                 </div>
               </div>
             </div>
@@ -559,7 +559,7 @@ export default function SettingsPage() {
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              Auto-detect uses Google for `gmail.com` addresses and Outlook/Microsoft for everything else. You can override it from the provider menu.
+              Auto-detect uses Google for `gmail.com` addresses and Outlook/Microsoft for everything else. You can change that from the provider menu.
             </p>
             {showMailboxWarning ? (
               <p className="text-xs text-amber-700">{outlookConnection?.identity?.mailboxEligibilityReason}</p>
@@ -570,10 +570,10 @@ export default function SettingsPage() {
         </div>
 
         <div className="rounded-2xl border bg-white shadow-sm lg:col-span-2">
-          <div className="space-y-5 p-6">
+          <div className="space-y-4 p-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Email Signature</h2>
-              <p className="mt-2 text-sm text-gray-600">Used automatically in Plans emails whenever this field has text.</p>
+              <p className="mt-2 text-sm text-gray-600">This signature is added to exported emails whenever this field has text.</p>
             </div>
             <label className="block space-y-1 text-sm">
               <span className="font-medium text-gray-700">Signature</span>
@@ -584,14 +584,14 @@ export default function SettingsPage() {
                 placeholder={"Best,\nYour Name"}
               />
             </label>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={onSaveEmailSignatureSettings}
                 disabled={!hasUnsavedEmailSignatureChanges}
                 className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:text-gray-900"
               >
-                Save Signature
+                Save
               </button>
             </div>
             {emailSignatureSaveMessage ? <p className="text-xs text-green-700">{emailSignatureSaveMessage}</p> : null}
@@ -600,13 +600,13 @@ export default function SettingsPage() {
 
         {authEnabled && currentUser ? (
           <div className="rounded-2xl border bg-white shadow-sm lg:col-span-2">
-            <div className="space-y-4 p-6">
+            <div className="space-y-4 p-4">
               <div>
-                <h2 className="text-base font-semibold text-gray-900">Account</h2>
+                <h2 className="text-lg font-semibold text-gray-900">Account</h2>
               </div>
               <div className="space-y-2 text-sm text-gray-600">
                 <div>
-                  Signed in as: <span className="text-gray-900">{currentUser.email || "—"}</span>
+                  Signed in as: <span className="break-all text-gray-900">{currentUser.email || "—"}</span>
                 </div>
               </div>
               <div>
@@ -623,9 +623,9 @@ export default function SettingsPage() {
           </div>
         ) : authBypassEnabled ? (
           <div className="rounded-2xl border bg-white shadow-sm lg:col-span-2">
-            <div className="space-y-2 p-6">
-              <h2 className="text-base font-semibold text-gray-900">Account</h2>
-              <div className="text-sm text-gray-600">Auth bypass enabled for this environment.</div>
+            <div className="space-y-2 p-4">
+              <h2 className="text-lg font-semibold text-gray-900">Account</h2>
+              <div className="text-sm text-gray-600">Sign-in is bypassed in this environment.</div>
             </div>
           </div>
         ) : null}

@@ -17,6 +17,7 @@ export interface PlanItem {
   offsetDays: number;
   dateBasis?: PlanDateBasis;
   reminderTime?: string;
+  timeZone?: string;
   rawDueDate: ISODateString;
   dueDate: ISODateString;
   customDueDate?: ISODateString;

@@ -1,4 +1,5 @@
-import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
+import { readPersistedValue, writePersistedValue } from "./browserStorage";
+import { getScopedStorageKey } from "./clientPersistence";
 import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 import { getLocalUserKey } from "./userKey";
@@ -57,12 +58,15 @@ export type ExecutionHistoryInsert = Omit<ExecutionHistoryRecord, "id" | "userKe
 
 export const EXECUTION_HISTORY_UPDATED_EVENT = "event-based-reminders-app:execution-history-updated";
 const EXECUTION_HISTORY_STORAGE_KEY = "event-based-reminders-app:execution-history";
-const LEGACY_EXECUTION_HISTORY_STORAGE_KEYS = ["standalone-plans:execution-history"];
 const MAX_LOCAL_HISTORY_RECORDS = 400;
 const HISTORY_DEBUG_PREFIX = "[executionHistory]";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function getExecutionHistoryStorageKey() {
+  return getScopedStorageKey(EXECUTION_HISTORY_STORAGE_KEY);
 }
 
 function normalizeStringArray(value: unknown) {
@@ -380,8 +384,7 @@ function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
 
 function loadLocalExecutionHistory() {
   if (typeof window === "undefined") return [];
-  migrateLegacyPersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, LEGACY_EXECUTION_HISTORY_STORAGE_KEYS);
-  const raw = readPersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, LEGACY_EXECUTION_HISTORY_STORAGE_KEYS);
+  const raw = readPersistedValue("localStorage", getExecutionHistoryStorageKey());
   if (!raw) return [];
 
   try {
@@ -393,12 +396,19 @@ function loadLocalExecutionHistory() {
   }
 }
 
+export function listCachedExecutionHistory(limit = 200) {
+  const userKey = getLocalUserKey();
+  return loadLocalExecutionHistory()
+    .filter((record) => !record.userKey || record.userKey === userKey)
+    .slice(0, limit);
+}
+
 function saveLocalExecutionHistory(records: ExecutionHistoryRecord[]) {
   if (typeof window === "undefined") return;
   const nextRecords = records.slice(0, MAX_LOCAL_HISTORY_RECORDS);
-  writePersistedValue("localStorage", EXECUTION_HISTORY_STORAGE_KEY, JSON.stringify(nextRecords));
+  writePersistedValue("localStorage", getExecutionHistoryStorageKey(), JSON.stringify(nextRecords));
   console.info(HISTORY_DEBUG_PREFIX, "saved local records", {
-    storageKey: EXECUTION_HISTORY_STORAGE_KEY,
+    storageKey: getExecutionHistoryStorageKey(),
     count: nextRecords.length,
     firstRecordId: nextRecords[0]?.id ?? null,
   });
@@ -428,6 +438,13 @@ function updateLocalExecutionHistoryRecord(
   const nextRecords = loadLocalExecutionHistory().map((record) => (record.id === recordId ? updater(record) : record));
   saveLocalExecutionHistory(nextRecords);
   return nextRecords.find((record) => record.id === recordId) ?? null;
+}
+
+function removeLocalExecutionHistoryRecords(recordIds: string[]) {
+  const removeSet = new Set(recordIds);
+  const nextRecords = loadLocalExecutionHistory().filter((record) => !removeSet.has(record.id));
+  saveLocalExecutionHistory(nextRecords);
+  return nextRecords;
 }
 
 function toSupabaseHistoryRow(record: ExecutionHistoryRecord) {
@@ -463,53 +480,6 @@ function toSupabaseHistoryRow(record: ExecutionHistoryRecord) {
       isAllDay: record.isAllDay,
     },
   };
-}
-
-async function loadLegacyRemoteExecutionHistory(userKey: string, limit: number) {
-  const supabase = getSupabaseBrowserClient();
-  if (!supabase || !userKey) return [];
-
-  const { data, error } = await supabase
-    .from("execution_history")
-    .select(
-      "id,user_key,execution_group_id,plan_name,item_type,title,subject,status,path,recipients,attendees,executed_at,outlook_web_link,teams_join_link,fallback_export_kind,details"
-    )
-    .eq("user_key", userKey)
-    .order("executed_at", { ascending: false })
-    .limit(limit);
-
-  if (error || !data) return [];
-  return data.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry));
-}
-
-async function migrateLegacyHistoryToCanonicalOrgHistory(input: {
-  orgId: string;
-  userKey: string;
-  localRecords: ExecutionHistoryRecord[];
-  limit: number;
-}) {
-  const supabase = getSupabaseBrowserClient();
-  if (!supabase) return [];
-
-  const legacyRemoteRecords = input.userKey ? await loadLegacyRemoteExecutionHistory(input.userKey, input.limit) : [];
-  const seedRecords = mergeExecutionHistoryRecords([...input.localRecords, ...legacyRemoteRecords]).slice(0, input.limit);
-  if (seedRecords.length === 0) return [];
-
-  const rows = seedRecords.map((record) => ({
-    org_id: input.orgId,
-    ...toSupabaseHistoryRow(record),
-  }));
-
-  const { error } = await supabase.from("org_execution_history").upsert(rows, {
-    onConflict: "id",
-  });
-
-  if (error) {
-    return [];
-  }
-
-  saveLocalExecutionHistory(seedRecords);
-  return seedRecords;
 }
 
 export async function writeExecutionHistory(entry: ExecutionHistoryInsert) {
@@ -643,20 +613,7 @@ export async function listExecutionHistory(limit = 200) {
     }
 
     if (!error && data && data.length === 0) {
-      const migrated = await migrateLegacyHistoryToCanonicalOrgHistory({
-        orgId,
-        userKey,
-        localRecords: matchingLocalRecords,
-        limit,
-      });
-      if (migrated.length > 0) {
-        console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory canonical org migration", {
-          orgId,
-          migratedCount: migrated.length,
-        });
-        return migrated;
-      }
-      return [];
+      return matchingLocalRecords.slice(0, limit);
     }
 
     console.info(HISTORY_DEBUG_PREFIX, "listExecutionHistory canonical org fallback", {
@@ -698,4 +655,69 @@ export async function listExecutionHistory(limit = 200) {
     mergedCount: merged.length,
   });
   return merged;
+}
+
+export async function deleteExecutionHistoryRecord(recordId: string) {
+  const orgId = getCachedOrgContext()?.orgId ?? "";
+  const userKey = getLocalUserKey();
+  if (!userKey) return false;
+
+  removeLocalExecutionHistoryRecords([recordId]);
+
+  if (!isSupabaseConfigured()) return true;
+
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return true;
+
+  if (orgId) {
+    await supabase.from("org_execution_history").delete().eq("id", recordId).eq("org_id", orgId);
+    return true;
+  }
+
+  await supabase.from("execution_history").delete().eq("id", recordId).eq("user_key", userKey);
+  return true;
+}
+
+export async function deleteExecutionHistoryRecords(recordIds: string[]) {
+  if (recordIds.length === 0) return true;
+
+  const orgId = getCachedOrgContext()?.orgId ?? "";
+  const userKey = getLocalUserKey();
+  if (!userKey) return false;
+
+  removeLocalExecutionHistoryRecords(recordIds);
+
+  if (!isSupabaseConfigured()) return true;
+
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return true;
+
+  if (orgId) {
+    await supabase.from("org_execution_history").delete().in("id", recordIds).eq("org_id", orgId);
+    return true;
+  }
+
+  await supabase.from("execution_history").delete().in("id", recordIds).eq("user_key", userKey);
+  return true;
+}
+
+export async function clearExecutionHistory() {
+  const orgId = getCachedOrgContext()?.orgId ?? "";
+  const userKey = getLocalUserKey();
+  if (!userKey) return false;
+
+  saveLocalExecutionHistory([]);
+
+  if (!isSupabaseConfigured()) return true;
+
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return true;
+
+  if (orgId) {
+    await supabase.from("org_execution_history").delete().eq("org_id", orgId);
+    return true;
+  }
+
+  await supabase.from("execution_history").delete().eq("user_key", userKey);
+  return true;
 }

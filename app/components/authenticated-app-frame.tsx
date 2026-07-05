@@ -9,8 +9,8 @@ import { InlineAuthCard } from "./inline-auth-card";
 
 function LoadingScreen({ label }: { label: string }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="rounded-2xl border bg-white px-6 py-5 text-sm text-gray-600 shadow-sm">{label}</div>
+    <div className="flex min-h-screen items-center justify-center bg-[var(--app-bg)] px-4">
+      <div className="rounded-2xl border bg-white px-4 py-3 text-sm text-gray-600 shadow-sm">{label}</div>
     </div>
   );
 }
@@ -60,10 +60,10 @@ export function AuthenticatedAppFrame({ children }: { children: ReactNode }) {
 
   if (!authBypassEnabled && authEnabled && !loading && !currentUser) {
     return (
-      <div className="min-h-screen bg-gray-50">
-        <div className="mx-auto flex min-h-screen w-full max-w-7xl items-center px-4 py-8">
-          <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,420px)] lg:items-center">
-            <div className="space-y-6">
+      <div className="min-h-screen bg-[var(--app-bg)]">
+        <div className="mx-auto flex min-h-screen w-full max-w-[780px] items-center px-2 py-2.5 sm:px-2.5">
+          <div className="grid w-full gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,390px)] lg:items-center">
+            <div className="space-y-4">
               <div className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Event-Based Reminders</div>
                 <h1 className="text-3xl font-bold text-gray-900 sm:text-4xl">Build reminder plans without a separate login detour.</h1>

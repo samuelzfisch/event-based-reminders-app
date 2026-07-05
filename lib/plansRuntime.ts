@@ -10,14 +10,32 @@ type AnchorPair = {
 
 type RowLike = {
   rowType?: PlanRowType;
-  meetingDraft?: PlanItem["meetingDraft"] | null;
+  meetingDraft?:
+    | PlanItem["meetingDraft"]
+    | {
+        attendees?: unknown[];
+        location?: string;
+        durationMinutes?: number;
+        useCustomEnd?: boolean;
+        endDate?: string;
+        endTime?: string;
+        isAllDay?: boolean;
+        teamsMeeting?: boolean;
+        addGoogleMeet?: boolean;
+      }
+    | null;
 };
 
 type EmailDraftLike = NonNullable<PlanItem["emailDraft"]>;
 type MeetingDraftLike = NonNullable<PlanItem["meetingDraft"]>;
 
 export function normalizeAnchorKey(value: string) {
-  return value.trim().replace(/^\[(.*)\]$/, "$1").trim().toUpperCase();
+  return value
+    .trim()
+    .replace(/^\[\s*(.*?)\s*\]$/, "$1")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
 }
 
 export function buildAnchorMap<T extends AnchorPair>(anchors: T[]): AnchorMap {

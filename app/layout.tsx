@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Event-Based Reminders",
-  description: "Event-Based Reminders app",
+  description: "Build event-based schedules for reminders, emails, and meetings.",
 };
 
 export default function RootLayout({

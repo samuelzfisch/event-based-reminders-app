@@ -1,6 +1,7 @@
 "use client";
 
 import { readPersistedValue, removePersistedValue, writePersistedValue } from "./browserStorage";
+import { getScopedStorageKey } from "./clientPersistence";
 import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 
@@ -372,10 +373,18 @@ function hasAllScopes(scopeValue: string | null | undefined, requiredScopes: str
   return requiredScopes.every((scope) => grantedScopes.has(scope));
 }
 
+function getScopedGmailSessionStorageKey() {
+  return getScopedStorageKey(GMAIL_SESSION_STORAGE_KEY);
+}
+
+function getScopedGmailIdentityStorageKey() {
+  return getScopedStorageKey(GMAIL_IDENTITY_STORAGE_KEY);
+}
+
 function loadRawStoredGmailSession(): GmailSession | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = readPersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY);
+    const raw = readPersistedValue("localStorage", getScopedGmailSessionStorageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as GmailSession;
     if ((!parsed?.accessToken && !parsed?.refreshToken) || !parsed?.expiresAt) return null;
@@ -417,7 +426,7 @@ function saveStoredGmailSession(session: GmailSession) {
     return;
   }
   const serializedSession = JSON.stringify(session);
-  writePersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY, serializedSession);
+  writePersistedValue("localStorage", getScopedGmailSessionStorageKey(), serializedSession);
   emitGmailConnectionUpdated();
 }
 
@@ -445,7 +454,7 @@ function saveGmailSessionFromTokenPayload(payload: {
 function loadStoredGmailIdentity(): GmailConnectedIdentity | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = readPersistedValue("localStorage", GMAIL_IDENTITY_STORAGE_KEY);
+    const raw = readPersistedValue("localStorage", getScopedGmailIdentityStorageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as GmailConnectedIdentity;
     const normalizedEmail = normalizeGmailEmail(parsed.normalizedEmail || parsed.email);
@@ -462,15 +471,15 @@ function loadStoredGmailIdentity(): GmailConnectedIdentity | null {
 
 function saveStoredGmailIdentity(identity: GmailConnectedIdentity) {
   const serializedIdentity = JSON.stringify(identity);
-  if (!writeStoredValueIfChanged(GMAIL_IDENTITY_STORAGE_KEY, serializedIdentity)) {
+  if (!writeStoredValueIfChanged(getScopedGmailIdentityStorageKey(), serializedIdentity)) {
     return;
   }
   emitGmailConnectionUpdated();
 }
 
 function clearStoredGmailState(options?: { emitEvent?: boolean }) {
-  removePersistedValue("localStorage", GMAIL_SESSION_STORAGE_KEY);
-  removePersistedValue("localStorage", GMAIL_IDENTITY_STORAGE_KEY);
+  removePersistedValue("localStorage", getScopedGmailSessionStorageKey());
+  removePersistedValue("localStorage", getScopedGmailIdentityStorageKey());
   removePersistedValue("sessionStorage", GMAIL_OAUTH_STATE_KEY);
   removePersistedValue("sessionStorage", GMAIL_OAUTH_VERIFIER_KEY);
   if (options?.emitEvent !== false) {
@@ -688,85 +697,88 @@ export async function resolveGmailConnectionState(expectedEmail?: string, requir
   }
 
   const resolutionPromise = (async () => {
-  const context = getCanonicalIntegrationContext();
-  let canonicalRowFound = false;
-  let canonicalProviderValue: string | null = null;
-  let canonicalConnectionStatus: string | null = null;
-  let canonicalScope = "";
-  let canonicalHasIdentity = false;
-  let canonicalHasAccessToken = false;
-  let canonicalHasRequiredScopes = false;
-  let canonicalRejectReason: string | null = "no_canonical_context";
-  if (context) {
-    const { data } = await context.supabase
-      .from("provider_integrations")
-      .select(
-        "provider,connection_status,access_token,refresh_token,expires_at,scope,provider_account_id,provider_account_email,provider_display_name,identity"
-      )
-      .eq("org_id", context.orgId)
-      .eq("provider", GMAIL_PROVIDER_NAME)
-      .maybeSingle();
+    const context = getCanonicalIntegrationContext();
+    let canonicalRowFound = false;
+    let canonicalProviderValue: string | null = null;
+    let canonicalConnectionStatus: string | null = null;
+    let canonicalScope = "";
+    let canonicalHasIdentity = false;
+    let canonicalHasAccessToken = false;
+    let canonicalHasRequiredScopes = false;
+    let canonicalRejectReason: string | null = "no_canonical_context";
+    if (context) {
+      const { data } = await context.supabase
+        .from("provider_integrations")
+        .select(
+          "provider,connection_status,access_token,refresh_token,expires_at,scope,provider_account_id,provider_account_email,provider_display_name,identity"
+        )
+        .eq("org_id", context.orgId)
+        .eq("provider", GMAIL_PROVIDER_NAME)
+        .maybeSingle();
 
-    canonicalRowFound = Boolean(data);
-    canonicalProviderValue = typeof data?.provider === "string" ? data.provider : null;
-    canonicalConnectionStatus = typeof data?.connection_status === "string" ? data.connection_status : null;
-    canonicalScope = typeof data?.scope === "string" ? data.scope : "";
-    canonicalHasIdentity = Boolean(data?.identity && typeof data.identity === "object");
-    canonicalHasAccessToken = typeof data?.access_token === "string" && data.access_token.length > 0;
-    canonicalHasRequiredScopes = requiredScopes.length === 0 || hasAllScopes(canonicalScope, requiredScopes);
+      canonicalRowFound = Boolean(data);
+      canonicalProviderValue = typeof data?.provider === "string" ? data.provider : null;
+      canonicalConnectionStatus = typeof data?.connection_status === "string" ? data.connection_status : null;
+      canonicalScope = typeof data?.scope === "string" ? data.scope : "";
+      canonicalHasIdentity = Boolean(data?.identity && typeof data.identity === "object");
+      canonicalHasAccessToken = typeof data?.access_token === "string" && data.access_token.length > 0;
+      canonicalHasRequiredScopes = requiredScopes.length === 0 || hasAllScopes(canonicalScope, requiredScopes);
 
-    console.info("[gmail] canonical provider read", {
-      orgId: context.orgId,
-      rowFound: canonicalRowFound,
-      provider: canonicalProviderValue,
-      connectionStatus: canonicalConnectionStatus,
-      requiredScopes,
-      canonicalScopes: canonicalScope.split(/\s+/).filter(Boolean),
-      scopeCheckResult: canonicalHasRequiredScopes,
-      scopesPresent: canonicalHasRequiredScopes,
-      identityPresent: canonicalHasIdentity,
-      tokenPresent: canonicalHasAccessToken,
-    });
+      console.info("[gmail] canonical provider read", {
+        orgId: context.orgId,
+        rowFound: canonicalRowFound,
+        provider: canonicalProviderValue,
+        connectionStatus: canonicalConnectionStatus,
+        requiredScopes,
+        canonicalScopes: canonicalScope.split(/\s+/).filter(Boolean),
+        scopeCheckResult: canonicalHasRequiredScopes,
+        scopesPresent: canonicalHasRequiredScopes,
+        identityPresent: canonicalHasIdentity,
+        tokenPresent: canonicalHasAccessToken,
+      });
 
-    if (data?.provider === GMAIL_PROVIDER_NAME && data.connection_status !== "not_connected") {
-      canonicalRejectReason = null;
-      const expiresAt = typeof data.expires_at === "string" ? Date.parse(data.expires_at) : null;
-      const accessToken = typeof data.access_token === "string" ? data.access_token : null;
-      const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : null;
-      const scope = typeof data.scope === "string" ? data.scope : null;
-      if (accessToken || refreshToken) {
-        saveStoredGmailSession({
-          accessToken: accessToken || loadRawStoredGmailSession()?.accessToken || "",
-          refreshToken: refreshToken || undefined,
-          expiresAt: expiresAt && Number.isFinite(expiresAt) ? expiresAt : Date.now() - 1000,
-          scope: scope || undefined,
-          obtainedAt: new Date().toISOString(),
-        });
-      }
-      if (data.identity && typeof data.identity === "object") {
-        const identity = data.identity as GmailConnectedIdentity;
-        const normalizedEmail = normalizeGmailEmail(identity.normalizedEmail || identity.email);
-        if (identity.id && normalizedEmail) {
-          saveStoredGmailIdentity({
-            ...identity,
-            email: normalizedEmail,
-            normalizedEmail,
+      if (data?.provider === GMAIL_PROVIDER_NAME && data.connection_status !== "not_connected") {
+        canonicalRejectReason = null;
+        const expiresAt = typeof data.expires_at === "string" ? Date.parse(data.expires_at) : null;
+        const accessToken = typeof data.access_token === "string" ? data.access_token : null;
+        const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : null;
+        const scope = typeof data.scope === "string" ? data.scope : null;
+        if (accessToken || refreshToken) {
+          saveStoredGmailSession({
+            accessToken: accessToken || loadRawStoredGmailSession()?.accessToken || "",
+            refreshToken: refreshToken || undefined,
+            expiresAt: expiresAt && Number.isFinite(expiresAt) ? expiresAt : Date.now() - 1000,
+            scope: scope || undefined,
+            obtainedAt: new Date().toISOString(),
           });
         }
+        if (data.identity && typeof data.identity === "object") {
+          const identity = data.identity as GmailConnectedIdentity;
+          const normalizedEmail = normalizeGmailEmail(identity.normalizedEmail || identity.email);
+          if (identity.id && normalizedEmail) {
+            saveStoredGmailIdentity({
+              ...identity,
+              email: normalizedEmail,
+              normalizedEmail,
+            });
+          }
+        }
+        if (!canonicalHasRequiredScopes) {
+          canonicalRejectReason = "missing_required_scope";
+        } else if (!canonicalHasAccessToken) {
+          canonicalRejectReason = "missing_access_token";
+        }
+      } else {
+        clearStoredGmailState({ emitEvent: false });
+        if (!canonicalRowFound) {
+          canonicalRejectReason = "provider_row_not_found";
+        } else if (data?.provider !== GMAIL_PROVIDER_NAME) {
+          canonicalRejectReason = "provider_mismatch";
+        } else if (data.connection_status === "not_connected") {
+          canonicalRejectReason = "connection_status_not_connected";
+        }
       }
-      if (!canonicalHasRequiredScopes) {
-        canonicalRejectReason = "missing_required_scope";
-      } else if (!canonicalHasAccessToken) {
-        canonicalRejectReason = "missing_access_token";
-      }
-    } else if (!canonicalRowFound) {
-      canonicalRejectReason = "provider_row_not_found";
-    } else if (data?.provider !== GMAIL_PROVIDER_NAME) {
-      canonicalRejectReason = "provider_mismatch";
-    } else if (data.connection_status === "not_connected") {
-      canonicalRejectReason = "connection_status_not_connected";
     }
-  }
 
   let state = getGmailConnectionState(expectedEmail);
   let refreshAttempted = false;
@@ -795,53 +807,56 @@ export async function resolveGmailConnectionState(expectedEmail?: string, requir
     } satisfies GmailConnectionState;
   }
 
-  const finalAvailable = Boolean(
-    (canonicalConnectionStatus === "connected" || !canonicalRowFound) && effectiveHasRequiredScopes && effectiveHasAccessToken && !state.stale
-  );
-  const finalRejectReason = finalAvailable
-    ? null
-    : state.stale
-      ? "stale_connected_email"
-      : canonicalConnectionStatus !== "connected" && canonicalRowFound
-        ? canonicalRejectReason ?? "connection_status_not_connected"
-        : !effectiveHasRequiredScopes
-          ? "missing_required_scope"
-          : !effectiveHasAccessToken
-            ? "missing_access_token"
-            : canonicalRejectReason ?? "not_available";
+    const finalAvailable = Boolean(
+      (!context || canonicalConnectionStatus === "connected") &&
+        effectiveHasRequiredScopes &&
+        effectiveHasAccessToken &&
+        !state.stale
+    );
+    const finalRejectReason = finalAvailable
+      ? null
+      : state.stale
+        ? "stale_connected_email"
+        : context && canonicalConnectionStatus !== "connected"
+          ? canonicalRejectReason ?? "connection_status_not_connected"
+          : !effectiveHasRequiredScopes
+            ? "missing_required_scope"
+            : !effectiveHasAccessToken
+              ? "missing_access_token"
+              : canonicalRejectReason ?? "not_available";
 
-  lastGmailAvailabilityDebugSnapshot = {
-    providerRowFound: canonicalRowFound,
-    providerValue: canonicalProviderValue,
-    connectionStatus: canonicalConnectionStatus,
-    scopesPresent: effectiveHasRequiredScopes,
-    tokenPresent: effectiveHasAccessToken,
-    identityPresent: canonicalHasIdentity,
-    finalAvailable,
-    rejectionReason: finalRejectReason,
-  };
+    lastGmailAvailabilityDebugSnapshot = {
+      providerRowFound: canonicalRowFound,
+      providerValue: canonicalProviderValue,
+      connectionStatus: canonicalConnectionStatus,
+      scopesPresent: effectiveHasRequiredScopes,
+      tokenPresent: effectiveHasAccessToken,
+      identityPresent: canonicalHasIdentity,
+      finalAvailable,
+      rejectionReason: finalRejectReason,
+    };
 
-  console.info("[gmail] availability result", {
-    providerRowFound: canonicalRowFound,
-    providerValue: canonicalProviderValue,
-    connectionStatus: canonicalConnectionStatus,
-    scopesPresent: effectiveHasRequiredScopes,
-    identityPresent: canonicalHasIdentity,
-    tokenPresent: effectiveHasAccessToken,
-    finalAvailable,
-    rejectionReason: finalRejectReason,
-    refreshAttempted,
-    refreshSucceeded,
-  });
+    console.info("[gmail] availability result", {
+      providerRowFound: canonicalRowFound,
+      providerValue: canonicalProviderValue,
+      connectionStatus: canonicalConnectionStatus,
+      scopesPresent: effectiveHasRequiredScopes,
+      identityPresent: canonicalHasIdentity,
+      tokenPresent: effectiveHasAccessToken,
+      finalAvailable,
+      rejectionReason: finalRejectReason,
+      refreshAttempted,
+      refreshSucceeded,
+    });
 
-  if ((state.connected || reconnectRequired) && !finalAvailable) {
-    return {
-      ...state,
-      connected: false,
-      status: "reconnect_required",
-    } satisfies GmailConnectionState;
-  }
-  return state;
+    if ((state.connected || reconnectRequired) && !finalAvailable) {
+      return {
+        ...state,
+        connected: false,
+        status: "reconnect_required",
+      } satisfies GmailConnectionState;
+    }
+    return state;
   })();
 
   gmailResolutionCache.set(cacheKey, resolutionPromise);

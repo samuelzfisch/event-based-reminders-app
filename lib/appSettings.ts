@@ -1,5 +1,6 @@
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
-import { migrateLegacyPersistedValue, readPersistedValue, writePersistedValue } from "./browserStorage";
+import { readPersistedValue, writePersistedValue } from "./browserStorage";
+import { getScopedStorageKey } from "./clientPersistence";
 import { getCachedOrgContext } from "./orgBootstrap";
 import { getLocalUserKey } from "./userKey";
 
@@ -23,7 +24,6 @@ type StoredAppSettingsRecord = {
 
 export const APP_SETTINGS_STORAGE_KEY = "event-based-reminders-app:app-settings";
 export const APP_SETTINGS_UPDATED_EVENT = "event-based-reminders-app:app-settings-updated";
-const LEGACY_APP_SETTINGS_STORAGE_KEYS = ["standalone-plans:app-settings"];
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultReminderTime: "",
@@ -69,8 +69,8 @@ export function areAppSettingsEqual(left: AppSettings, right: AppSettings) {
   return JSON.stringify(normalizeAppSettings(left)) === JSON.stringify(normalizeAppSettings(right));
 }
 
-function migrateAppSettingsStorage() {
-  migrateLegacyPersistedValue("localStorage", APP_SETTINGS_STORAGE_KEY, LEGACY_APP_SETTINGS_STORAGE_KEYS);
+function getAppSettingsStorageKey() {
+  return getScopedStorageKey(APP_SETTINGS_STORAGE_KEY);
 }
 
 function getTimestamp(value: string | null | undefined) {
@@ -92,8 +92,7 @@ function parseStoredAppSettingsRecord(raw: string): StoredAppSettingsRecord | nu
 
 function loadStoredAppSettingsRecord() {
   if (typeof window === "undefined") return null;
-  migrateAppSettingsStorage();
-  const raw = readPersistedValue("localStorage", APP_SETTINGS_STORAGE_KEY, LEGACY_APP_SETTINGS_STORAGE_KEYS);
+  const raw = readPersistedValue("localStorage", getAppSettingsStorageKey());
   if (!raw) return null;
   return parseStoredAppSettingsRecord(raw);
 }
@@ -104,9 +103,8 @@ export function loadAppSettings(): AppSettings {
 
 function cacheAppSettings(normalized: AppSettings, updatedAt = new Date().toISOString()) {
   if (typeof window === "undefined") return false;
-  migrateAppSettingsStorage();
   const serialized = JSON.stringify({ ...normalized, updatedAt });
-  const didWrite = writePersistedValue("localStorage", APP_SETTINGS_STORAGE_KEY, serialized);
+  const didWrite = writePersistedValue("localStorage", getAppSettingsStorageKey(), serialized);
   if (!didWrite) return false;
   window.dispatchEvent(new CustomEvent(APP_SETTINGS_UPDATED_EVENT, { detail: normalized }));
   return true;
@@ -153,36 +151,6 @@ async function persistAppSettingsToSupabase(normalized: AppSettings, updatedAt: 
     },
     { onConflict: "user_key" }
   );
-}
-
-async function loadLegacyAppSettingsFromSupabase() {
-  const supabase = getSupabaseBrowserClient();
-  const userKey = getLocalUserKey();
-
-  if (!supabase || !userKey) return null;
-
-  const { data, error } = await supabase
-    .from("user_settings")
-    .select(
-      "default_reminder_time,default_press_release_time,email_signature_enabled,email_signature_text,outlook_account_email,email_handling_mode,updated_at"
-    )
-    .eq("user_key", userKey)
-    .maybeSingle();
-
-  if (error || !data) return null;
-
-  return {
-    settings: normalizeAppSettings({
-      defaultReminderTime: data.default_reminder_time,
-      defaultPressReleaseTime: data.default_press_release_time,
-      emailSignatureEnabled: data.email_signature_enabled,
-      emailSignatureText: data.email_signature_text,
-      outlookAccountEmail: data.outlook_account_email,
-      outlookConnectionStatus: loadAppSettings().outlookConnectionStatus,
-      emailHandlingMode: data.email_handling_mode,
-    }),
-    updatedAt: typeof data.updated_at === "string" ? data.updated_at : "",
-  } satisfies StoredAppSettingsRecord;
 }
 
 function hasMeaningfulSettings(record: StoredAppSettingsRecord | null) {
@@ -235,24 +203,7 @@ export async function hydrateAppSettingsFromSupabase() {
       return normalized;
     }
 
-    const legacyRemoteRecord = await loadLegacyAppSettingsFromSupabase();
-    const localUpdatedAt = getTimestamp(localRecord?.updatedAt);
-    const legacyRemoteUpdatedAt = getTimestamp(legacyRemoteRecord?.updatedAt);
-    const sourceRecord =
-      hasMeaningfulSettings(localRecord) && localUpdatedAt >= legacyRemoteUpdatedAt
-        ? localRecord
-        : hasMeaningfulSettings(legacyRemoteRecord)
-          ? legacyRemoteRecord
-          : hasMeaningfulSettings(localRecord)
-            ? localRecord
-            : null;
-
-    if (sourceRecord) {
-      await persistAppSettingsToSupabase(sourceRecord.settings, sourceRecord.updatedAt || new Date().toISOString());
-      return sourceRecord.settings;
-    }
-
-    return loadAppSettings();
+    return hasMeaningfulSettings(localRecord) && localRecord ? localRecord.settings : loadAppSettings();
   }
 
   if (!userKey) return loadAppSettings();

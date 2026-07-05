@@ -47,7 +47,7 @@ export function InlineAuthCard({
   }
 
   return (
-    <div className="rounded-2xl border bg-white p-6 shadow-sm">
+    <div className="rounded-2xl border bg-white p-4 shadow-sm">
       <div>
         <h1 className={`${compact ? "text-xl" : "text-2xl"} font-semibold text-gray-900`}>{title}</h1>
         <p className="mt-2 text-sm text-gray-600">{description}</p>

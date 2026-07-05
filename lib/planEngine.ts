@@ -16,6 +16,7 @@ export type TemplateItem = {
   dateBasis?: PlanDateBasis;
   rowType?: "reminder" | "email" | "calendar_event";
   reminderTime?: string;
+  timeZone?: string;
   emailDraft?: {
     to?: string[];
     cc?: string[];
@@ -149,6 +150,7 @@ export function computeItems(
       offsetDays: tpl.offsetDays,
       dateBasis: preserved?.dateBasis ?? tpl.dateBasis ?? "event",
       reminderTime: preserved?.reminderTime ?? tpl.reminderTime,
+      timeZone: preserved?.timeZone ?? tpl.timeZone,
       rawDueDate: raw,
       dueDate: due,
       customDueDate: preserved?.customDueDate,

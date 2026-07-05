@@ -1,8 +1,24 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #edf4f8;
+  --foreground: #172033;
+  --app-bg: #edf4f8;
+  --app-bg-soft: #f4f8fb;
+  --app-surface: #ffffff;
+  --app-surface-muted: #f2f6f9;
+  --app-control: #ffffff;
+  --app-control-hover: #f8fbfd;
+  --app-border: #cbd8e5;
+  --app-border-soft: #dbe5ee;
+  --app-primary: #4f7fb8;
+  --app-primary-hover: #416f9f;
+  --app-primary-soft: #e4eff8;
+  --app-focus: #0b72e7;
+  --app-primary-ring: rgba(79, 127, 184, 0.28);
+  --app-text: #172033;
+  --app-muted: #5e6f84;
+  --app-shadow: 0 18px 44px -34px rgba(38, 72, 104, 0.28);
 }
 
 @theme inline {
@@ -14,13 +30,306 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #edf4f8;
+    --foreground: #172033;
   }
+}
+
+html {
+  font-size: 10px;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+.bg-white {
+  background-color: #ffffff !important;
+}
+
+.bg-white\/95 {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.bg-white\/90 {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.bg-gray-50,
+.bg-slate-50 {
+  background-color: var(--app-surface-muted) !important;
+}
+
+.hover\:bg-gray-50:hover,
+.hover\:bg-slate-50:hover {
+  background-color: #edf4f8 !important;
+}
+
+.border-gray-100,
+.border-gray-200,
+.border-gray-300,
+.border-slate-100,
+.border-slate-200,
+.border-slate-300 {
+  border-color: var(--app-border-soft) !important;
+}
+
+.divide-y > :not([hidden]) ~ :not([hidden]),
+.divide-x > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--app-border-soft) !important;
+}
+
+.text-gray-900,
+.text-slate-900,
+.text-slate-950 {
+  color: var(--app-text) !important;
+}
+
+.text-gray-700,
+.text-slate-700 {
+  color: #334155 !important;
+}
+
+.text-gray-600,
+.text-slate-600,
+.text-gray-500,
+.text-slate-500 {
+  color: var(--app-muted) !important;
+}
+
+.bg-blue-600 {
+  background-color: var(--app-primary) !important;
+}
+
+.hover\:bg-blue-700:hover {
+  background-color: var(--app-primary-hover) !important;
+}
+
+.text-blue-700,
+.text-blue-800 {
+  color: #315f92 !important;
+}
+
+.bg-blue-50,
+.bg-blue-50\/80 {
+  background-color: var(--app-primary-soft) !important;
+}
+
+.border-blue-600,
+.border-blue-500,
+.border-blue-400,
+.border-blue-300,
+.border-blue-200 {
+  border-color: #a9c5df !important;
+}
+
+.ring-blue-300\/80,
+.ring-blue-200,
+.ring-blue-100 {
+  --tw-ring-color: var(--app-primary-ring) !important;
+}
+
+.focus\:ring-blue-500:focus,
+.focus\:ring-blue-400\/30:focus,
+.focus\:ring-blue-200:focus {
+  --tw-ring-color: var(--app-primary-ring) !important;
+}
+
+@keyframes plans-new-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.985);
+  }
+
+  65% {
+    opacity: 1;
+    transform: translateY(2px) scale(1.002);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.plans-new-row-enter {
+  animation: plans-new-row-enter 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: top center;
+}
+
+@keyframes plans-editor-backdrop-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.plans-editor-backdrop-enter {
+  animation: plans-editor-backdrop-enter 900ms ease forwards;
+}
+
+.plans-editor-dim-target {
+  transition:
+    opacity 2800ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+[data-plan-builder] input,
+[data-plan-builder] select,
+[data-plan-builder] textarea,
+[data-plan-builder] button,
+.plans-token-input-shell {
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease;
+}
+
+[data-plan-builder] input:focus,
+[data-plan-builder] select:focus,
+[data-plan-builder] textarea:focus {
+  border-color: var(--app-focus) !important;
+  box-shadow:
+    0 0 0 1px var(--app-focus),
+    0 0 0 4px rgba(11, 114, 231, 0.16),
+    0 10px 24px -18px rgba(11, 114, 231, 0.42) !important;
+}
+
+[data-plan-builder] label:focus-within,
+[data-plan-builder] .plans-token-input-shell:focus-within {
+  border-color: var(--app-focus) !important;
+  box-shadow:
+    0 0 0 1px var(--app-focus),
+    0 0 0 4px rgba(11, 114, 231, 0.14),
+    0 10px 24px -18px rgba(11, 114, 231, 0.36);
+}
+
+[data-plan-builder] button:focus-visible,
+[data-plan-builder] [tabindex]:focus-visible {
+  border-color: var(--app-focus) !important;
+  outline: none !important;
+  box-shadow:
+    0 0 0 1px var(--app-focus),
+    0 0 0 4px rgba(11, 114, 231, 0.14) !important;
+}
+
+[data-builder-row-card] {
+  isolation: isolate;
+  transition:
+    opacity 2800ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease !important;
+}
+
+[data-builder-row-card]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 20px;
+  background: transparent;
+  filter: none;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 160ms ease,
+    filter 160ms ease,
+    background-color 160ms ease;
+}
+
+[data-builder-row-card]:focus-within {
+  border-color: var(--app-focus) !important;
+  background-color: #ffffff !important;
+  box-shadow:
+    0 0 0 1px var(--app-focus),
+    0 0 0 5px rgba(11, 114, 231, 0.12),
+    0 18px 34px -24px rgba(11, 74, 143, 0.28) !important;
+}
+
+[data-builder-row-card]:focus-within::before {
+  background: transparent;
+  filter: none;
+  opacity: 0;
+}
+
+[data-plan-builder] [data-builder-row-title-input]:focus {
+  border-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+.home-hero-example > div {
+  padding: 0.75rem;
+}
+
+.home-hero-example > div > div {
+  padding: 1rem;
+}
+
+.home-hero-example > div > div > div:nth-child(2) {
+  margin-top: 0.875rem;
+}
+
+.home-hero-example > div > div > div:nth-child(3) {
+  margin-top: 1.25rem;
+}
+
+@media (min-width: 720px) {
+  .home-hero-grid {
+    grid-template-columns: minmax(0, 1fr) 270px;
+    grid-template-areas:
+      "intro example"
+      "metrics metrics";
+    align-items: start;
+  }
+
+  .home-hero-intro {
+    grid-area: intro;
+  }
+
+  .home-hero-example {
+    grid-area: example;
+    align-self: start;
+  }
+
+  .home-hero-title {
+    max-width: 21rem;
+    font-size: 30px;
+  }
+
+  .home-hero-copy {
+    max-width: 22rem;
+  }
+
+  .home-metrics-grid {
+    grid-area: metrics;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 640px) {
+  .home-workflow-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-integrations-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 900px) {
+  .home-workflow-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .home-integrations-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }

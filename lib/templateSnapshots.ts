@@ -1,4 +1,5 @@
 import type { PlanDateBasis, PlanRowType, PlanType, WeekendRule } from "../types/plan";
+import { normalizeRecipientEntries, type RecipientEntry } from "./recipientGroups";
 
 export type TemplateSnapshotRow = {
   id: string;
@@ -8,10 +9,11 @@ export type TemplateSnapshotRow = {
   dateBasis?: PlanDateBasis;
   rowType: PlanRowType;
   reminderTime?: string;
+  timeZone?: string;
   emailDraft?: {
-    to?: string[];
-    cc?: string[];
-    bcc?: string[];
+    to?: Array<RecipientEntry | string>;
+    cc?: Array<RecipientEntry | string>;
+    bcc?: Array<RecipientEntry | string>;
     subject?: string;
     body?: string;
   };
@@ -23,7 +25,7 @@ export type TemplateSnapshotRow = {
     isAllDay?: boolean;
   };
   meetingDraft?: {
-    attendees?: string[];
+    attendees?: Array<RecipientEntry | string>;
     location?: string;
     durationMinutes?: number;
     useCustomEnd?: boolean;
@@ -42,8 +44,9 @@ export type TemplateSnapshotTemplate = {
   templateMode?: "template" | "custom";
   noEventDate?: boolean;
   weekendRule: WeekendRule;
-  anchors: Array<{ key: string; value: string }>;
+  anchors: Array<{ key: string; value: string; isImportant?: boolean; lastUpdatedAt?: string | null }>;
   items: TemplateSnapshotRow[];
+  lastDynamicFieldsExportAt?: string | null;
 };
 
 export type TemplateSnapshotFile = {
@@ -74,10 +77,6 @@ function normalizeWeekendRule(value: unknown): WeekendRule {
   return value === "none" ? "none" : "prior_business_day";
 }
 
-function normalizeStringArray(value: unknown) {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-}
-
 function parseSnapshotRow(value: unknown): TemplateSnapshotRow | null {
   if (!isObject(value) || typeof value.id !== "string" || typeof value.title !== "string") return null;
   return {
@@ -88,11 +87,12 @@ function parseSnapshotRow(value: unknown): TemplateSnapshotRow | null {
     dateBasis: normalizeDateBasis(value.dateBasis),
     rowType: normalizeRowType(value.rowType),
     reminderTime: typeof value.reminderTime === "string" ? value.reminderTime : undefined,
+    timeZone: typeof value.timeZone === "string" ? value.timeZone : undefined,
     emailDraft: isObject(value.emailDraft)
       ? {
-          to: normalizeStringArray(value.emailDraft.to),
-          cc: normalizeStringArray(value.emailDraft.cc),
-          bcc: normalizeStringArray(value.emailDraft.bcc),
+          to: normalizeRecipientEntries(value.emailDraft.to),
+          cc: normalizeRecipientEntries(value.emailDraft.cc),
+          bcc: normalizeRecipientEntries(value.emailDraft.bcc),
           subject: typeof value.emailDraft.subject === "string" ? value.emailDraft.subject : "",
           body: typeof value.emailDraft.body === "string" ? value.emailDraft.body : "",
         }
@@ -110,7 +110,7 @@ function parseSnapshotRow(value: unknown): TemplateSnapshotRow | null {
       : undefined,
     meetingDraft: isObject(value.meetingDraft)
       ? {
-          attendees: normalizeStringArray(value.meetingDraft.attendees),
+          attendees: normalizeRecipientEntries(value.meetingDraft.attendees),
           location: typeof value.meetingDraft.location === "string" ? value.meetingDraft.location : "",
           durationMinutes:
             typeof value.meetingDraft.durationMinutes === "number" ? value.meetingDraft.durationMinutes : undefined,
@@ -136,6 +136,13 @@ function parseSnapshotTemplate(value: unknown): TemplateSnapshotTemplate | null 
         .map((anchor) => ({
           key: typeof anchor.key === "string" ? anchor.key : "",
           value: typeof anchor.value === "string" ? anchor.value : "",
+          isImportant: typeof anchor.isImportant === "boolean" ? anchor.isImportant : false,
+          lastUpdatedAt:
+            typeof anchor.lastUpdatedAt === "string"
+              ? anchor.lastUpdatedAt
+              : anchor.lastUpdatedAt === null
+                ? null
+                : null,
         }))
         .filter((anchor) => anchor.key)
     : [];
@@ -151,6 +158,12 @@ function parseSnapshotTemplate(value: unknown): TemplateSnapshotTemplate | null 
     weekendRule: normalizeWeekendRule(value.weekendRule),
     anchors,
     items,
+    lastDynamicFieldsExportAt:
+      typeof value.lastDynamicFieldsExportAt === "string"
+        ? value.lastDynamicFieldsExportAt
+        : value.lastDynamicFieldsExportAt === null
+          ? null
+          : null,
   };
 }
 

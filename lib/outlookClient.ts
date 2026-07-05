@@ -6,6 +6,7 @@ import {
   removePersistedValue,
   writePersistedValue,
 } from "./browserStorage";
+import { getScopedStorageKey } from "./clientPersistence";
 import { getCachedOrgContext } from "./orgBootstrap";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabaseClient";
 
@@ -118,9 +119,7 @@ type OutlookEventUpdateInput = {
 };
 
 const OUTLOOK_SESSION_STORAGE_KEY = "event_based_reminders_app_outlook_session_v1";
-const LEGACY_OUTLOOK_SESSION_STORAGE_KEYS = ["standalone_plans_outlook_session_v1"];
 const OUTLOOK_IDENTITY_STORAGE_KEY = "event_based_reminders_app_outlook_identity_v1";
-const LEGACY_OUTLOOK_IDENTITY_STORAGE_KEYS = ["standalone_plans_outlook_identity_v1"];
 const OUTLOOK_OAUTH_STATE_KEY = "event_based_reminders_app_outlook_oauth_state_v1";
 const LEGACY_OUTLOOK_OAUTH_STATE_KEYS = ["standalone_plans_outlook_oauth_state_v1"];
 const OUTLOOK_OAUTH_VERIFIER_KEY = "event_based_reminders_app_outlook_oauth_verifier_v1";
@@ -158,9 +157,12 @@ function getOutlookResolutionCacheKey(expectedEmail?: string, requiredScopes: st
   });
 }
 
-function migrateOutlookStorage() {
-  migrateLegacyPersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, LEGACY_OUTLOOK_SESSION_STORAGE_KEYS);
-  migrateLegacyPersistedValue("localStorage", OUTLOOK_IDENTITY_STORAGE_KEY, LEGACY_OUTLOOK_IDENTITY_STORAGE_KEYS);
+function getScopedOutlookSessionStorageKey() {
+  return getScopedStorageKey(OUTLOOK_SESSION_STORAGE_KEY);
+}
+
+function getScopedOutlookIdentityStorageKey() {
+  return getScopedStorageKey(OUTLOOK_IDENTITY_STORAGE_KEY);
 }
 
 function migrateOutlookOAuthStorage() {
@@ -264,8 +266,7 @@ function getOutlookSessionExpiryDebug(rawSession: Partial<OutlookSession> | null
 function loadRawStoredOutlookSession() {
   if (typeof window === "undefined") return null;
   try {
-    migrateOutlookStorage();
-    const raw = readPersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, LEGACY_OUTLOOK_SESSION_STORAGE_KEYS);
+    const raw = readPersistedValue("localStorage", getScopedOutlookSessionStorageKey());
     if (!raw) return null;
     return JSON.parse(raw) as Partial<OutlookSession>;
   } catch {
@@ -276,8 +277,7 @@ function loadRawStoredOutlookSession() {
 function loadStoredOutlookSession(requiredScopes: string[] = []): OutlookSession | null {
   if (typeof window === "undefined") return null;
   try {
-    migrateOutlookStorage();
-    const raw = readPersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, LEGACY_OUTLOOK_SESSION_STORAGE_KEYS);
+    const raw = readPersistedValue("localStorage", getScopedOutlookSessionStorageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as OutlookSession;
     if (!parsed.accessToken) return null;
@@ -292,8 +292,7 @@ function loadStoredOutlookSession(requiredScopes: string[] = []): OutlookSession
 
 function saveStoredOutlookSession(session: OutlookSession) {
   if (typeof window === "undefined") return;
-  migrateOutlookStorage();
-  const didWrite = writePersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, JSON.stringify(session));
+  const didWrite = writePersistedValue("localStorage", getScopedOutlookSessionStorageKey(), JSON.stringify(session));
   if (!didWrite) return;
   emitOutlookConnectionUpdated();
 }
@@ -323,8 +322,7 @@ function saveOutlookSessionFromTokenPayload(payload: {
 function loadStoredOutlookIdentity(): OutlookConnectedIdentity | null {
   if (typeof window === "undefined") return null;
   try {
-    migrateOutlookStorage();
-    const raw = readPersistedValue("localStorage", OUTLOOK_IDENTITY_STORAGE_KEY, LEGACY_OUTLOOK_IDENTITY_STORAGE_KEYS);
+    const raw = readPersistedValue("localStorage", getScopedOutlookIdentityStorageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as OutlookConnectedIdentity;
     if (!parsed.id) return null;
@@ -341,16 +339,15 @@ function loadStoredOutlookIdentity(): OutlookConnectedIdentity | null {
 
 function saveStoredOutlookIdentity(identity: OutlookConnectedIdentity) {
   if (typeof window === "undefined") return;
-  migrateOutlookStorage();
-  const didWrite = writePersistedValue("localStorage", OUTLOOK_IDENTITY_STORAGE_KEY, JSON.stringify(identity));
+  const didWrite = writePersistedValue("localStorage", getScopedOutlookIdentityStorageKey(), JSON.stringify(identity));
   if (!didWrite) return;
   emitOutlookConnectionUpdated();
 }
 
 function clearStoredOutlookState(options?: { emitEvent?: boolean }) {
   if (typeof window === "undefined") return;
-  const removedSession = removePersistedValue("localStorage", OUTLOOK_SESSION_STORAGE_KEY, LEGACY_OUTLOOK_SESSION_STORAGE_KEYS);
-  const removedIdentity = removePersistedValue("localStorage", OUTLOOK_IDENTITY_STORAGE_KEY, LEGACY_OUTLOOK_IDENTITY_STORAGE_KEYS);
+  const removedSession = removePersistedValue("localStorage", getScopedOutlookSessionStorageKey());
+  const removedIdentity = removePersistedValue("localStorage", getScopedOutlookIdentityStorageKey());
   const removedOAuthState = removePersistedValue("sessionStorage", OUTLOOK_OAUTH_STATE_KEY, LEGACY_OUTLOOK_OAUTH_STATE_KEYS);
   const removedOAuthVerifier = removePersistedValue(
     "sessionStorage",
@@ -571,26 +568,6 @@ function hydrateLocalOutlookStateFromCanonical(record: CanonicalOutlookIntegrati
   }
 }
 
-async function syncCanonicalOutlookIntegrationFromLocal() {
-  const context = getCanonicalIntegrationContext();
-  if (!context) return;
-
-  const canonicalRecord = await loadCanonicalOutlookIntegration();
-  if (canonicalRecord) return;
-
-  const session = loadStoredOutlookSession();
-  const identity = loadStoredOutlookIdentity();
-  const localState = getOutlookConnectionState();
-
-  if (!session && !identity && localState.status === "not_connected") return;
-
-  await persistCanonicalOutlookIntegration({
-    session,
-    identity,
-    status: localState.status,
-  });
-}
-
 async function ensureCanonicalOutlookIntegrationSynchronized() {
   const context = getCanonicalIntegrationContext();
   if (!context) return;
@@ -601,7 +578,7 @@ async function ensureCanonicalOutlookIntegrationSynchronized() {
     return;
   }
 
-  await syncCanonicalOutlookIntegrationFromLocal();
+  clearStoredOutlookState({ emitEvent: false });
 }
 
 function parseRecipients(raw: string[] | undefined) {

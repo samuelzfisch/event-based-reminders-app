@@ -4,9 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  clearExecutionHistory,
+  deleteExecutionHistoryRecord,
+  deleteExecutionHistoryRecords,
   EXECUTION_HISTORY_UPDATED_EVENT,
   getExecutionHistoryModifyState,
   getExecutionHistoryRecallState,
+  listCachedExecutionHistory,
   listExecutionHistory,
   updateExecutionHistoryRecord,
   type ExecutionHistoryRecord,
@@ -209,6 +213,18 @@ function formatTimelineItemType(record: ExecutionHistoryRecord) {
     return "Email";
   }
   return formatItemTypeLabel(record.itemType);
+}
+
+function IconTrash() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18" />
+      <path d="M8 6V4.5h8V6" />
+      <path d="M6.5 6l1 13.5h9L17.5 6" />
+      <path d="M10 10.5v5" />
+      <path d="M14 10.5v5" />
+    </svg>
+  );
 }
 
 function getItemTypeDisplayLabel(record: ExecutionHistoryRecord) {
@@ -1048,8 +1064,8 @@ function getPlanModifyAvailabilityMessage(items: PlanReschedulePreviewItem[]) {
 export default function HistoryPage() {
   const exposeModifyUI = true;
   const { authEnabled, currentUser, currentOrgId } = useAuthContext();
-  const [records, setRecords] = useState<ExecutionHistoryRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [records, setRecords] = useState<ExecutionHistoryRecord[]>(() => listCachedExecutionHistory());
+  const [loading, setLoading] = useState(() => listCachedExecutionHistory().length === 0);
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
   const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
@@ -1061,11 +1077,18 @@ export default function HistoryPage() {
   const [planModifyWeekendRules, setPlanModifyWeekendRules] = useState<Record<string, WeekendRule>>({});
   const [pendingPlanRecalls, setPendingPlanRecalls] = useState<Record<string, boolean>>({});
   const [pendingItemRecalls, setPendingItemRecalls] = useState<Record<string, boolean>>({});
+  const [pendingPlanDeletes, setPendingPlanDeletes] = useState<Record<string, boolean>>({});
+  const [pendingItemDeletes, setPendingItemDeletes] = useState<Record<string, boolean>>({});
   const [pendingPlanModifies, setPendingPlanModifies] = useState<Record<string, boolean>>({});
   const [planMessages, setPlanMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string; helperText?: string }>>({});
   const [itemMessages, setItemMessages] = useState<Record<string, { tone: "success" | "error" | "neutral"; text: string }>>({});
+  const recordsRef = useRef(records);
   const itemMenuRef = useRef<HTMLDivElement | null>(null);
   const planMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    recordsRef.current = records;
+  }, [records]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1076,7 +1099,7 @@ export default function HistoryPage() {
         userId: currentUser?.id ?? null,
         orgId: currentOrgId ?? null,
       });
-      setLoading(true);
+      setLoading((current) => (recordsRef.current.length === 0 ? true : current));
 
       try {
         const nextRecords = await listExecutionHistory();
@@ -1404,6 +1427,57 @@ export default function HistoryPage() {
     }));
   }
 
+  async function handleDeleteItem(record: ExecutionHistoryRecord) {
+    const confirmed = window.confirm(`Delete "${record.subject || record.title || "this item"}" from History?`);
+    if (!confirmed) return;
+
+    setPendingItemDeletes((current) => ({ ...current, [record.id]: true }));
+    try {
+      await deleteExecutionHistoryRecord(record.id);
+      setItemMessages((current) => {
+        const next = { ...current };
+        delete next[record.id];
+        return next;
+      });
+    } finally {
+      setPendingItemDeletes((current) => ({ ...current, [record.id]: false }));
+    }
+  }
+
+  async function handleDeletePlanGroup(planGroup: PlanExecutionGroup) {
+    const confirmed = window.confirm(`Delete "${planGroup.planName}" from History?`);
+    if (!confirmed) return;
+
+    setPendingPlanDeletes((current) => ({ ...current, [planGroup.key]: true }));
+    try {
+      await deleteExecutionHistoryRecords(planGroup.items.map((item) => item.id));
+      setPlanMessages((current) => {
+        const next = { ...current };
+        delete next[planGroup.key];
+        return next;
+      });
+    } finally {
+      setPendingPlanDeletes((current) => ({ ...current, [planGroup.key]: false }));
+    }
+  }
+
+  async function handleClearHistory() {
+    const confirmed = window.confirm("Clear all history from this page?");
+    if (!confirmed) return;
+    setLoading(true);
+    try {
+      await clearExecutionHistory();
+      setRecords([]);
+      setExpandedDays({});
+      setExpandedPlans({});
+      setExpandedItems({});
+      setPlanMessages({});
+      setItemMessages({});
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleModifyPlan(planGroup: PlanExecutionGroup) {
     const nextEventDate = planModifyDates[planGroup.key] ?? "";
     const nextEventTime = planModifyTimes[planGroup.key] ?? "";
@@ -1659,46 +1733,54 @@ export default function HistoryPage() {
   }
 
   return (
-    <div className="space-y-8 text-gray-900">
+    <div className="space-y-6 text-slate-900">
       <section>
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">History</h1>
+        <div className="flex flex-col items-start justify-between gap-4 sm:flex-row">
+          <div className="min-w-0">
+            <h1 className="text-3xl font-bold text-slate-950">History</h1>
+            <p className="mt-2 text-sm text-slate-600">Review what your event plans created, sent, updated, or recalled.</p>
+          </div>
+          {groupedRecords.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => void handleClearHistory()}
+              className="rounded-xl border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-600 transition hover:border-red-300 hover:bg-red-50 hover:text-red-700"
+            >
+              Clear History
+            </button>
+          ) : null}
         </div>
       </section>
 
-      <section className="rounded-2xl border bg-white shadow-sm">
-        <div className="border-b px-6 py-4">
-          <h2 className="text-lg font-semibold text-gray-900">Execution History</h2>
-        </div>
-        <div className="p-6">
-          {loading ? (
-            <p className="text-sm text-gray-600">Loading history…</p>
+      <section className="pt-3">
+          {loading && groupedRecords.length === 0 ? (
+            <p className="text-sm text-slate-600">Loading history…</p>
           ) : groupedRecords.length === 0 ? (
-            <div className="space-y-3 rounded-2xl border border-dashed bg-gray-50 p-6 text-sm text-gray-600">
-              <p>No execution history yet.</p>
-              <p>Newly exported plans will show up here right away.</p>
+            <div className="space-y-3 rounded-2xl border border-dashed bg-gray-50 p-4 text-sm text-gray-600">
+              <p>No activity yet.</p>
+              <p>Exported event plans will appear here right away.</p>
               <Link href="/plans" className="inline-flex rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700">
                 Go to Plans
               </Link>
             </div>
           ) : (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {groupedRecords.map((dayGroup) => {
                 const isDayExpanded = expandedDays[dayGroup.day] ?? true;
 
                 return (
-                  <section key={dayGroup.day} className="rounded-2xl border border-gray-200">
+                  <section key={dayGroup.day} className="space-y-4">
                     <button
                       type="button"
                       onClick={() => setExpandedDays((current) => ({ ...current, [dayGroup.day]: !isDayExpanded }))}
-                      className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left hover:bg-gray-50"
+                      className="flex w-full items-center justify-between gap-4 text-left"
                     >
-                      <div className="text-lg font-semibold text-gray-900">{formatDayLabel(dayGroup.day)}</div>
-                      <div className="text-sm font-medium text-gray-500">{isDayExpanded ? "Collapse" : "Expand"}</div>
+                      <div className="text-lg font-semibold text-slate-900">{formatDayLabel(dayGroup.day)}</div>
+                      <div className="text-sm font-medium text-slate-500">{isDayExpanded ? "Collapse" : "Expand"}</div>
                     </button>
 
                     {isDayExpanded ? (
-                      <div className="space-y-4 border-t bg-gray-50/60 p-4">
+                      <div className="space-y-4">
                         {dayGroup.plans.map((planGroup) => {
                           const isPlanExpanded = expandedPlans[planGroup.key] ?? false;
                           const isPlanModifying = exposeModifyUI && (modifyingPlans[planGroup.key] ?? false);
@@ -1721,12 +1803,12 @@ export default function HistoryPage() {
                           const collapsedStatusLabel = getCollapsedPlanStatusLabel(planStatusLabels);
                           return (
                             <section key={planGroup.key} className="rounded-2xl border bg-white shadow-sm">
-                              <div className="flex items-center justify-between gap-4 px-5 py-4">
+                              <div className="flex flex-col items-start justify-between gap-4 px-5 py-4 sm:flex-row">
                                 <div className="min-w-0">
-                                  <div className="text-lg font-semibold text-gray-900">Event Name: {planGroup.planName} ({planTypeLabel})</div>
-                                  <div className="mt-1 text-sm text-gray-600">{planGroup.items.length} event{planGroup.items.length === 1 ? "" : "s"}</div>
+                                  <div className="text-lg font-semibold text-gray-900">{planGroup.planName} ({planTypeLabel})</div>
+                                  <div className="mt-1 text-sm text-gray-600">{planGroup.items.length} item{planGroup.items.length === 1 ? "" : "s"}</div>
                                   <div className="mt-1 text-sm text-gray-600">
-                                    Created at: {formatDateTime(planGroup.latestExecutedAt)}
+                                    Last activity: {formatDateTime(planGroup.latestExecutedAt)}
                                     {collapsedStatusLabel ? ` (${collapsedStatusLabel})` : ""}
                                   </div>
                                   {planStatusLabels.length > 0 && !collapsedStatusLabel ? (
@@ -1760,7 +1842,7 @@ export default function HistoryPage() {
                                     <div className="mt-1 text-xs text-gray-500">{planMessage.helperText}</div>
                                   ) : null}
                                 </div>
-                                <div className="flex items-center gap-3">
+                                <div className="flex shrink-0 flex-wrap items-center gap-3">
                                   <button
                                     type="button"
                                     onClick={() => setExpandedPlans((current) => ({ ...current, [planGroup.key]: !isPlanExpanded }))}
@@ -1769,17 +1851,33 @@ export default function HistoryPage() {
                                     {isPlanExpanded ? "Collapse" : "Expand"}
                                   </button>
                                   <div className="relative" ref={openPlanMenuId === planGroup.key ? planMenuRef : null}>
-                                    <button
-                                      type="button"
-                                      onClick={() => setOpenPlanMenuId((current) => (current === planGroup.key ? null : planGroup.key))}
-                                      title="Actions"
-                                      aria-label="Actions"
-                                      className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
-                                    >
-                                      <span className="text-base leading-none">•••</span>
-                                    </button>
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          void handleDeletePlanGroup(planGroup);
+                                        }}
+                                        disabled={pendingPlanDeletes[planGroup.key]}
+                                        title={
+                                          "Delete from History"
+                                        }
+                                        aria-label="Delete from history"
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 bg-white text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:border-gray-200 disabled:text-gray-300"
+                                      >
+                                        <IconTrash />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setOpenPlanMenuId((current) => (current === planGroup.key ? null : planGroup.key))}
+                                        title="Actions"
+                                        aria-label="Actions"
+                                        className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+                                      >
+                                        <span className="text-base leading-none">•••</span>
+                                      </button>
+                                    </div>
                                     {openPlanMenuId === planGroup.key ? (
-                                      <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-44 rounded-xl border bg-white p-2 text-left shadow-lg">
+                                      <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-[132px] rounded-xl border bg-white p-2 text-left shadow-lg">
                                         {exposeModifyUI ? (
                                           <button
                                             type="button"
@@ -1788,7 +1886,7 @@ export default function HistoryPage() {
                                               setOpenPlanMenuId(null);
                                             }}
                                             disabled={planGroupUnavailable || pendingPlanModifies[planGroup.key]}
-                                            className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
+                                            className="w-full whitespace-nowrap rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
                                             title={planGroupUnavailable ? "This event is no longer available to modify." : undefined}
                                           >
                                             {pendingPlanModifies[planGroup.key] ? "Updating..." : "Modify Event"}
@@ -1801,7 +1899,7 @@ export default function HistoryPage() {
                                             setOpenPlanMenuId(null);
                                           }}
                                           disabled={planGroupUnavailable || pendingPlanRecalls[planGroup.key]}
-                                          className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
+                                          className="w-full whitespace-nowrap rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50 disabled:text-gray-400"
                                           title={
                                             planGroupUnavailable
                                               ? "This event is no longer available to recall."
@@ -1822,7 +1920,7 @@ export default function HistoryPage() {
                                 <div className="border-t bg-gray-50/70 px-5 py-4">
                                   <div className="mb-4 grid gap-3 md:grid-cols-2">
                                     <div>
-                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Date</div>
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current event date</div>
                                       <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
                                         {getCurrentEventDateValue(planGroup, planSnapshot)
                                           ? formatDateOnly(`${getCurrentEventDateValue(planGroup, planSnapshot)}T00:00:00`)
@@ -1830,7 +1928,7 @@ export default function HistoryPage() {
                                       </div>
                                     </div>
                                     <div>
-                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current Event Time</div>
+                                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Current event time</div>
                                       <div className="mt-2 rounded-lg border bg-white px-3 py-2 text-sm text-gray-900">
                                         {getCurrentEventTimeValue(planGroup, planSnapshot)
                                           ? formatTimeOnly(`2000-01-01T${getCurrentEventTimeValue(planGroup, planSnapshot)}:00`)
@@ -1838,9 +1936,9 @@ export default function HistoryPage() {
                                       </div>
                                     </div>
                                   </div>
-                                  <div className="grid gap-4 md:grid-cols-[220px_220px_minmax(0,260px)] md:items-end">
+                                  <div className="grid gap-4 lg:grid-cols-[minmax(0,220px)_minmax(0,220px)_minmax(0,260px)] lg:items-end">
                                     <div>
-                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Date</label>
+                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New event date</label>
                                       <input
                                         type="date"
                                         value={planModifyDate}
@@ -1849,7 +1947,7 @@ export default function HistoryPage() {
                                       />
                                     </div>
                                     <div>
-                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New Event Time</label>
+                                      <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">New event time</label>
                                       <input
                                         type="time"
                                         value={planModifyTime}
@@ -1884,7 +1982,7 @@ export default function HistoryPage() {
                                   ) : null}
                                   <div className="mt-4">
                                     <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Actions</div>
-                                    <div className="mt-2 flex justify-end gap-2">
+                                    <div className="mt-2 flex flex-wrap justify-start gap-2 sm:justify-end">
                                       <button
                                         type="button"
                                         onClick={() => setModifyingPlans((current) => ({ ...current, [planGroup.key]: false }))}
@@ -1906,8 +2004,8 @@ export default function HistoryPage() {
                               ) : null}
 
                               {isPlanExpanded && !isPlanModifying ? (
-                                <div className="border-t p-5">
-                                  <div className="space-y-4">
+                                <div className="border-t p-3">
+                                  <div className="space-y-3">
                                     {planGroup.items.map((item) => {
                                       const itemTypeLabel = formatTimelineItemType(item);
                                       const itemTypeDisplayLabel = getItemTypeDisplayLabel(item);
@@ -1920,17 +2018,19 @@ export default function HistoryPage() {
                                       const recallState = getExecutionHistoryRecallState(item);
                                       const itemMessage = itemMessages[item.id] ?? null;
                                       return (
-                                        <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-                                          <div className="grid gap-4 md:grid-cols-[minmax(0,1.5fr)_190px_150px_64px] md:items-start">
+                                        <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm">
+                                          <div className="grid gap-3 lg:grid-cols-[minmax(0,1.5fr)_170px_130px_64px] lg:items-start">
                                             <div className="min-w-0">
-                                              <div className={`mb-2 text-sm font-medium md:text-center ${getTypeAccentClasses(itemTypeLabel)}`}>
+                                              <div className={`mb-1 flex h-4 items-center leading-none lg:justify-center ${getTypeAccentClasses(itemTypeLabel)}`}>
+                                                <span className="text-[12px] font-medium leading-none">
                                                 {itemTypeDisplayLabel}
+                                                </span>
                                               </div>
-                                              <div className="flex min-h-[72px] items-center rounded-xl border bg-white px-4 py-3 text-base text-gray-900">
+                                              <div className="flex min-h-[44px] items-center rounded-xl border bg-white px-3 py-2 text-[12px] text-gray-900">
                                                 <div className="min-w-0 truncate">{item.subject || item.title || "Untitled item"}</div>
                                               </div>
                                               {itemStatusLabels.length > 0 ? (
-                                                <div className="mt-2 flex flex-wrap gap-2 md:justify-center">
+                                                <div className="mt-2 flex flex-wrap gap-2 lg:justify-center">
                                                   {itemStatusLabels.map((label) => (
                                                     <span
                                                       key={`${item.id}:${label.text}`}
@@ -1944,37 +2044,51 @@ export default function HistoryPage() {
                                                 </div>
                                               ) : null}
                                               {item.status === "already_removed" || item.status === "already_canceled" ? (
-                                                <div className="mt-2 text-xs text-gray-600 md:text-center">This item is no longer available.</div>
+                                                <div className="mt-2 text-xs text-gray-600 lg:text-center">This item is no longer available.</div>
                                               ) : null}
-                                              {item.status === "modify_failed" ? <div className="mt-2 text-xs text-red-700 md:text-center">Edit failed</div> : null}
+                                              {item.status === "modify_failed" ? <div className="mt-2 text-xs text-red-700 lg:text-center">Edit failed</div> : null}
                                               {item.status === "recall_failed" && !isSentEmailRecord(item) ? (
-                                                <div className="mt-2 text-xs text-red-700 md:text-center">Recall failed</div>
+                                                <div className="mt-2 text-xs text-red-700 lg:text-center">Recall failed</div>
                                               ) : null}
                                             </div>
-                                            <div className="md:text-center">
-                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Scheduled For</div>
-                                              <div className="flex min-h-[72px] items-center justify-center rounded-xl border bg-white px-4 py-3 text-sm text-gray-900">
+                                            <div className="lg:text-center">
+                                              <div className="mb-1 flex h-4 items-center justify-center text-[10px] font-semibold uppercase leading-none tracking-wide text-gray-600">Scheduled For</div>
+                                              <div className="flex min-h-[44px] items-center justify-center rounded-xl border bg-white px-3 py-2 text-[12px] text-gray-900">
                                                 {formatDateOnly(itemDateTime)}
                                               </div>
                                             </div>
-                                            <div className="md:text-center">
-                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Time</div>
-                                              <div className="flex min-h-[72px] items-center justify-center rounded-xl border bg-white px-4 py-3 text-sm text-gray-900">
+                                            <div className="lg:text-center">
+                                              <div className="mb-1 flex h-4 items-center justify-center text-[10px] font-semibold uppercase leading-none tracking-wide text-gray-600">Time</div>
+                                              <div className="flex min-h-[44px] items-center justify-center rounded-xl border bg-white px-3 py-2 text-[12px] text-gray-900">
                                                 {formatTimeOnly(itemDateTime)}
                                               </div>
                                             </div>
-                                            <div className="md:text-center">
-                                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-transparent">Action</div>
-                                              <div className="relative flex min-h-[72px] items-center justify-center" ref={openItemMenuId === item.id ? itemMenuRef : null}>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => setOpenItemMenuId((current) => (current === item.id ? null : item.id))}
-                                                  title="Actions"
-                                                  aria-label="Actions"
-                                                  className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
-                                                >
-                                                  <span className="text-base leading-none">•••</span>
-                                                </button>
+                                            <div className="lg:text-center">
+                                              <div className="mb-1 flex h-4 items-center justify-center text-[10px] font-semibold uppercase leading-none tracking-wide text-transparent">Action</div>
+                                              <div className="relative flex min-h-[44px] items-center justify-center" ref={openItemMenuId === item.id ? itemMenuRef : null}>
+                                                <div className="flex items-center gap-2">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      void handleDeleteItem(item);
+                                                    }}
+                                                    disabled={pendingItemDeletes[item.id]}
+                                                    title="Delete from History"
+                                                    aria-label="Delete item from history"
+                                                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 bg-white text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:border-gray-200 disabled:text-gray-300"
+                                                  >
+                                                    <IconTrash />
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => setOpenItemMenuId((current) => (current === item.id ? null : item.id))}
+                                                    title="Actions"
+                                                    aria-label="Actions"
+                                                    className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+                                                  >
+                                                    <span className="text-base leading-none">•••</span>
+                                                  </button>
+                                                </div>
                                                 {openItemMenuId === item.id ? (
                                                   <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-44 rounded-xl border bg-white p-2 text-left shadow-lg">
                                                   <button
@@ -2045,7 +2159,7 @@ export default function HistoryPage() {
                                               item.status !== "already_canceled" ? (
                                                 <div className="text-sm text-gray-600">{recallState.recallReason}</div>
                                               ) : null}
-                                              <div className="text-sm text-gray-700">Event Name: {planGroup.planName} ({getPlanGroupTypeLabel(planGroup)})</div>
+                                              <div className="text-sm text-gray-700">Event: {planGroup.planName} ({getPlanGroupTypeLabel(planGroup)})</div>
                                               {item.itemType === "reminder" ? (
                                                 <div className="bg-blue-50 px-4 py-3">
                                                   <div className="grid grid-cols-1 gap-3">
@@ -2161,7 +2275,6 @@ export default function HistoryPage() {
               })}
             </div>
           )}
-        </div>
       </section>
     </div>
   );
