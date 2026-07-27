@@ -69,6 +69,11 @@ export type PersistedTemplateState = {
   templates: PersistedPlanTemplate[];
 };
 
+export type CachedTemplateStateSnapshot = {
+  hasSnapshot: boolean;
+  state: PersistedTemplateState;
+};
+
 const TEMPLATE_CACHE_KEY = "event-based-reminders-app:template-cache-v1";
 const NO_EVENT_DATE_ANCHOR_KEY = "__event_based_reminders_no_event_date__";
 const LAST_DYNAMIC_FIELDS_EXPORT_AT_ANCHOR_KEY = "__event_based_reminders_last_dynamic_fields_export_at__";
@@ -252,19 +257,27 @@ function normalizePersistedTemplate(value: unknown, fallbackSortOrder = 0): Pers
 }
 
 export function loadCachedTemplateState(seedTemplates: PersistedPlanTemplate[]): PersistedTemplateState {
+  return readCachedTemplateStateSnapshot(seedTemplates).state;
+}
+
+export function readCachedTemplateStateSnapshot(seedTemplates: PersistedPlanTemplate[]): CachedTemplateStateSnapshot {
+  const emptyState = {
+    selectedTemplateId: seedTemplates[0]?.id ?? null,
+    templates: seedTemplates,
+  };
+
   if (typeof window === "undefined") {
-    return {
-      selectedTemplateId: seedTemplates[0]?.id ?? null,
-      templates: seedTemplates,
-    };
+    return { hasSnapshot: false, state: emptyState };
   }
 
-  const raw = readPersistedValue("localStorage", getTemplateCacheStorageKey());
-  if (!raw) {
-    return {
-      selectedTemplateId: seedTemplates[0]?.id ?? null,
-      templates: seedTemplates,
-    };
+  let raw: string | null = null;
+  try {
+    raw = readPersistedValue("localStorage", getTemplateCacheStorageKey());
+  } catch {
+    return { hasSnapshot: false, state: emptyState };
+  }
+  if (raw === null) {
+    return { hasSnapshot: false, state: emptyState };
   }
 
   try {
@@ -282,16 +295,16 @@ export function loadCachedTemplateState(seedTemplates: PersistedPlanTemplate[]):
       )
       .filter((template): template is PersistedPlanTemplate => Boolean(template));
 
-    return mergeTemplateStates(seedTemplates, {
-      selectedTemplateId:
-        typeof parsed.selectedTemplateId === "string" || parsed.selectedTemplateId === null ? parsed.selectedTemplateId : null,
-      templates: cachedTemplates,
-    });
-  } catch {
     return {
-      selectedTemplateId: seedTemplates[0]?.id ?? null,
-      templates: seedTemplates,
+      hasSnapshot: true,
+      state: mergeTemplateStates(seedTemplates, {
+        selectedTemplateId:
+          typeof parsed.selectedTemplateId === "string" || parsed.selectedTemplateId === null ? parsed.selectedTemplateId : null,
+        templates: cachedTemplates,
+      }),
     };
+  } catch {
+    return { hasSnapshot: false, state: emptyState };
   }
 }
 

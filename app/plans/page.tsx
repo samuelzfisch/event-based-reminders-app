@@ -1,7 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type HTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 
 import {
   APP_SETTINGS_UPDATED_EVENT,
@@ -74,7 +88,6 @@ import {
   deleteRecipientGroup,
   getRecipientGroupFromEntry,
   hydrateRecipientGroupsFromSupabase,
-  loadRecipientGroups,
   mergeRecipientEntries,
   normalizeRecipientEntries,
   normalizeRecipientGroupEmail,
@@ -207,18 +220,25 @@ type ProviderExecutionAvailability = {
 type RowEditorKind = "email" | "meeting" | "reminder";
 type RenderedRowEditorKind = "email" | "meeting" | "reminder" | "reminderBody" | "reminderDuration";
 type PlansModalKind = "alert" | "confirm" | "prompt";
+type PlansModalSeverity = "information" | "warning" | "validation" | "destructive";
 type PlansModalConfig = {
   kind: PlansModalKind;
   title: string;
   message?: string;
   items?: ReactNode[];
+  content?: ReactNode;
   secondaryLabel?: string;
   onSecondaryAction?: () => void;
+  onConfirmAction?: () => void;
   confirmLabel?: string;
   cancelLabel?: string;
   defaultValue?: string;
   placeholder?: string;
+  inputLabel?: string;
+  helperText?: ReactNode;
   destructive?: boolean;
+  severity?: PlansModalSeverity;
+  maxWidthClassName?: string;
 };
 
 type NewPlanDraft = {
@@ -259,13 +279,128 @@ type ValidationFieldTarget = {
   rowId: string;
   field: ValidationFieldName;
 };
+type FloatingMenuPosition = {
+  top: number;
+  left: number;
+};
 const ROW_EDITOR_OPEN_ANIMATION_MS = 360;
 const ROW_EDITOR_CLOSE_ANIMATION_MS = 520;
-const ROW_EDITOR_BOTTOM_ROOM_PX = 680;
 const INLINE_EDITOR_EXPAND_ANIMATION_MS = 1000;
 const INLINE_EDITOR_REVEAL_ANIMATION_MS = 2000;
-const INLINE_EDITOR_DIM_FADE_MS = 2800;
 type InlineEditorFocusPhase = "idle" | "expanding" | "revealing" | "dimmed";
+
+const plansWorkspaceClass =
+  "mx-auto w-full max-w-[1120px] min-w-0 space-y-[16px] pb-[44px] pt-[28px] text-gray-900";
+const plansSurfaceClass =
+  "overflow-hidden rounded-[16px] border border-slate-200/80 bg-white/95 shadow-[0_8px_24px_rgba(30,64,100,0.05)]";
+const plansSectionHeaderClass = "border-b border-slate-200/70 bg-white px-[16px] py-[16px] sm:px-[20px] sm:py-[18px]";
+const plansCanvasSectionClass = "px-[16px] py-[16px] sm:px-[20px] sm:py-[18px]";
+const plansPanelHeadingClass = "text-[20px] font-semibold leading-7 text-slate-950";
+const plansPanelHelperClass = "mt-1.5 text-[14px] leading-5 text-slate-600";
+const plansFieldLabelClass = "mb-1.5 block text-[13px] font-medium text-slate-600";
+const plansInputClass =
+  "h-[42px] w-full rounded-[10px] border border-slate-200 bg-white px-3.5 text-[14px] font-medium text-slate-950 shadow-sm placeholder:text-slate-500 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20";
+const plansSecondaryButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30";
+const plansPrimaryButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-[#315f92] bg-[#315f92] px-4 text-[14px] font-semibold text-white shadow-sm transition hover:bg-[#28527d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/35";
+const plansEditorInputClass =
+  "min-h-[42px] w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-[14px] leading-5 text-slate-900 shadow-sm placeholder:text-slate-500 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20";
+const plansToolbarButtonClass =
+  "inline-flex h-[40px] min-w-[112px] items-center justify-center rounded-[10px] border bg-white px-3.5 text-[14px] font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30";
+const plansInspectorSectionClass =
+  "rounded-xl border border-slate-200/70 bg-white p-5";
+const plansInspectorSectionHeadingClass =
+  "mb-3 text-[14px] font-semibold text-slate-700";
+const plansInspectorBodyClass =
+  "min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain bg-slate-50/45 px-4 py-4 pb-6 scroll-pb-6 scroll-pt-4 sm:px-6 sm:py-6";
+const plansInspectorFooterClass =
+  "flex shrink-0 justify-end border-t border-slate-200/80 bg-white px-4 py-3 sm:px-6 sm:py-4 [padding-bottom:max(12px,env(safe-area-inset-bottom))]";
+const plansDialogSecondaryButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30";
+const plansDialogPrimaryButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-[#315f92] bg-[#315f92] px-4 text-[14px] font-semibold text-white shadow-sm transition hover:bg-[#28527d] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/35";
+const plansDialogDangerButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-red-600 bg-red-600 px-4 text-[14px] font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200";
+const plansDialogWarningButtonClass =
+  "inline-flex h-[40px] items-center justify-center rounded-[10px] border border-amber-500 bg-amber-500 px-4 text-[14px] font-semibold text-white shadow-sm transition hover:bg-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200";
+const eventDetailFieldClass = "min-w-0";
+const eventDetailLabelClass = "mb-1.5 flex h-[18px] items-center gap-1.5 text-[13px] font-medium text-slate-600";
+const eventDetailSupplementClass = "mt-2 flex min-h-[18px] items-center text-[12px] font-medium text-slate-600";
+const eventDetailSupplementSpacerClass = "mt-2 hidden h-[18px] min-[900px]:block";
+
+function PlansDialogShell({
+  title,
+  description,
+  children,
+  footer,
+  animatedIn,
+  severity = "information",
+  maxWidthClassName = "max-w-[520px]",
+  onEscape,
+}: {
+  title: string;
+  description?: ReactNode;
+  children?: ReactNode;
+  footer: ReactNode;
+  animatedIn: boolean;
+  severity?: PlansModalSeverity;
+  maxWidthClassName?: string;
+  onEscape?: () => void;
+}) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const severityDotClass =
+    severity === "destructive" || severity === "validation"
+      ? "bg-red-500"
+      : severity === "warning"
+        ? "bg-amber-500"
+        : "bg-[#4f7fb8]";
+
+  return (
+    <div
+      className="fixed inset-0 z-[260] flex items-end justify-center bg-slate-950/[0.14] px-4 py-5 sm:items-center sm:py-8"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !onEscape) return;
+        event.preventDefault();
+        onEscape();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        className={`flex max-h-[calc(100dvh-32px)] w-full ${maxWidthClassName} origin-bottom transform-gpu flex-col overflow-hidden rounded-t-[18px] border border-slate-200 bg-white shadow-[0_28px_80px_rgba(21,40,66,0.24)] transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] sm:origin-center sm:rounded-[16px] ${
+          animatedIn ? "translate-y-0 scale-100 opacity-100" : "translate-y-3 scale-[0.985] opacity-0"
+        }`}
+      >
+        <div className="border-b border-slate-200/80 px-5 py-4 sm:px-6">
+          <div className="flex items-start gap-3">
+            <span
+              aria-hidden="true"
+              className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${severityDotClass}`}
+            />
+            <div className="min-w-0">
+              <h3 id={titleId} className="text-[20px] font-semibold leading-6 text-slate-950">
+                {title}
+              </h3>
+	              {description ? (
+	                <div id={descriptionId} className="mt-2 whitespace-pre-line text-[14px] leading-5 text-slate-600">
+	                  {description}
+	                </div>
+	              ) : null}
+            </div>
+          </div>
+        </div>
+        {children ? <div className="min-h-0 overflow-y-auto px-5 py-4 sm:px-6">{children}</div> : null}
+        <div className="flex shrink-0 flex-col gap-2 border-t border-slate-200/80 bg-slate-50/70 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+          {footer}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AnimatedRowEditor({
   open,
@@ -273,6 +408,9 @@ function AnimatedRowEditor({
   animate = true,
   openMs,
   closeMs,
+  className = "",
+  contentClassName = "pt-2 pb-px",
+  innerClassName = "mx-auto w-full max-w-[1160px]",
   children,
 }: {
   open: boolean;
@@ -280,6 +418,9 @@ function AnimatedRowEditor({
   animate?: boolean;
   openMs?: number;
   closeMs?: number;
+  className?: string;
+  contentClassName?: string;
+  innerClassName?: string;
   children: ReactNode;
 }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -332,9 +473,9 @@ function AnimatedRowEditor({
     if (!open) return null;
 
     return (
-      <div className={activeLayer ? "relative z-40" : ""}>
-        <div ref={contentRef} className="pt-2 pb-px">
-          <div className="mx-auto w-full max-w-4xl">
+      <div className={`${activeLayer ? "relative z-40" : ""} ${className}`.trim()}>
+        <div ref={contentRef} className={contentClassName}>
+          <div className={innerClassName}>
             {children}
           </div>
         </div>
@@ -346,7 +487,7 @@ function AnimatedRowEditor({
 
   return (
     <div
-      className={activeLayer ? "relative z-40" : ""}
+      className={`${activeLayer ? "relative z-40" : ""} ${className}`.trim()}
       style={{
         height,
         overflow: open && height === "auto" ? "visible" : "hidden",
@@ -365,14 +506,14 @@ function AnimatedRowEditor({
     >
       <div
         ref={contentRef}
-        className="pt-2 pb-px"
+        className={contentClassName}
         style={{
           opacity: open ? undefined : 0,
           transform: open ? undefined : "translateY(-8px)",
           transition: `opacity ${contentOpacityDurationMs}ms ease, transform ${animationDurationMs}ms cubic-bezier(0.22, 1, 0.36, 1)`,
         }}
       >
-        <div className="mx-auto w-full max-w-4xl">
+        <div className={innerClassName}>
           {children}
         </div>
       </div>
@@ -387,6 +528,7 @@ function StaggeredInlineEditorItem({
   animate = true,
   className = "",
   children,
+  ...divProps
 }: {
   active: boolean;
   delayMs?: number;
@@ -394,7 +536,7 @@ function StaggeredInlineEditorItem({
   animate?: boolean;
   className?: string;
   children: ReactNode;
-}) {
+} & HTMLAttributes<HTMLDivElement>) {
   const [visible, setVisible] = useState(immediate);
 
   useEffect(() => {
@@ -415,17 +557,23 @@ function StaggeredInlineEditorItem({
   }, [active, delayMs, immediate]);
 
   if (!animate) {
-    return <div className={className}>{children}</div>;
+    return (
+      <div className={className} {...divProps}>
+        {children}
+      </div>
+    );
   }
 
   const isVisible = immediate || visible;
 
   return (
     <div
+      {...divProps}
       className={className}
       style={{
+        ...divProps.style,
         opacity: isVisible ? undefined : 0,
-        transform: isVisible ? "translateY(0)" : "translateY(-12px)",
+        transform: isVisible ? undefined : "translateY(-12px)",
         transition: "opacity 240ms ease, transform 320ms cubic-bezier(0.22, 1, 0.36, 1)",
       }}
     >
@@ -1188,13 +1336,13 @@ function OutlookExecutionNoticeCard({
         <div className="space-y-2">
           <div className="text-sm font-semibold">{notice.title}</div>
           {notice.message ? <p className="text-sm">{notice.message}</p> : null}
-          {notice.details && notice.details.length > 0 ? (
-            <div className="space-y-1 text-sm">
-              {notice.details.map((detail) => (
-                <div key={detail}>{detail}</div>
-              ))}
-            </div>
-          ) : null}
+	          {notice.details && notice.details.length > 0 ? (
+	            <div className="space-y-1 text-sm">
+	              {notice.details.map((detail) => (
+	                <div key={detail}>{detail}</div>
+	              ))}
+	            </div>
+	          ) : null}
         </div>
         <button
           type="button"
@@ -1993,20 +2141,9 @@ function buildTemplateItemsFromRows(rows: BuilderRow[], recipientGroups: Recipie
   }));
 }
 
-function moveSavedTemplateToIndex(templates: SavedPlanTemplate[], templateId: string, toIndex: number) {
-  const fromIndex = templates.findIndex((template) => template.id === templateId);
-  if (fromIndex === -1) return templates;
-
-  const clampedIndex = Math.max(0, Math.min(toIndex, templates.length - 1));
-  if (fromIndex === clampedIndex) return templates;
-
-  const nextTemplates = [...templates];
-  const [movedTemplate] = nextTemplates.splice(fromIndex, 1);
-  nextTemplates.splice(clampedIndex, 0, movedTemplate);
-  return nextTemplates;
-}
-
-type TemplatesGridProps = {
+type TemplateLibraryProps = {
+  open: boolean;
+  mounted: boolean;
   templates: SavedPlanTemplate[];
   selectedTemplateId: string | null;
   highlightedTemplateId: string | null;
@@ -2014,546 +2151,14 @@ type TemplatesGridProps = {
   onDuplicateTemplate: (templateId: string) => void | Promise<void>;
   onRenameTemplate: (templateId: string) => void | Promise<void>;
   onDeleteTemplate: (templateId: string) => void | Promise<void>;
-  onReorderTemplates: (templates: SavedPlanTemplate[]) => void;
-};
-
-function TemplatesGrid({
-  templates,
-  selectedTemplateId,
-  highlightedTemplateId,
-  onSelectTemplate,
-  onDuplicateTemplate,
-  onRenameTemplate,
-  onDeleteTemplate,
-  onReorderTemplates,
-}: TemplatesGridProps) {
-  const [draggingTemplateId, setDraggingTemplateId] = useState<string | null>(null);
-  const [templateDragInsertionIndex, setTemplateDragInsertionIndex] = useState<number | null>(null);
-  const [pressedTemplateId, setPressedTemplateId] = useState<string | null>(null);
-  const templateNodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const previousTemplatePositionsRef = useRef<Record<string, { left: number; top: number }>>({});
-  const templateDragLayoutRectsRef = useRef<Record<string, DOMRect>>({});
-  const templateDragOverlayRef = useRef<HTMLDivElement | null>(null);
-  const templateDragPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const templateDragInsertionIndexRef = useRef<number | null>(null);
-  const templateDragFrameRef = useRef<number | null>(null);
-  const suppressTemplateClickRef = useRef(false);
-  const [openTemplateMenuId, setOpenTemplateMenuId] = useState<string | null>(null);
-  const templateMenuRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const activeTemplateDragRef = useRef<{
-    pointerId: number;
-    templateId: string;
-    startX: number;
-    startY: number;
-    pointerOffsetX: number;
-    pointerOffsetY: number;
-    width: number;
-    height: number;
-    isDragging: boolean;
-  } | null>(null);
-
-  const currentDraggedTemplate = useMemo(
-    () => (draggingTemplateId ? templates.find((template) => template.id === draggingTemplateId) ?? null : null),
-    [draggingTemplateId, templates]
-  );
-  const renderedTemplates = useMemo(() => {
-    if (!draggingTemplateId) return templates;
-    const currentIndex = templates.findIndex((template) => template.id === draggingTemplateId);
-    return moveSavedTemplateToIndex(templates, draggingTemplateId, templateDragInsertionIndex ?? currentIndex);
-  }, [draggingTemplateId, templateDragInsertionIndex, templates]);
-
-  const getTemplateDragInsertionIndex = useCallback((pointerX: number, pointerY: number, draggedTemplateId: string) => {
-    const templatesExcludingDragged = renderedTemplates.filter((template) => template.id !== draggedTemplateId);
-    const measuredTemplates = templatesExcludingDragged
-      .map((template, index) => {
-        const rect = templateDragLayoutRectsRef.current[template.id];
-        if (!rect) return null;
-        return {
-          index,
-          rect,
-          centerX: rect.left + rect.width / 2,
-          centerY: rect.top + rect.height / 2,
-        };
-      })
-      .filter((template): template is { index: number; rect: DOMRect; centerX: number; centerY: number } => Boolean(template))
-      .sort((leftTemplate, rightTemplate) => {
-        const topDelta = leftTemplate.rect.top - rightTemplate.rect.top;
-        if (Math.abs(topDelta) > 12) return topDelta;
-        return leftTemplate.rect.left - rightTemplate.rect.left;
-      });
-
-    if (!measuredTemplates.length) return 0;
-
-    const activeTemplateDrag = activeTemplateDragRef.current;
-    const draggedCenterX =
-      activeTemplateDrag != null
-        ? pointerX - activeTemplateDrag.pointerOffsetX + activeTemplateDrag.width / 2
-        : pointerX;
-    const draggedCenterY =
-      activeTemplateDrag != null
-        ? pointerY - activeTemplateDrag.pointerOffsetY + activeTemplateDrag.height / 2
-        : pointerY;
-
-    const rowTolerance = Math.max(
-      12,
-      Math.min(32, Math.round(Math.min(...measuredTemplates.map((template) => template.rect.height || 0)) * 0.35))
-    );
-
-    const rows = measuredTemplates.reduce<
-      Array<{
-        items: typeof measuredTemplates;
-        top: number;
-        bottom: number;
-        centerY: number;
-        startIndex: number;
-        endIndex: number;
-      }>
-    >((allRows, template) => {
-      const currentRow = allRows[allRows.length - 1];
-      if (!currentRow || Math.abs(template.rect.top - currentRow.top) > rowTolerance) {
-        allRows.push({
-          items: [template],
-          top: template.rect.top,
-          bottom: template.rect.bottom,
-          centerY: template.centerY,
-          startIndex: template.index,
-          endIndex: template.index + 1,
-        });
-        return allRows;
-      }
-
-      currentRow.items.push(template);
-      currentRow.top = Math.min(currentRow.top, template.rect.top);
-      currentRow.bottom = Math.max(currentRow.bottom, template.rect.bottom);
-      currentRow.centerY =
-        currentRow.items.reduce((sum, currentTemplate) => sum + currentTemplate.centerY, 0) / currentRow.items.length;
-      currentRow.startIndex = Math.min(currentRow.startIndex, template.index);
-      currentRow.endIndex = Math.max(currentRow.endIndex, template.index + 1);
-      return allRows;
-    }, []);
-
-    const currentInsertionIndex = templateDragInsertionIndexRef.current;
-    const rowVerticalHysteresis = Math.max(
-      18,
-      Math.min(40, Math.round(Math.min(...measuredTemplates.map((template) => template.rect.height || 0)) * 0.24))
-    );
-
-    const currentRow =
-      currentInsertionIndex == null
-        ? null
-        : rows.find((row) => currentInsertionIndex >= row.startIndex && currentInsertionIndex <= row.endIndex) ?? null;
-
-    const targetRow =
-      currentRow &&
-      draggedCenterY >= currentRow.top - rowVerticalHysteresis &&
-      draggedCenterY <= currentRow.bottom + rowVerticalHysteresis
-        ? currentRow
-        : rows.find((row) => draggedCenterY >= row.top && draggedCenterY <= row.bottom) ??
-          rows.reduce((closestRow, row) => {
-            if (closestRow == null) return row;
-            return Math.abs(row.centerY - draggedCenterY) < Math.abs(closestRow.centerY - draggedCenterY)
-              ? row
-              : closestRow;
-          }, rows[0]);
-
-    const rowItems = [...targetRow.items].sort((leftTemplate, rightTemplate) => leftTemplate.rect.left - rightTemplate.rect.left);
-    let rawInsertionIndex = rowItems[rowItems.length - 1].index + 1;
-    for (const template of rowItems) {
-      if (draggedCenterX < template.centerX) {
-        rawInsertionIndex = template.index;
-        break;
-      }
-    }
-
-    const rowStartIndex = rowItems[0].index;
-    const rowEndIndex = rowItems[rowItems.length - 1].index + 1;
-    if (currentInsertionIndex == null || currentInsertionIndex < rowStartIndex || currentInsertionIndex > rowEndIndex) {
-      return rawInsertionIndex;
-    }
-
-    const hysteresis = Math.max(
-      12,
-      Math.min(24, Math.round(Math.min(...rowItems.map((template) => template.rect.width || 0)) * 0.08))
-    );
-
-    let stabilizedInsertionIndex = currentInsertionIndex;
-    if (rawInsertionIndex > currentInsertionIndex) {
-      while (
-        stabilizedInsertionIndex < rowEndIndex &&
-        draggedCenterX > rowItems[stabilizedInsertionIndex - rowStartIndex].centerX + hysteresis
-      ) {
-        stabilizedInsertionIndex += 1;
-      }
-    } else if (rawInsertionIndex < currentInsertionIndex) {
-      while (
-        stabilizedInsertionIndex > rowStartIndex &&
-        draggedCenterX < rowItems[stabilizedInsertionIndex - rowStartIndex - 1].centerX - hysteresis
-      ) {
-        stabilizedInsertionIndex -= 1;
-      }
-    }
-
-    return stabilizedInsertionIndex;
-  }, [renderedTemplates]);
-
-  const syncTemplateDragInsertionIndex = useCallback((nextInsertionIndex: number) => {
-    if (templateDragInsertionIndexRef.current === nextInsertionIndex) return;
-    templateDragInsertionIndexRef.current = nextInsertionIndex;
-    setTemplateDragInsertionIndex((current) => (current === nextInsertionIndex ? current : nextInsertionIndex));
-  }, []);
-
-  const updateTemplateDragOverlayPosition = useCallback(() => {
-    const overlayNode = templateDragOverlayRef.current;
-    const activeTemplateDrag = activeTemplateDragRef.current;
-    const pointer = templateDragPointerRef.current;
-    if (!overlayNode || !activeTemplateDrag || !pointer) return;
-
-    overlayNode.style.transform = `translate3d(${pointer.x - activeTemplateDrag.pointerOffsetX}px, ${pointer.y - activeTemplateDrag.pointerOffsetY}px, 0)`;
-  }, []);
-
-  const processTemplateDragFrame = useCallback(() => {
-    templateDragFrameRef.current = null;
-    updateTemplateDragOverlayPosition();
-
-    const activeTemplateDrag = activeTemplateDragRef.current;
-    const pointer = templateDragPointerRef.current;
-    if (!activeTemplateDrag || !pointer || !activeTemplateDrag.isDragging) return;
-
-    const nextInsertionIndex = getTemplateDragInsertionIndex(pointer.x, pointer.y, activeTemplateDrag.templateId);
-    syncTemplateDragInsertionIndex(nextInsertionIndex);
-  }, [getTemplateDragInsertionIndex, syncTemplateDragInsertionIndex, updateTemplateDragOverlayPosition]);
-
-  const scheduleTemplateDragFrame = useCallback(() => {
-    if (templateDragFrameRef.current != null) return;
-    templateDragFrameRef.current = window.requestAnimationFrame(() => {
-      processTemplateDragFrame();
-    });
-  }, [processTemplateDragFrame]);
-
-  const finishTemplateDrag = useCallback((shouldCommit: boolean) => {
-    const activeTemplateDrag = activeTemplateDragRef.current;
-    if (!activeTemplateDrag) return;
-
-    if (shouldCommit && activeTemplateDrag.isDragging) {
-      suppressTemplateClickRef.current = true;
-      const currentIndex = templates.findIndex((template) => template.id === activeTemplateDrag.templateId);
-      const nextTemplates = moveSavedTemplateToIndex(
-        templates,
-        activeTemplateDrag.templateId,
-        templateDragInsertionIndexRef.current ?? templateDragInsertionIndex ?? currentIndex
-      );
-      if (nextTemplates !== templates) {
-        onReorderTemplates(nextTemplates);
-      }
-    }
-
-    activeTemplateDragRef.current = null;
-    templateDragPointerRef.current = null;
-    templateDragInsertionIndexRef.current = null;
-    if (templateDragFrameRef.current != null) {
-      window.cancelAnimationFrame(templateDragFrameRef.current);
-      templateDragFrameRef.current = null;
-    }
-    setPressedTemplateId(null);
-    setDraggingTemplateId(null);
-    setTemplateDragInsertionIndex(null);
-  }, [onReorderTemplates, templateDragInsertionIndex, templates]);
-
-  useEffect(() => {
-    if (!draggingTemplateId && !pressedTemplateId) return;
-    const previousUserSelect = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    return () => {
-      document.body.style.userSelect = previousUserSelect;
-    };
-  }, [draggingTemplateId, pressedTemplateId]);
-
-  useEffect(() => {
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!openTemplateMenuId) return;
-      const menuNode = templateMenuRefs.current[openTemplateMenuId];
-      if (menuNode?.contains(event.target as Node)) return;
-      setOpenTemplateMenuId(null);
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-    };
-  }, [openTemplateMenuId]);
-
-  useEffect(() => {
-    if (!draggingTemplateId && !pressedTemplateId) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const activeTemplateDrag = activeTemplateDragRef.current;
-      if (!activeTemplateDrag || activeTemplateDrag.pointerId !== event.pointerId) return;
-
-      if (!activeTemplateDrag.isDragging) {
-        const movedX = Math.abs(event.clientX - activeTemplateDrag.startX);
-        const movedY = Math.abs(event.clientY - activeTemplateDrag.startY);
-        if (movedX < 6 && movedY < 6) return;
-
-        activeTemplateDrag.isDragging = true;
-        setDraggingTemplateId(activeTemplateDrag.templateId);
-        templateDragInsertionIndexRef.current = templates.findIndex(
-          (templateEntry) => templateEntry.id === activeTemplateDrag.templateId
-        );
-        setTemplateDragInsertionIndex(templateDragInsertionIndexRef.current);
-      }
-
-      event.preventDefault();
-      templateDragPointerRef.current = { x: event.clientX, y: event.clientY };
-      scheduleTemplateDragFrame();
-    };
-
-    const handlePointerUp = (event: PointerEvent) => {
-      const activeTemplateDrag = activeTemplateDragRef.current;
-      if (!activeTemplateDrag || activeTemplateDrag.pointerId !== event.pointerId) return;
-      finishTemplateDrag(activeTemplateDrag.isDragging);
-    };
-
-    const handlePointerCancel = (event: PointerEvent) => {
-      const activeTemplateDrag = activeTemplateDragRef.current;
-      if (!activeTemplateDrag || activeTemplateDrag.pointerId !== event.pointerId) return;
-      finishTemplateDrag(false);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    window.addEventListener("pointercancel", handlePointerCancel);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-      window.removeEventListener("pointercancel", handlePointerCancel);
-    };
-  }, [draggingTemplateId, finishTemplateDrag, pressedTemplateId, scheduleTemplateDragFrame, templates]);
-
-  useLayoutEffect(() => {
-    const nextPositions: Record<string, { left: number; top: number }> = {};
-    const nextLayoutRects: Record<string, DOMRect> = {};
-    const cleanupAnimations: Animation[] = [];
-    const shouldAnimateLayout = !draggingTemplateId;
-
-    renderedTemplates.forEach((template) => {
-      const node = templateNodeRefs.current[template.id];
-      if (!node) return;
-      const rect = node.getBoundingClientRect();
-      nextPositions[template.id] = { left: rect.left, top: rect.top };
-      nextLayoutRects[template.id] = rect;
-
-      if (!shouldAnimateLayout) {
-        node.getAnimations().forEach((animation) => animation.cancel());
-        return;
-      }
-
-      const previousPosition = previousTemplatePositionsRef.current[template.id];
-      if (!previousPosition || draggingTemplateId === template.id) return;
-
-      const deltaX = previousPosition.left - rect.left;
-      const deltaY = previousPosition.top - rect.top;
-      if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) return;
-
-      node.getAnimations().forEach((animation) => animation.cancel());
-      const animation = node.animate(
-        [
-          { transform: `translate(${deltaX}px, ${deltaY}px)` },
-          { transform: "translate(0px, 0px)" },
-        ],
-        {
-          duration: 140,
-          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-          fill: "both",
-        }
-      );
-      cleanupAnimations.push(animation);
-    });
-
-    previousTemplatePositionsRef.current = nextPositions;
-    templateDragLayoutRectsRef.current = nextLayoutRects;
-
-    return () => {
-      cleanupAnimations.forEach((animation) => animation.cancel());
-    };
-  }, [draggingTemplateId, renderedTemplates]);
-
-  const renderTemplateCardButton = (
-    template: SavedPlanTemplate,
-    options?: {
-      isDragging?: boolean;
-      isPressed?: boolean;
-      isOverlay?: boolean;
-    }
-  ) => {
-    const isDraggingTemplate = Boolean(options?.isDragging);
-    const isPressedTemplate = Boolean(options?.isPressed);
-    const isOverlay = Boolean(options?.isOverlay);
-
-    return (
-      <button
-        type="button"
-        onClick={
-          isOverlay
-            ? undefined
-            : () => {
-                if (suppressTemplateClickRef.current) {
-                  suppressTemplateClickRef.current = false;
-                  return;
-                }
-                void onSelectTemplate(template.id);
-              }
-        }
-        className={`group flex min-h-[52px] w-full items-center justify-center rounded-[16px] border bg-[var(--app-control)] px-2 py-2 text-left transition-colors duration-150 ${
-          isOverlay
-            ? "cursor-grabbing"
-            : "cursor-grab active:cursor-grabbing"
-        } ${
-          selectedTemplateId === template.id
-            ? "border-blue-400 ring-4 ring-blue-300/80 shadow-[0_0_0_1px_rgba(37,99,235,0.25),0_12px_30px_-22px_rgba(37,99,235,0.45)]"
-            : highlightedTemplateId === template.id
-              ? "border-green-300 ring-1 ring-green-100"
-              : "border-slate-200 hover:border-slate-300"
-        } ${isDraggingTemplate ? "select-none" : ""} ${isPressedTemplate && !isDraggingTemplate ? "ring-1 ring-slate-200" : ""}`}
-      >
-        <div className="min-w-0 flex-1 text-center">
-          <div className="max-w-full break-words text-[12px] font-semibold leading-4 text-slate-900">
-            {template.name}
-          </div>
-        </div>
-      </button>
-    );
-  };
-
-  return (
-    <>
-      <div className="grid w-full max-w-[560px] grid-cols-3 gap-8 max-[640px]:grid-cols-1">
-        {renderedTemplates.map((template) => {
-          const isDraggingTemplate = draggingTemplateId === template.id;
-          const isPressedTemplate = pressedTemplateId === template.id;
-          const isActiveTemplate = isDraggingTemplate || isPressedTemplate;
-
-          return (
-            <div
-              key={template.id}
-              ref={(node) => {
-                templateNodeRefs.current[template.id] = node;
-              }}
-              onPointerDown={(e) => {
-                if (e.button !== 0) return;
-                const target = e.target as HTMLElement | null;
-                if (target?.closest("[data-no-template-drag='true']")) return;
-                const rect = e.currentTarget.getBoundingClientRect();
-                activeTemplateDragRef.current = {
-                  pointerId: e.pointerId,
-                  templateId: template.id,
-                  startX: e.clientX,
-                  startY: e.clientY,
-                  pointerOffsetX: e.clientX - rect.left,
-                  pointerOffsetY: e.clientY - rect.top,
-                  width: rect.width,
-                  height: rect.height,
-                  isDragging: false,
-                };
-                templateDragPointerRef.current = { x: e.clientX, y: e.clientY };
-                setPressedTemplateId(template.id);
-              }}
-              className={`relative min-w-0 ${isActiveTemplate ? "z-20" : ""}`}
-              style={isDraggingTemplate ? { visibility: "hidden" } : undefined}
-            >
-              {!isDraggingTemplate ? (
-                <div
-                  ref={(node) => {
-                    templateMenuRefs.current[template.id] = node;
-                  }}
-                  className="absolute right-3 top-1/2 z-10 -translate-y-1/2"
-                >
-                  <button
-                    type="button"
-                    data-no-template-drag="true"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setOpenTemplateMenuId((current) => (current === template.id ? null : template.id));
-                    }}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:text-slate-700"
-                    aria-label={`Template actions for ${template.name}`}
-                    aria-expanded={openTemplateMenuId === template.id}
-                  >
-                    <span className="text-base leading-none">•••</span>
-                  </button>
-                  {openTemplateMenuId === template.id ? (
-                    <div className="absolute right-0 top-full mt-2 min-w-[170px] rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_20px_40px_-24px_rgba(15,23,42,0.35)]">
-                      <button
-                        type="button"
-                        data-no-template-drag="true"
-                        onClick={() => {
-                          setOpenTemplateMenuId(null);
-                          void onDuplicateTemplate(template.id);
-                        }}
-                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-                      >
-                        <span>Copy</span>
-                      </button>
-                      <button
-                        type="button"
-                        data-no-template-drag="true"
-                        onClick={() => {
-                          setOpenTemplateMenuId(null);
-                          void onRenameTemplate(template.id);
-                        }}
-                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-                      >
-                        <span>Rename</span>
-                      </button>
-                      <button
-                        type="button"
-                        data-no-template-drag="true"
-                        onClick={() => {
-                          setOpenTemplateMenuId(null);
-                          void onDeleteTemplate(template.id);
-                        }}
-                        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-700 transition hover:bg-red-50"
-                      >
-                        <span>Delete</span>
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {renderTemplateCardButton(template, {
-                isDragging: isDraggingTemplate,
-                isPressed: isPressedTemplate,
-              })}
-            </div>
-          );
-        })}
-      </div>
-      {currentDraggedTemplate && activeTemplateDragRef.current ? (
-        <div
-          ref={templateDragOverlayRef}
-          className="pointer-events-none fixed z-30"
-          style={{
-            left: 0,
-            top: 0,
-            width: activeTemplateDragRef.current.width,
-            willChange: "transform",
-          }}
-        >
-          {renderTemplateCardButton(currentDraggedTemplate, {
-            isDragging: true,
-            isOverlay: true,
-          })}
-        </div>
-      ) : null}
-    </>
-  );
-}
-
-type TemplateDropdownProps = Omit<TemplatesGridProps, "onReorderTemplates"> & {
   actionMessage?: string;
-  onStartNewTemplate: () => void | Promise<void>;
+  onClose: () => void;
+  returnFocus: () => void;
 };
 
-function TemplateDropdown({
+function TemplateLibrary({
+  open,
+  mounted,
   templates,
   selectedTemplateId,
   highlightedTemplateId,
@@ -2562,39 +2167,164 @@ function TemplateDropdown({
   onRenameTemplate,
   onDeleteTemplate,
   actionMessage,
-  onStartNewTemplate,
-}: TemplateDropdownProps) {
-  const [isOpen, setIsOpen] = useState(false);
+  onClose,
+  returnFocus,
+}: TemplateLibraryProps) {
+  const titleId = useId();
+  const helperId = useId();
+  const [isRendered, setIsRendered] = useState(open);
+  const [isClosing, setIsClosing] = useState(false);
   const [openActionTemplateId, setOpenActionTemplateId] = useState<string | null>(null);
-  const dropdownRef = useRef<HTMLDivElement | null>(null);
-  const selectedTemplate = useMemo(
-    () => templates.find((template) => template.id === selectedTemplateId) ?? null,
-    [selectedTemplateId, templates]
-  );
+  const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const actionButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const closeActionMenu = useCallback((options?: { restoreFocus?: boolean }) => {
+    const currentTemplateId = openActionTemplateId;
+    setOpenActionTemplateId(null);
+    setActionMenuPosition(null);
+    if (options?.restoreFocus && currentTemplateId) {
+      window.requestAnimationFrame(() => {
+        actionButtonRefs.current[currentTemplateId]?.focus();
+      });
+    }
+  }, [openActionTemplateId]);
+
+  const requestClose = useCallback((options?: { restoreFocus?: boolean }) => {
+    closeActionMenu();
+    onClose();
+    if (options?.restoreFocus) {
+      window.requestAnimationFrame(returnFocus);
+    }
+  }, [closeActionMenu, onClose, returnFocus]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (open) {
+      if (closeTimerRef.current) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      setIsRendered(true);
+      setIsClosing(false);
+      setOpenActionTemplateId(null);
+      setActionMenuPosition(null);
+      return;
+    }
+
+    if (!isRendered) return;
+    setIsClosing(true);
+    closeTimerRef.current = window.setTimeout(() => {
+      setIsRendered(false);
+      setIsClosing(false);
+      closeTimerRef.current = null;
+    }, 120);
+  }, [isRendered, open]);
+
+  useEffect(() => {
+    if (!isRendered) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isRendered]);
+
+  useEffect(() => {
+    if (!open || !isRendered) return;
+    window.requestAnimationFrame(() => {
+      closeButtonRef.current?.focus();
+    });
+  }, [isRendered, open]);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current) {
+        window.clearTimeout(closeTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!openActionTemplateId) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (dropdownRef.current?.contains(event.target as Node)) return;
-      setIsOpen(false);
-      setOpenActionTemplateId(null);
+      const target = event.target as Node;
+      if (actionMenuRef.current?.contains(target)) return;
+      if (actionButtonRefs.current[openActionTemplateId]?.contains(target)) return;
+      closeActionMenu();
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
-    return () => document.removeEventListener("pointerdown", handlePointerDown);
-  }, [isOpen]);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [closeActionMenu, openActionTemplateId]);
+
+  const getFocusableElements = () =>
+    Array.from(
+      rootRef.current?.querySelectorAll<HTMLElement>(
+        "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])"
+      ) ?? []
+    ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
+
+  const handleRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (openActionTemplateId) {
+        closeActionMenu({ restoreFocus: true });
+        return;
+      }
+      requestClose({ restoreFocus: true });
+      return;
+    }
+
+    if (event.key !== "Tab") return;
+
+    const focusableElements = getFocusableElements();
+    if (focusableElements.length === 0) {
+      event.preventDefault();
+      return;
+    }
+
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+    if (!firstElement || !lastElement) return;
+    if (event.shiftKey && document.activeElement === firstElement) {
+      event.preventDefault();
+      lastElement.focus();
+    } else if (!event.shiftKey && document.activeElement === lastElement) {
+      event.preventDefault();
+      firstElement.focus();
+    }
+  };
 
   const handleSelectTemplate = (templateId: string) => {
-    setIsOpen(false);
-    setOpenActionTemplateId(null);
+    requestClose();
     void onSelectTemplate(templateId);
   };
 
-  const handleStartNewTemplate = () => {
-    setIsOpen(false);
-    setOpenActionTemplateId(null);
-    void onStartNewTemplate();
+  const openActionMenu = (event: ReactMouseEvent<HTMLButtonElement>, templateId: string) => {
+    event.stopPropagation();
+    if (openActionTemplateId === templateId) {
+      closeActionMenu({ restoreFocus: true });
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const menuWidth = 168;
+    const menuHeight = 142;
+    const margin = 12;
+    const left = Math.min(window.innerWidth - menuWidth - margin, Math.max(margin, rect.right - menuWidth));
+    let top = rect.bottom + 8;
+    if (top + menuHeight > window.innerHeight - margin) {
+      top = Math.max(margin, rect.top - menuHeight - 8);
+    }
+    setActionMenuPosition({ top, left });
+    setOpenActionTemplateId(templateId);
   };
 
   const handleTemplateAction = (
@@ -2603,126 +2333,192 @@ function TemplateDropdown({
     action: (templateId: string) => void | Promise<void>
   ) => {
     event.stopPropagation();
-    setIsOpen(false);
-    setOpenActionTemplateId(null);
+    requestClose();
     void action(templateId);
   };
 
-  return (
-    <div ref={dropdownRef} className="relative">
-      <label className="mb-1 block px-4 text-[9px] font-medium text-slate-700">Template</label>
-      <button
-        type="button"
-        onClick={() => {
-          setIsOpen((current) => !current);
-          setOpenActionTemplateId(null);
-        }}
-        className="flex h-[36px] w-full items-center justify-between gap-3 rounded-[16px] border border-[var(--app-border)] bg-[var(--app-control)] px-4 text-left text-[14px] font-semibold leading-none text-slate-950 shadow-[0_8px_18px_-20px_rgba(38,72,104,0.3)] transition hover:border-slate-300 focus:outline-none focus:ring-0"
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
+  if (!mounted || !isRendered) return null;
+
+  const scrimClass = isClosing
+    ? "opacity-0 transition-opacity duration-[90ms] ease-in motion-reduce:transition-none"
+    : "opacity-100 transition-opacity duration-[120ms] ease-out motion-reduce:transition-none";
+  const dialogClass = isClosing
+    ? "translate-y-[18px] opacity-[0.98] transition-[opacity,transform] duration-[120ms] ease-in motion-reduce:translate-y-0 motion-reduce:transition-none sm:translate-y-2 sm:duration-[110ms]"
+    : "translate-y-0 opacity-100 transition-[opacity,transform] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none sm:duration-[160ms]";
+
+  return createPortal(
+    <div
+      ref={rootRef}
+      className="fixed inset-0 z-[150] flex items-end justify-center sm:items-center"
+      onKeyDown={handleRootKeyDown}
+      data-template-library-root="true"
+    >
+      <div
+        aria-hidden="true"
+        className={`absolute inset-0 bg-slate-950/[0.12] ${scrimClass}`}
+        onPointerDown={() => requestClose({ restoreFocus: true })}
+      />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={helperId}
+        className={`relative z-10 flex max-h-[82dvh] w-full flex-col overflow-hidden rounded-t-[18px] border border-slate-200 bg-white shadow-[0_24px_70px_rgba(21,40,66,0.20)] [padding-bottom:env(safe-area-inset-bottom)] sm:max-h-[72dvh] sm:w-[560px] sm:max-w-[calc(100vw-40px)] sm:rounded-[16px] sm:pb-0 ${dialogClass}`}
       >
-        <span className="min-w-0 truncate">
-          {selectedTemplate?.name ?? "New Template"}
-        </span>
-        <svg
-          viewBox="0 0 16 16"
-          aria-hidden="true"
-          className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${isOpen ? "rotate-180" : ""}`}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M4 6l4 4 4-4" />
-        </svg>
-      </button>
-
-      {actionMessage ? <div className="mt-1 text-[11px] text-slate-500">{actionMessage}</div> : null}
-
-      {isOpen ? (
-        <div
-          className="absolute right-0 top-full z-[140] mt-2 w-full min-w-[260px] rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_22px_46px_-26px_rgba(15,23,42,0.5)]"
-          role="menu"
-        >
-          <div className="relative">
-            <button
-              type="button"
-              onClick={handleStartNewTemplate}
-              className={`flex min-h-[40px] w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-[12px] font-semibold transition ${
-                selectedTemplateId === null ? "bg-blue-50 text-blue-800" : "text-slate-800 hover:bg-slate-50"
-              }`}
-              role="menuitem"
-            >
-              <span className="min-w-0 truncate">New Template</span>
-              {selectedTemplateId === null ? (
-                <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-blue-700">Selected</span>
-              ) : null}
-            </button>
+        <div className="flex flex-none items-start justify-between gap-4 border-b border-slate-200/80 bg-white px-5 py-[18px]">
+          <div className="min-w-0">
+            <h2 id={titleId} className="text-[22px] font-semibold leading-7 text-slate-950">
+              Choose a template
+            </h2>
+            <p id={helperId} className="mt-2 max-w-[430px] text-[14px] leading-[1.4] text-slate-600">
+              Load a saved workflow for this event. Event details and Anchor Field values remain specific to the current run.
+            </p>
           </div>
-          {templates.map((template) => {
-            const isSelected = selectedTemplateId === template.id;
-            const isHighlighted = highlightedTemplateId === template.id;
-            return (
-              <div key={template.id} className="relative">
-                <button
-                  type="button"
-                  onClick={() => handleSelectTemplate(template.id)}
-                  className={`flex min-h-[40px] w-full items-center justify-between gap-3 rounded-xl px-3 py-2 pr-11 text-left text-[12px] font-semibold transition ${
-                    isSelected
-                      ? "bg-blue-50 text-blue-800"
-                      : isHighlighted
-                        ? "bg-green-50 text-slate-900"
-                        : "text-slate-800 hover:bg-slate-50"
-                  }`}
-                  role="menuitem"
-                >
-                  <span className="min-w-0 truncate">{template.name}</span>
-                  {isSelected ? <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-blue-700">Selected</span> : null}
-                </button>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setOpenActionTemplateId((current) => (current === template.id ? null : template.id));
-                  }}
-                  className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:text-slate-700"
-                  aria-label={`Template actions for ${template.name}`}
-                  aria-expanded={openActionTemplateId === template.id}
-                >
-                  <span className="text-sm leading-none">•••</span>
-                </button>
-                {openActionTemplateId === template.id ? (
-                  <div className="absolute right-1.5 top-[calc(100%-0.25rem)] z-[150] min-w-[150px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_36px_-20px_rgba(15,23,42,0.45)]">
-                    <button
-                      type="button"
-                      onClick={(event) => handleTemplateAction(event, template.id, onDuplicateTemplate)}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-[12px] font-medium text-slate-700 transition hover:bg-slate-50"
-                    >
-                      Copy
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => handleTemplateAction(event, template.id, onRenameTemplate)}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-[12px] font-medium text-slate-700 transition hover:bg-slate-50"
-                    >
-                      Rename
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => handleTemplateAction(event, template.id, onDeleteTemplate)}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-[12px] font-medium text-red-700 transition hover:bg-red-50"
-                    >
-                      Delete
-                    </button>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={() => requestClose({ restoreFocus: true })}
+            className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/25"
+            aria-label="Close template library"
+          >
+            <span aria-hidden="true" className="text-[20px] leading-none">
+              ×
+            </span>
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overscroll-contain overflow-y-auto p-3">
+          {templates.length > 0 ? (
+            <div className="space-y-1.5">
+              {templates.map((template) => {
+                const isSelected = selectedTemplateId === template.id;
+                const isHighlighted = highlightedTemplateId === template.id;
+                const actionCount = template.items.length;
+                const actionLabel = actionCount === 1 ? "1 action" : `${actionCount} actions`;
+                return (
+                  <div
+                    key={template.id}
+                    className={`grid min-h-[64px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[11px] border px-3 py-2.5 ${
+                      isSelected
+                        ? "border-blue-200 bg-blue-50/80"
+                        : isHighlighted
+                          ? "border-green-200 bg-green-50/70"
+                          : "border-slate-200 bg-white"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-[15px] font-semibold leading-5 text-slate-950" title={template.name}>
+                        {template.name}
+                      </div>
+                      <div className="mt-1 text-[12px] font-medium leading-4 text-slate-500">{actionLabel}</div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {isSelected ? (
+                        <span className="inline-flex h-[29px] items-center rounded-[8px] bg-blue-100 px-3 text-[12px] font-semibold text-[#315f92]">
+                          Current
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectTemplate(template.id)}
+                          className="inline-flex h-9 min-w-[68px] items-center justify-center rounded-[9px] border border-blue-200 bg-blue-50/50 px-3 text-[13px] font-semibold text-[#315f92] transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/25"
+                          aria-label={`Use ${template.name} template`}
+                        >
+                          Use
+                        </button>
+                      )}
+                      <button
+                        ref={(node) => {
+                          actionButtonRefs.current[template.id] = node;
+                        }}
+                        type="button"
+                        onClick={(event) => openActionMenu(event, template.id)}
+                        className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/25"
+                        aria-label={`Manage ${template.name}`}
+                        aria-haspopup="menu"
+                        aria-expanded={openActionTemplateId === template.id}
+                      >
+                        <span aria-hidden="true" className="text-[15px] leading-none">
+                          •••
+                        </span>
+                      </button>
+                    </div>
                   </div>
-                ) : null}
-              </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex min-h-[165px] flex-col items-center justify-center rounded-[12px] border border-dashed border-slate-200 bg-slate-50/50 px-5 text-center">
+              <h3 className="text-[16px] font-semibold text-slate-950">No saved templates yet</h3>
+              <p className="mt-2 max-w-[320px] text-[14px] leading-5 text-slate-600">
+                Build a plan, then choose Save as Template to reuse it later.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-none items-center justify-between gap-3 border-t border-slate-200/80 bg-white px-4 py-3 sm:px-5 sm:py-4">
+          <div className="hidden text-[13px] font-medium leading-5 text-slate-500 sm:block">
+            Templates are managed from this library.
+          </div>
+          <span className="sr-only" aria-live="polite">
+            {actionMessage}
+          </span>
+          <button
+            type="button"
+            onClick={() => requestClose({ restoreFocus: true })}
+            className={`${plansSecondaryButtonClass} ml-auto h-[38px] rounded-[9px] px-4 text-[13px]`}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+
+      {openActionTemplateId && actionMenuPosition ? (
+        <div
+          ref={actionMenuRef}
+          role="menu"
+          className="plans-menu-enter fixed z-[170] min-w-[168px] rounded-[10px] border border-slate-200 bg-white p-[7px] shadow-[0_18px_46px_rgba(21,40,66,0.18)]"
+          style={{ top: actionMenuPosition.top, left: actionMenuPosition.left } as CSSProperties}
+          data-template-action-menu="true"
+        >
+          {(() => {
+            const template = templates.find((entry) => entry.id === openActionTemplateId);
+            if (!template) return null;
+            return (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(event) => handleTemplateAction(event, template.id, onDuplicateTemplate)}
+                  className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(event) => handleTemplateAction(event, template.id, onRenameTemplate)}
+                  className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+                >
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(event) => handleTemplateAction(event, template.id, onDeleteTemplate)}
+                  className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+                >
+                  Delete
+                </button>
+              </>
             );
-          })}
+          })()}
         </div>
       ) : null}
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -3110,7 +2906,7 @@ export default function PlansPage() {
   const [lastTemplateSnapshot, setLastTemplateSnapshot] = useState<BuilderStateSnapshot | null>(null);
   const [lastBuilderSourceProvenance, setLastBuilderSourceProvenance] = useState<BuilderSourceProvenance | null>(null);
   const [guidedForm, setGuidedForm] = useState<GuidedFormState>(() => createEmptyGuidedForm());
-  const [, setAreAnchorsHidden] = useState(false);
+  const [areAnchorsHidden, setAreAnchorsHidden] = useState(true);
   const [templateActionMessage, setTemplateActionMessage] = useState("");
   const [draggingRowId, setDraggingRowId] = useState<string | null>(null);
   const [dragInsertionIndex, setDragInsertionIndex] = useState<number | null>(null);
@@ -3146,15 +2942,21 @@ export default function PlansPage() {
   const timeZoneOptions = useMemo(() => getSupportedTimeZones(), []);
   const [timeInputDrafts, setTimeInputDrafts] = useState<Record<string, string>>({});
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const [openWorkflowRowMenuId, setOpenWorkflowRowMenuId] = useState<string | null>(null);
+  const [workflowRowMenuPosition, setWorkflowRowMenuPosition] = useState<FloatingMenuPosition | null>(null);
+  const [openAnchorMenuId, setOpenAnchorMenuId] = useState<string | null>(null);
+  const [anchorMenuPosition, setAnchorMenuPosition] = useState<FloatingMenuPosition | null>(null);
   const [instantlyVisibleRowId, setInstantlyVisibleRowId] = useState<string | null>(null);
   const [addRowSettlingRowId, setAddRowSettlingRowId] = useState<string | null>(null);
   const [hiddenAddRowId, setHiddenAddRowId] = useState<string | null>(null);
-  const [inlineEditorFocusPhase, setInlineEditorFocusPhase] = useState<InlineEditorFocusPhase>("idle");
+  const [, setInlineEditorFocusPhase] = useState<InlineEditorFocusPhase>("idle");
   const [isBuilderPreviewOpen, setIsBuilderPreviewOpen] = useState(false);
   const [openPreviewDetail, setOpenPreviewDetail] = useState<{ rowId: string; kind: "reminder" | "email" | "meeting" } | null>(null);
   const [openPreviewRowMenuId, setOpenPreviewRowMenuId] = useState<string | null>(null);
   const [excludedPreviewItemIds, setExcludedPreviewItemIds] = useState<string[]>([]);
+  const [showNoPreviewItemsSelectedCallout, setShowNoPreviewItemsSelectedCallout] = useState(false);
   const previewModalScrollRef = useRef<HTMLDivElement | null>(null);
+  const previewItemListHeadingRef = useRef<HTMLDivElement | null>(null);
   const previewDetailRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [isBuilderVisualRevealDeferred, setIsBuilderVisualRevealDeferred] = useState(false);
   const [isBuilderEntryRevealImmediate, setIsBuilderEntryRevealImmediate] = useState(false);
@@ -3190,6 +2992,7 @@ export default function PlansPage() {
   const [builderTemplateNameDraft, setBuilderTemplateNameDraft] = useState("");
   const [builderTemplateSaveMessage, setBuilderTemplateSaveMessage] = useState<string | null>(null);
   const [highlightedTemplateId, setHighlightedTemplateId] = useState<string | null>(null);
+  const [isTemplateLibraryOpen, setIsTemplateLibraryOpen] = useState(false);
   const [showAiApplyConfirm, setShowAiApplyConfirm] = useState(false);
   const [aiApplySuccessMessage, setAiApplySuccessMessage] = useState<string | null>(null);
   const [showNewPlanDialog, setShowNewPlanDialog] = useState(false);
@@ -3197,7 +3000,7 @@ export default function PlansPage() {
   const [planSetupDialogMode, setPlanSetupDialogMode] = useState<PlanSetupDialogMode>("new");
   const [planSetupTemplateId, setPlanSetupTemplateId] = useState<string | null>(null);
   const [isPopupAnimatedIn, setIsPopupAnimatedIn] = useState(false);
-  const [recipientGroups, setRecipientGroups] = useState<RecipientGroup[]>(() => loadRecipientGroups());
+  const [recipientGroups, setRecipientGroups] = useState<RecipientGroup[]>([]);
   const [isRecipientGroupsModalOpen, setIsRecipientGroupsModalOpen] = useState(false);
   const [recipientGroupsModalMode, setRecipientGroupsModalMode] = useState<"select" | "create" | "edit">("select");
   const [recipientGroupsEditingGroup, setRecipientGroupsEditingGroup] = useState<RecipientGroup | null>(null);
@@ -3214,15 +3017,18 @@ export default function PlansPage() {
   const [hasMounted, setHasMounted] = useState(false);
   const [hasHydratedTemplates, setHasHydratedTemplates] = useState(false);
   const [hasHydratedBuilderDraft, setHasHydratedBuilderDraft] = useState(false);
-  const [isInlineEditorBackdropMounted, setIsInlineEditorBackdropMounted] = useState(false);
-  const [isInlineEditorBackdropVisible, setIsInlineEditorBackdropVisible] = useState(false);
-  const [rowEditorBottomRoomPx, setRowEditorBottomRoomPx] = useState(0);
+  const anchorFieldsRegionId = useId();
   const hasLocalTemplateMutationRef = useRef(false);
   const isBuilderDraftPersistencePausedRef = useRef(false);
   const builderTimeInputRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
   const builderTitleInputRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const builderOffsetInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  const workflowRowMenuRef = useRef<HTMLDivElement | null>(null);
+  const workflowRowMenuButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const anchorMenuRef = useRef<HTMLDivElement | null>(null);
+  const anchorMenuButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const templateLibraryButtonRef = useRef<HTMLButtonElement | null>(null);
   const addReminderButtonRef = useRef<HTMLButtonElement | null>(null);
   const addEmailButtonRef = useRef<HTMLButtonElement | null>(null);
   const addMeetingButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -3237,7 +3043,6 @@ export default function PlansPage() {
   const aiConversationRef = useRef<HTMLDivElement | null>(null);
   const aiComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const builderSectionRef = useRef<HTMLElement | null>(null);
-  const templatesSectionRef = useRef<HTMLElement | null>(null);
   const eventHeaderCardRef = useRef<HTMLDivElement | null>(null);
   const eventNameInputRef = useRef<HTMLInputElement | null>(null);
   const eventDateInputRef = useRef<HTMLInputElement | null>(null);
@@ -3250,6 +3055,7 @@ export default function PlansPage() {
   const rowsRef = useRef<BuilderRow[]>(rows);
   const rowNodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const rowEditorPanelRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const rowEditorFocusReturnRef = useRef<HTMLElement | null>(null);
   const dragInsertionIndexRef = useRef<number | null>(null);
   const [pressedRowId, setPressedRowId] = useState<string | null>(null);
   const activeDragRef = useRef<{
@@ -3291,6 +3097,114 @@ export default function PlansPage() {
       document.removeEventListener("mousedown", handlePointerDown);
     };
   }, [isSortMenuOpen]);
+
+  function getFloatingMenuPositionFromRect(rect: DOMRect, menuWidth: number) {
+    const viewportPadding = 12;
+    const left = Math.min(
+      Math.max(viewportPadding, rect.right - menuWidth),
+      Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding)
+    );
+    return {
+      top: Math.min(rect.bottom + 6, window.innerHeight - viewportPadding),
+      left,
+    };
+  }
+
+  const closeWorkflowRowMenu = useCallback(
+    (options?: { restoreFocus?: boolean }) => {
+      const currentMenuId = openWorkflowRowMenuId;
+      setOpenWorkflowRowMenuId(null);
+      setWorkflowRowMenuPosition(null);
+      if (options?.restoreFocus && currentMenuId) {
+        requestAnimationFrame(() => {
+          workflowRowMenuButtonRefs.current[currentMenuId]?.focus();
+        });
+      }
+    },
+    [openWorkflowRowMenuId]
+  );
+
+  const closeAnchorMenu = useCallback(
+    (options?: { restoreFocus?: boolean }) => {
+      const currentMenuId = openAnchorMenuId;
+      setOpenAnchorMenuId(null);
+      setAnchorMenuPosition(null);
+      if (options?.restoreFocus && currentMenuId) {
+        requestAnimationFrame(() => {
+          anchorMenuButtonRefs.current[currentMenuId]?.focus();
+        });
+      }
+    },
+    [openAnchorMenuId]
+  );
+
+  function openWorkflowRowMenu(event: ReactMouseEvent<HTMLButtonElement>, rowId: string) {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setOpenAnchorMenuId(null);
+    setAnchorMenuPosition(null);
+    setWorkflowRowMenuPosition(getFloatingMenuPositionFromRect(rect, 184));
+    setOpenWorkflowRowMenuId((current) => (current === rowId ? null : rowId));
+  }
+
+  function openAnchorMenu(event: ReactMouseEvent<HTMLButtonElement>, anchorId: string) {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setOpenWorkflowRowMenuId(null);
+    setWorkflowRowMenuPosition(null);
+    setAnchorMenuPosition(getFloatingMenuPositionFromRect(rect, 194));
+    setOpenAnchorMenuId((current) => (current === anchorId ? null : anchorId));
+  }
+
+  useEffect(() => {
+    if (!openWorkflowRowMenuId) return;
+    const menuRowId = openWorkflowRowMenuId;
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (workflowRowMenuRef.current?.contains(target)) return;
+      if (workflowRowMenuButtonRefs.current[menuRowId]?.contains(target)) return;
+      closeWorkflowRowMenu();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeWorkflowRowMenu({ restoreFocus: true });
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeWorkflowRowMenu, openWorkflowRowMenuId]);
+
+  useEffect(() => {
+    if (!openAnchorMenuId) return;
+    const menuAnchorId = openAnchorMenuId;
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (anchorMenuRef.current?.contains(target)) return;
+      if (anchorMenuButtonRefs.current[menuAnchorId]?.contains(target)) return;
+      closeAnchorMenu();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeAnchorMenu({ restoreFocus: true });
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeAnchorMenu, openAnchorMenuId]);
 
   function focusAndSelectOffsetInput(rowId: string) {
     requestAnimationFrame(() => {
@@ -3812,6 +3726,13 @@ export default function PlansPage() {
     () => (selectedTemplateId ? savedTemplates.find((template) => template.id === selectedTemplateId) ?? null : null),
     [savedTemplates, selectedTemplateId]
   );
+  const currentSelectedTemplateActionCount = currentSelectedTemplate?.items.length ?? 0;
+  const currentSelectedTemplateActionLabel =
+    currentSelectedTemplateActionCount === 1 ? "1 action" : `${currentSelectedTemplateActionCount} actions`;
+  const currentSourceLine = currentSelectedTemplate
+    ? `Using ${currentSelectedTemplate.name} template · ${currentSelectedTemplateActionLabel}`
+    : "Starting from a blank plan";
+  const templateLibraryButtonLabel = currentSelectedTemplate ? "Change template" : "Use template";
   const planSetupTemplate = useMemo(
     () => (planSetupTemplateId ? savedTemplates.find((template) => template.id === planSetupTemplateId) ?? null : null),
     [planSetupTemplateId, savedTemplates]
@@ -4039,7 +3960,6 @@ export default function PlansPage() {
     setOpenDurationEditorRowId(null);
     setOpenBodyEditorRowId(null);
     setClosingRowEditor(null);
-    setRowEditorBottomRoomPx(0);
   }, [
     clearScheduledAddRowInsert,
     clearScheduledAddRowLaunch,
@@ -4095,6 +4015,15 @@ export default function PlansPage() {
     clearScheduledRowEditorOpen();
     clearScheduledRowEditorClose();
     clearScheduledInlineEditorFocus();
+    const activeElement = document.activeElement;
+    const fallbackFocusTarget =
+      kind === "email"
+        ? addEmailButtonRef.current
+        : kind === "meeting"
+          ? addMeetingButtonRef.current
+          : addReminderButtonRef.current;
+    rowEditorFocusReturnRef.current =
+      activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : fallbackFocusTarget;
     setInlineEditorFocusPhase("expanding");
     scheduledInlineEditorRevealRef.current = window.setTimeout(() => {
       scheduledInlineEditorRevealRef.current = null;
@@ -4145,7 +4074,6 @@ export default function PlansPage() {
   const prepareThenOpenRowEditor = useCallback((rowId: string, kind: RowEditorKind) => {
     clearScheduledRowEditorOpen();
     clearScheduledRowEditorAttention();
-    setRowEditorBottomRoomPx(Math.max(ROW_EDITOR_BOTTOM_ROOM_PX, Math.round(window.innerHeight * 0.75)));
     applyRowEditorOpen(rowId, kind);
     scheduleRowEditorAttention(rowId);
   }, [applyRowEditorOpen, clearScheduledRowEditorAttention, clearScheduledRowEditorOpen, scheduleRowEditorAttention]);
@@ -4181,7 +4109,21 @@ export default function PlansPage() {
     scheduledRowEditorCloseRef.current = window.setTimeout(() => {
       scheduledRowEditorCloseRef.current = null;
       setClosingRowEditor(null);
-      setRowEditorBottomRoomPx(0);
+      const focusReturnTarget = rowEditorFocusReturnRef.current;
+      const fallbackFocusTarget =
+        currentOpenEditor.kind === "email"
+          ? addEmailButtonRef.current
+          : currentOpenEditor.kind === "meeting"
+            ? addMeetingButtonRef.current
+            : addReminderButtonRef.current;
+      rowEditorFocusReturnRef.current = null;
+      const safeFocusReturnTarget =
+        focusReturnTarget && document.contains(focusReturnTarget) ? focusReturnTarget : fallbackFocusTarget;
+      if (safeFocusReturnTarget && document.contains(safeFocusReturnTarget)) {
+        requestAnimationFrame(() => {
+          safeFocusReturnTarget.focus({ preventScroll: true });
+        });
+      }
       afterClose?.();
     }, ROW_EDITOR_CLOSE_ANIMATION_MS);
   }, [
@@ -4223,33 +4165,28 @@ export default function PlansPage() {
   const isAnyBuilderRowEditorVisible = Boolean(
     openEmailDraftRowId || openMeetingEditorRowId || openBodyEditorRowId || openDurationEditorRowId || closingRowEditor
   );
-  const shouldDimAroundInlineEditor = inlineEditorFocusPhase === "dimmed";
-  const shouldRevealInlineEditorItems = inlineEditorFocusPhase === "revealing" || inlineEditorFocusPhase === "dimmed";
   const inactiveEditorDimTransitionClass = "plans-editor-dim-target";
-  const builderInactiveControlClass = `${inactiveEditorDimTransitionClass} ${
-    shouldDimAroundInlineEditor ? "opacity-20" : "opacity-100"
-  }`;
+  const builderInactiveControlClass = inactiveEditorDimTransitionClass;
 
   useEffect(() => {
-    if (shouldDimAroundInlineEditor) {
-      setIsInlineEditorBackdropMounted(true);
-      const frameId = window.requestAnimationFrame(() => {
-        setIsInlineEditorBackdropVisible(true);
-      });
-      return () => window.cancelAnimationFrame(frameId);
-    }
+    if (!isAnyBuilderRowEditorVisible) return;
 
-    setIsInlineEditorBackdropVisible(false);
-    if (!isInlineEditorBackdropMounted) {
-      return;
-    }
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
 
-    const timeoutId = window.setTimeout(() => {
-      setIsInlineEditorBackdropMounted(false);
-    }, INLINE_EDITOR_DIM_FADE_MS);
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+    };
+  }, [isAnyBuilderRowEditorVisible]);
 
-    return () => window.clearTimeout(timeoutId);
-  }, [isInlineEditorBackdropMounted, shouldDimAroundInlineEditor]);
+  useEffect(() => {
+    if (!isAnyBuilderRowEditorVisible) return;
+    setIsSortMenuOpen(false);
+    setOpenTimeZoneRowId(null);
+  }, [isAnyBuilderRowEditorVisible]);
 
   useEffect(
     () => () => {
@@ -4371,6 +4308,9 @@ export default function PlansPage() {
   }
 
   function togglePreviewItemIncluded(itemId: string, checked: boolean) {
+    if (checked) {
+      setShowNoPreviewItemsSelectedCallout(false);
+    }
     setExcludedPreviewItemIds((current) =>
       checked
         ? current.filter((id) => id !== itemId)
@@ -4407,6 +4347,71 @@ export default function PlansPage() {
   function isPreviewItemScheduledInPast(item: Plan["items"][number]) {
     const scheduledTimestamp = getPreviewItemScheduledTimestamp(item);
     return scheduledTimestamp != null && scheduledTimestamp < Date.now();
+  }
+
+  function formatPastScheduledItemDateTime(item: Plan["items"][number]) {
+    const scheduledTimestamp = getPreviewItemScheduledTimestamp(item);
+    if (scheduledTimestamp != null) {
+      const scheduledAt = new Date(scheduledTimestamp);
+      return `${scheduledAt.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })} · ${scheduledAt.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+      })}`;
+    }
+
+    const dueDate = getEffectivePreviewItemDate(item);
+    const timeLabel =
+      item.meetingDraft?.isAllDay || item.durationDraft?.isAllDay
+        ? "All day"
+        : formatPreviewTime(getUsableReminderTime(item.reminderTime, anchorMap) ?? "");
+    if (!dueDate) return timeLabel || "No scheduled time";
+    const [year, month, day] = dueDate.split("-").map(Number);
+    const date = new Date((year ?? 2000), (month ?? 1) - 1, day ?? 1);
+    return `${date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    })}${timeLabel ? ` · ${timeLabel}` : ""}`;
+  }
+
+  function renderPastScheduledItemsContent(itemIds?: string[]) {
+    const previewItems = getLatestPreviewPlan().items;
+    const scopedItems = itemIds ? previewItems.filter((item) => itemIds.includes(item.id)) : previewItems;
+    const pastItems = scopedItems.filter(isPreviewItemScheduledInPast);
+    const itemCountLabel = pastItems.length === 1 ? "1 selected item" : `${pastItems.length} selected items`;
+    const visibleItems = pastItems.slice(0, 5);
+    const hiddenCount = Math.max(0, pastItems.length - visibleItems.length);
+
+    return (
+      <div className="space-y-3">
+        <div className="text-[13px] font-semibold text-amber-700">{itemCountLabel}</div>
+        <div className="max-h-[32dvh] overflow-y-auto rounded-[10px] border border-amber-200/80 bg-amber-50/45">
+          <div className="divide-y divide-amber-200/70">
+            {visibleItems.map((item) => {
+              const rowKind = classifyPlanRow(item);
+              const typeLabel = rowKind === "email" ? "Email" : rowKind === "meeting" ? "Meeting" : "Reminder";
+              const title = item.customTitle ?? item.title ?? `Untitled ${typeLabel.toLowerCase()}`;
+              return (
+                <div key={item.id} className="grid gap-1 px-3.5 py-3 min-[560px]:grid-cols-[92px_minmax(0,1fr)_190px] min-[560px]:gap-3">
+                  <div className="text-[13px] font-semibold text-amber-700">{typeLabel}</div>
+                  <div className="min-w-0 text-[14px] font-semibold leading-5 text-slate-900">{title}</div>
+                  <div className="min-w-0 text-[13px] leading-5 text-slate-600 tabular-nums">
+                    {formatPastScheduledItemDateTime(item)}
+                  </div>
+                </div>
+              );
+            })}
+            {hiddenCount > 0 ? (
+              <div className="px-3.5 py-3 text-[13px] font-semibold text-amber-700">+ {hiddenCount} more</div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function getReviewExportItemsForRender(items: Plan["items"]) {
@@ -4550,6 +4555,22 @@ export default function PlansPage() {
         eventTimeInputRef.current?.focus({ preventScroll: true });
         return;
       }
+      const firstAnchorKey = Array.from(anchorKeys)[0];
+      if (firstAnchorKey) {
+        const matchingAnchor = anchors.find((anchor) => normalizeAnchorKey(anchor.key) === firstAnchorKey);
+        window.requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            const anchorTarget = matchingAnchor
+              ? document.querySelector<HTMLInputElement>(
+                  `[data-plan-anchor-value="${matchingAnchor.id}"], [data-plan-anchor-key="${matchingAnchor.id}"]`
+                )
+              : document.querySelector<HTMLElement>('[data-plan-anchor-surface="true"]');
+            anchorTarget?.scrollIntoView({ behavior: "smooth", block: "center" });
+            anchorTarget?.focus?.({ preventScroll: true });
+          }, 80);
+        });
+        return;
+      }
       builderSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
   }
@@ -4645,7 +4666,14 @@ export default function PlansPage() {
   }
 
   async function handleDeleteRecipientGroup(group: RecipientGroup) {
-    const confirmed = window.confirm(`Delete recipient group "${group.name}"?`);
+    const confirmed = await showConfirmModal({
+      title: "Delete recipient group?",
+      message: `“${group.name}” will be removed. Plans that reference this group will no longer resolve its recipients.`,
+      confirmLabel: "Delete recipient group",
+      cancelLabel: "Cancel",
+      destructive: true,
+      severity: "destructive",
+    });
     if (!confirmed) return;
     await deleteRecipientGroup(group.id);
     setRecipientGroupsEditingGroup(null);
@@ -4686,29 +4714,91 @@ export default function PlansPage() {
     });
   }
 
+  function renderSortControl() {
+    if (renderedRows.length === 0) return null;
+
+    return (
+      <div ref={sortMenuRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setIsSortMenuOpen((current) => !current)}
+          className={`${plansToolbarButtonClass} min-w-[86px] gap-2 border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50`}
+          aria-label="Sort rows"
+          aria-expanded={isSortMenuOpen}
+        >
+          <svg
+            viewBox="0 0 20 20"
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4 5h8" />
+            <path d="M4 10h12" />
+            <path d="M4 15h6" />
+          </svg>
+          <span>Sort</span>
+        </button>
+        {isSortMenuOpen ? (
+          <div className="plans-menu-enter absolute right-0 top-full z-[170] mt-1.5 min-w-[220px] rounded-[10px] border border-slate-200 bg-white p-[7px] shadow-[0_18px_46px_rgba(21,40,66,0.18)]">
+            <button
+              type="button"
+              onClick={() => applyBuilderSort("nearest_first")}
+              className="flex h-10 w-full items-center justify-between rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+            >
+              <span>Closest to now</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => applyBuilderSort("latest_first")}
+              className="flex h-10 w-full items-center justify-between rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+            >
+              <span>Furthest from now</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => applyBuilderSort("type")}
+              className="flex h-10 w-full items-center justify-between rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+            >
+              <span>By reminder type</span>
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderDynamicFieldsSection(options?: { inlineEditor?: boolean }) {
     const inlineEditor = options?.inlineEditor ?? false;
 
-    return (
-      <div className={inlineEditor ? "space-y-3" : "mx-auto max-w-[620px] space-y-4 sm:-translate-x-[3.875rem]"}>
-        {!inlineEditor ? (
-          <div className="flex items-center gap-2">
-            <div className="text-lg font-semibold text-slate-900">Anchor Fields</div>
-            <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
-              i
-              <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
-                Reuse shared values like event name, date, or custom details across reminders, emails, and meetings.
-              </span>
-            </span>
+    if (inlineEditor) {
+      return (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[14px] font-semibold text-slate-700">Anchor Fields</div>
+            <button
+              type="button"
+              data-inspector-anchor-add="true"
+              onClick={() => {
+                setAnchors((current) => [...current, createEmptyAnchor()]);
+                setAreAnchorsHidden(false);
+              }}
+              className="inline-flex h-[36px] shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 text-[13px] font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30 max-[420px]:text-[12px]"
+            >
+              + Add Anchor Field
+            </button>
           </div>
-        ) : null}
-        <div className="mt-4 space-y-3">
-                      {anchors.map((anchor) => {
-                        const resolvedAnchor = resolvedAnchors.find((entry) => entry.id === anchor.id);
-                        const isCoreEventAnchor = isCoreEventAnchorKey(anchor.key);
-                        const isReadOnlyAnchor = Boolean(anchor.locked || isCoreEventAnchor);
-                        const isMissingFieldHighlighted = missingFieldHighlights.anchorKeys.includes(normalizeAnchorKey(anchor.key));
-                        const displayedAnchorValue = isReadOnlyAnchor
+
+          <div className="divide-y divide-slate-200/80 overflow-hidden rounded-xl border border-slate-200/80 bg-white">
+            {anchors.map((anchor) => {
+              const resolvedAnchor = resolvedAnchors.find((entry) => entry.id === anchor.id);
+              const isCoreEventAnchor = isCoreEventAnchorKey(anchor.key);
+              const isReadOnlyAnchor = Boolean(anchor.locked || isCoreEventAnchor);
+              const isMissingFieldHighlighted = missingFieldHighlights.anchorKeys.includes(normalizeAnchorKey(anchor.key));
+              const displayedAnchorValue = isReadOnlyAnchor
                 ? getAnchorDisplayValue(
                     anchor.key,
                     getDerivedAnchorValue(planType, effectivePlanName, anchorDate, anchor.key, guidedForm, {
@@ -4720,41 +4810,46 @@ export default function PlansPage() {
                       anchor.value
                   )
                 : anchor.value;
+
               return (
                 <div
                   key={anchor.id}
-                  className={`grid grid-cols-[minmax(0,15rem)_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl max-[640px]:grid-cols-1 max-[640px]:items-stretch ${
-                    isMissingFieldHighlighted ? "border border-red-300 bg-red-50/40 p-2 ring-2 ring-red-200" : ""
+                  className={`grid grid-cols-[28px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2.5 min-[620px]:min-h-[58px] min-[620px]:grid-cols-[28px_minmax(150px,0.75fr)_minmax(180px,1.25fr)_72px_72px_32px] ${
+                    isMissingFieldHighlighted ? "bg-red-50/45 ring-2 ring-inset ring-red-200" : ""
                   }`}
                 >
-                  <div className="relative">
+                  <div className="order-1 flex h-8 items-center justify-center">
                     {isReadOnlyAnchor ? (
-                      <span className="absolute left-[-1.9rem] top-1/2 -translate-y-1/2">
-                        <span className="peer inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-[var(--app-control)] text-slate-400">
-                          <svg
-                            aria-hidden="true"
-                            viewBox="0 0 16 16"
-                            className="h-3 w-3"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
-                            <path d="M5.5 7V5.75a2.5 2.5 0 1 1 5 0V7" />
-                          </svg>
-                        </span>
-                        <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 z-20 hidden w-56 -translate-y-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left text-[11px] font-normal leading-4 text-slate-600 shadow-lg peer-hover:block">
+                      <span
+                        className="group/lock relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-400"
+                        title="This anchor is filled automatically from the event details."
+                      >
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 16 16"
+                          className="h-3.5 w-3.5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
+                          <path d="M5.5 7V5.75a2.5 2.5 0 1 1 5 0V7" />
+                        </svg>
+                        <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 z-20 hidden w-56 -translate-y-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover/lock:block">
                           This anchor is locked because it is filled automatically from the event details.
                         </span>
                       </span>
-                    ) : null}
-                    <div
-                      className="flex h-9 items-center rounded-lg border border-slate-200 bg-[var(--app-control)] px-3 font-mono text-[12px] text-slate-700"
-                    >
-                    <span className="text-gray-500">[</span>
+                    ) : (
+                      <span className="h-2 w-2 rounded-full bg-slate-300" aria-hidden="true" />
+                    )}
+                  </div>
+
+                  <div className="order-2 flex h-[40px] min-w-0 items-center rounded-lg border border-slate-200 bg-white px-2.5 font-mono text-[13px] text-slate-700">
+                    <span className="text-slate-400">[</span>
                     <input
+                      data-inspector-anchor-key="true"
                       className={`min-w-0 flex-1 border-0 bg-transparent px-1 text-center uppercase focus:outline-none focus:ring-0 ${
                         isReadOnlyAnchor ? "cursor-not-allowed text-slate-700" : ""
                       }`}
@@ -4776,111 +4871,464 @@ export default function PlansPage() {
                         );
                       }}
                     />
-                    <span className="text-gray-500">]</span>
-                    </div>
+                    <span className="text-slate-400">]</span>
                   </div>
+
                   <input
-                    className={`h-9 w-full rounded-lg border border-slate-200 bg-[var(--app-control)] px-3 text-center text-sm text-slate-700 ${
+                    data-inspector-anchor-value="true"
+                    className={`order-4 col-span-3 h-[40px] w-full rounded-lg border border-slate-200 bg-white px-3 text-[14px] text-slate-700 placeholder:text-slate-400 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20 min-[620px]:order-3 min-[620px]:col-span-1 ${
                       isReadOnlyAnchor ? "cursor-not-allowed" : ""
                     }`}
                     placeholder="Value"
                     value={displayedAnchorValue}
                     readOnly={isReadOnlyAnchor}
-                    onChange={(e) =>
-                      {
-                        const normalizedAnchorKey = normalizeAnchorKey(anchor.key);
-                        setAnchors((current) =>
-                          current.map((entry) =>
-                            entry.id === anchor.id ? { ...entry, value: e.target.value, lastUpdatedAt: new Date().toISOString() } : entry
-                          )
-                        );
-                        if (missingFieldHighlights.anchorKeys.includes(normalizedAnchorKey)) {
-                          setMissingFieldHighlights((current) => ({
-                            ...current,
-                            anchorKeys: current.anchorKeys.filter((key) => key !== normalizedAnchorKey),
-                          }));
-                        }
+                    onChange={(e) => {
+                      const normalizedAnchorKey = normalizeAnchorKey(anchor.key);
+                      setAnchors((current) =>
+                        current.map((entry) =>
+                          entry.id === anchor.id
+                            ? { ...entry, value: e.target.value, lastUpdatedAt: new Date().toISOString() }
+                            : entry
+                        )
+                      );
+                      if (missingFieldHighlights.anchorKeys.includes(normalizedAnchorKey)) {
+                        setMissingFieldHighlights((current) => ({
+                          ...current,
+                          anchorKeys: current.anchorKeys.filter((key) => key !== normalizedAnchorKey),
+                        }));
                       }
-                    }
+                    }}
                   />
-                  <div className="flex items-center justify-end gap-2 max-[640px]:justify-start">
+
+                  <div className="order-5 col-span-3 grid grid-cols-2 gap-2 min-[620px]:col-span-2 min-[620px]:grid-cols-2">
                     <button
                       type="button"
+                      data-inspector-anchor-insert="true"
                       onMouseDown={(e) => e.preventDefault()}
-                      className="h-9 min-w-[76px] rounded-lg border border-[var(--app-border)] bg-[var(--app-control)] px-3 text-sm font-medium text-slate-950 shadow-sm hover:bg-[var(--app-control-hover)]"
+                      className="inline-flex h-[40px] items-center justify-center rounded-lg border border-slate-200 bg-white px-2 text-[13px] font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/25 min-[620px]:h-[38px]"
                       onClick={() => onInsertAnchor(anchor.key)}
                     >
                       Insert
                     </button>
                     <button
                       type="button"
+                      data-inspector-anchor-delete="true"
                       disabled={isReadOnlyAnchor}
                       onClick={() => setAnchors((current) => current.filter((entry) => entry.id !== anchor.id))}
-                      className={`h-9 min-w-[76px] rounded-lg border px-3 text-sm ${
+                      className={`inline-flex h-[40px] items-center justify-center rounded-lg border px-2 text-[13px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200 min-[620px]:h-[38px] ${
                         isReadOnlyAnchor
-                          ? "cursor-not-allowed border-slate-200 bg-[var(--app-control)] text-slate-300"
-                          : "border-red-500 bg-[var(--app-control)] font-medium text-red-600 shadow-sm hover:bg-red-50 hover:text-red-700"
+                          ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300"
+                          : "border-red-200 bg-white text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700"
                       }`}
                     >
                       Delete
                     </button>
-                    <div className="relative">
-                      <button
-                        type="button"
-                        aria-label="Mark as important"
-                        onClick={() =>
-                          setAnchors((current) =>
-                            current.map((entry) =>
-                              entry.id === anchor.id ? { ...entry, isImportant: !entry.isImportant } : entry
-                            )
+                  </div>
+
+                  <div className="order-3 flex justify-end min-[620px]:order-6">
+                    <button
+                      type="button"
+                      data-inspector-anchor-important="true"
+                      aria-label="Mark as important"
+                      title="Mark as important"
+                      onClick={() =>
+                        setAnchors((current) =>
+                          current.map((entry) =>
+                            entry.id === anchor.id ? { ...entry, isImportant: !entry.isImportant } : entry
                           )
-                        }
-                        className={`peer inline-flex h-8 w-8 items-center justify-center rounded-full border transition ${
-                          anchor.isImportant
-                            ? "border-red-200 bg-red-50/70 text-red-600"
-                            : "border-slate-200 bg-[var(--app-control)] text-slate-400 hover:border-slate-300 hover:text-slate-600"
-                        }`}
+                        )
+                      }
+                      className={`peer inline-flex h-8 w-8 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200 ${
+                        anchor.isImportant
+                          ? "border-red-200 bg-red-50/70 text-red-600"
+                          : "border-slate-200 bg-white text-slate-400 hover:border-slate-300 hover:text-slate-600"
+                      }`}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        viewBox="0 0 16 16"
+                        className="h-3.5 w-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
                       >
-                        <svg
-                          aria-hidden="true"
-                          viewBox="0 0 16 16"
-                          className="h-3.5 w-3.5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.6"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M8 3.25v5.4" />
-                          <circle cx="8" cy="12.15" r="0.95" fill="currentColor" stroke="none" />
-                        </svg>
-                      </button>
-                      <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] right-0 z-20 hidden w-64 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-lg peer-hover:block peer-focus-visible:block">
-                        <div className="text-xs font-semibold text-slate-900">Mark as important</div>
-                        <div className="mt-1 text-xs leading-5 text-slate-600">
-                          If enabled, export will warn you when this field is empty or has not been updated since the last export.
-                        </div>
-                      </div>
-                    </div>
+                        <path d="M8 3.25v5.4" />
+                        <circle cx="8" cy="12.15" r="0.95" fill="currentColor" stroke="none" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
               );
             })}
-            <div className="flex justify-center pt-1">
+          </div>
+        </section>
+      );
+    }
+
+    const getDisplayValueForAnchor = (anchor: BuilderAnchor) => {
+      const resolvedAnchor = resolvedAnchors.find((entry) => entry.id === anchor.id);
+      const isReadOnlyAnchor = Boolean(anchor.locked || isCoreEventAnchorKey(anchor.key));
+      if (!isReadOnlyAnchor) return anchor.value;
+      return getAnchorDisplayValue(
+        anchor.key,
+        getDerivedAnchorValue(planType, effectivePlanName, anchorDate, anchor.key, guidedForm, {
+          eventNameValue: eventName.trim(),
+          eventDateValue: noEventDate ? "" : anchorDate,
+          eventTimeValue: eventTime.trim(),
+        }) ??
+          resolvedAnchor?.value ??
+          anchor.value
+      );
+    };
+    const coreAnchorCount = anchors.filter((anchor) => anchor.locked || isCoreEventAnchorKey(anchor.key)).length;
+    const customAnchorCount = anchors.length - coreAnchorCount;
+    const requiredAnchorNeedsValues = anchors.filter((anchor) => anchor.isImportant && !getDisplayValueForAnchor(anchor).trim()).length;
+    const anchorSummaryParts = [
+      coreAnchorCount ? `${coreAnchorCount} core ${coreAnchorCount === 1 ? "field" : "fields"}` : null,
+      customAnchorCount ? `${customAnchorCount} custom ${customAnchorCount === 1 ? "field" : "fields"}` : null,
+      requiredAnchorNeedsValues
+        ? `${requiredAnchorNeedsValues} ${requiredAnchorNeedsValues === 1 ? "field needs a value" : "fields need values"}`
+        : null,
+    ].filter(Boolean);
+    const anchorSummary =
+      anchorSummaryParts.length > 0
+        ? anchorSummaryParts.join(" · ")
+        : `${anchors.length} ${anchors.length === 1 ? "field" : "fields"}`;
+
+    function addBaseAnchorField() {
+      const nextAnchor = createEmptyAnchor();
+      setAreAnchorsHidden(false);
+      setAnchors((current) => [...current, nextAnchor]);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const target = document.querySelector<HTMLInputElement>(`[data-plan-anchor-key="${nextAnchor.id}"]`);
+          target?.scrollIntoView({ behavior: "smooth", block: "center" });
+          target?.focus({ preventScroll: true });
+        });
+      });
+    }
+
+    return (
+      <section className={plansSurfaceClass} data-plan-anchor-surface="true">
+        <div className={plansSectionHeaderClass}>
+          <div className="flex flex-col gap-[12px] min-[720px]:flex-row min-[720px]:items-start min-[720px]:justify-between">
+            <div className="min-w-0">
+              <h2 className={plansPanelHeadingClass}>Anchor Fields</h2>
+              <p className="mt-[3px] text-[14px] leading-[1.4] text-slate-600">{anchorSummary}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-[8px] min-[480px]:flex min-[480px]:justify-end">
+              <button type="button" onClick={addBaseAnchorField} className={`${plansSecondaryButtonClass} min-w-0 px-3`}>
+                Add Anchor Field
+              </button>
               <button
                 type="button"
-                onClick={() => {
-                  setAnchors((current) => [...current, createEmptyAnchor()]);
-                  setAreAnchorsHidden(false);
-                }}
-                aria-label="Add anchor field"
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-[var(--app-control)] text-xl font-medium leading-none text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
+                aria-expanded={!areAnchorsHidden}
+                aria-controls={anchorFieldsRegionId}
+                onClick={() => setAreAnchorsHidden((current) => !current)}
+                className={`${plansSecondaryButtonClass} min-w-0 px-3`}
               >
-                +
+                {areAnchorsHidden ? "Show fields" : "Hide fields"}
               </button>
             </div>
           </div>
-      </div>
+        </div>
+
+        {!areAnchorsHidden ? (
+          <div
+            id={anchorFieldsRegionId}
+            aria-label="Anchor Fields"
+            className="grid transition-[grid-template-rows,opacity] duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none"
+          >
+            <div className="divide-y divide-slate-200/80 overflow-hidden bg-white">
+              {anchors.map((anchor) => {
+                const isCoreEventAnchor = isCoreEventAnchorKey(anchor.key);
+                const isReadOnlyAnchor = Boolean(anchor.locked || isCoreEventAnchor);
+                const isMissingFieldHighlighted = missingFieldHighlights.anchorKeys.includes(normalizeAnchorKey(anchor.key));
+                const displayedAnchorValue = getDisplayValueForAnchor(anchor);
+                const normalizedAnchorKey = normalizeAnchorKey(anchor.key);
+
+                return (
+                  <div
+                    key={anchor.id}
+                    className={`relative grid grid-cols-[28px_minmax(0,1fr)_32px] items-center gap-x-[8px] gap-y-[8px] px-[14px] py-[10px] min-[640px]:grid-cols-[28px_minmax(150px,0.8fr)_minmax(180px,1.2fr)_76px_32px] min-[640px]:gap-x-[10px] min-[640px]:gap-y-0 min-[640px]:px-[14px] min-[640px]:py-[10px] min-[900px]:min-h-[60px] min-[900px]:grid-cols-[28px_minmax(190px,0.8fr)_minmax(260px,1.2fr)_76px_32px] min-[900px]:gap-x-[12px] min-[900px]:px-[16px] ${
+                      isMissingFieldHighlighted ? "bg-red-50/40 ring-2 ring-inset ring-red-200" : ""
+                    }`}
+                  >
+                    <div className="flex h-[32px] items-center justify-center">
+                      {isReadOnlyAnchor ? (
+                        <span
+                          className="group/lock relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-slate-400"
+                          title="This anchor is filled automatically from the event details."
+                        >
+                          <svg
+                            aria-hidden="true"
+                            viewBox="0 0 16 16"
+                            className="h-3.5 w-3.5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
+                            <path d="M5.5 7V5.75a2.5 2.5 0 1 1 5 0V7" />
+                          </svg>
+                        </span>
+                      ) : (
+                        <span className="h-2 w-2 rounded-full bg-slate-300" aria-hidden="true" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0">
+                      {isReadOnlyAnchor ? (
+                        <div className="flex min-w-0 flex-col gap-[4px] min-[640px]:flex-row min-[640px]:items-center">
+                          <div
+                            className="flex h-[38px] w-full min-w-0 items-center rounded-[9px] border border-slate-200 bg-slate-50 px-3 font-mono text-[13px] font-semibold uppercase text-slate-700 min-[640px]:flex-1"
+                            title={formatAnchorTokenDisplay(anchor.key)}
+                            aria-label={anchor.isImportant ? `${formatAnchorTokenDisplay(anchor.key)} required` : formatAnchorTokenDisplay(anchor.key)}
+                          >
+                            <span className="truncate">{formatAnchorTokenDisplay(anchor.key)}</span>
+                          </div>
+                          {anchor.isImportant ? (
+                            <span className="inline-flex h-[20px] shrink-0 items-center self-start rounded-[6px] border border-amber-200 bg-amber-50 px-2 text-[11px] font-semibold text-amber-800 min-[640px]:self-center">
+                              Required
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="flex min-w-0 flex-col gap-[4px] min-[640px]:flex-row min-[640px]:items-center">
+                          <div className="flex h-[38px] w-full min-w-0 items-center rounded-[9px] border border-slate-200 bg-white px-3 font-mono text-[13px] text-slate-700 shadow-sm min-[640px]:flex-1">
+                            <span className="text-gray-500">[</span>
+                            <input
+                              data-plan-anchor-key={anchor.id}
+                              aria-label={anchor.isImportant ? "Anchor key, required" : "Anchor key"}
+                              className="min-w-0 flex-1 border-0 bg-transparent px-1 text-center uppercase focus:outline-none focus:ring-0"
+                              placeholder="KEY"
+                              value={anchor.key}
+                              onChange={(e) => {
+                                if (missingFieldHighlights.anchorKeys.includes(normalizedAnchorKey)) {
+                                  setMissingFieldHighlights((current) => ({
+                                    ...current,
+                                    anchorKeys: current.anchorKeys.filter((key) => key !== normalizedAnchorKey),
+                                  }));
+                                }
+                                setAnchors((current) =>
+                                  current.map((entry) =>
+                                    entry.id === anchor.id ? { ...entry, key: e.target.value.toUpperCase() } : entry
+                                  )
+                                );
+                              }}
+                            />
+                            <span className="text-gray-500">]</span>
+                          </div>
+                          {anchor.isImportant ? (
+                            <span className="inline-flex h-[20px] shrink-0 items-center self-start rounded-[6px] border border-amber-200 bg-amber-50 px-2 text-[11px] font-semibold text-amber-800 min-[640px]:self-center">
+                              Required
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="col-span-3 grid grid-cols-[minmax(0,1fr)_82px] gap-[8px] min-[640px]:contents">
+                      <input
+                        data-plan-anchor-value={anchor.id}
+                        aria-label={`Value for ${formatAnchorTokenDisplay(anchor.key)}`}
+                        className={`h-[38px] w-full rounded-[9px] border border-slate-200 bg-white px-3 text-[14px] text-slate-700 shadow-sm placeholder:text-slate-400 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20 ${
+                          isReadOnlyAnchor ? "cursor-not-allowed" : ""
+                        }`}
+                        placeholder="Value"
+                        value={displayedAnchorValue}
+                        readOnly={isReadOnlyAnchor}
+                        onChange={(e) => {
+                          setAnchors((current) =>
+                            current.map((entry) =>
+                              entry.id === anchor.id ? { ...entry, value: e.target.value, lastUpdatedAt: new Date().toISOString() } : entry
+                            )
+                          );
+                          if (missingFieldHighlights.anchorKeys.includes(normalizedAnchorKey)) {
+                            setMissingFieldHighlights((current) => ({
+                              ...current,
+                              anchorKeys: current.anchorKeys.filter((key) => key !== normalizedAnchorKey),
+                            }));
+                          }
+                        }}
+                      />
+
+                      <button
+                        type="button"
+                        aria-label={`Insert ${formatAnchorTokenDisplay(anchor.key)}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        className="inline-flex h-[38px] w-[82px] items-center justify-center rounded-[9px] border border-slate-200 bg-white px-2 text-[13px] font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/25 min-[640px]:w-[76px]"
+                        onClick={() => onInsertAnchor(anchor.key)}
+                      >
+                        Insert
+                      </button>
+                    </div>
+
+                    <button
+                      ref={(node) => {
+                        anchorMenuButtonRefs.current[anchor.id] = node;
+                      }}
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={openAnchorMenuId === anchor.id}
+                      aria-label={`More actions for ${formatAnchorTokenDisplay(anchor.key)}`}
+                      onClick={(event) => openAnchorMenu(event, anchor.id)}
+                      className="col-start-3 row-start-1 inline-flex h-[32px] w-[32px] items-center justify-center justify-self-end rounded-[8px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/25 min-[640px]:col-start-auto min-[640px]:row-start-auto min-[640px]:justify-self-center"
+                    >
+                      <span className="text-[15px] leading-none">•••</span>
+                    </button>
+
+                    {hasMounted && openAnchorMenuId === anchor.id && anchorMenuPosition
+                      ? createPortal(
+                          <div
+                            ref={anchorMenuRef}
+                            role="menu"
+                            className="plans-menu-enter fixed z-[170] min-w-[194px] rounded-[10px] border border-slate-200 bg-white p-[7px] shadow-[0_18px_46px_rgba(21,40,66,0.18)]"
+                            style={{ top: anchorMenuPosition.top, left: anchorMenuPosition.left }}
+                          >
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setAnchors((current) =>
+                                  current.map((entry) =>
+                                    entry.id === anchor.id ? { ...entry, isImportant: !entry.isImportant } : entry
+                                  )
+                                );
+                                closeAnchorMenu({ restoreFocus: true });
+                              }}
+                              className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+                            >
+                              {anchor.isImportant ? "Mark as optional" : "Mark as important"}
+                            </button>
+                            {!isReadOnlyAnchor ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setAnchors((current) => current.filter((entry) => entry.id !== anchor.id));
+                                  closeAnchorMenu();
+                                }}
+                                className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+                              >
+                                Delete Anchor Field
+                              </button>
+                            ) : null}
+                          </div>,
+                          document.body
+                        )
+                      : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderPlanActionsSection() {
+    const canSaveAsTemplate = shouldRenderBuilderSourceBanner;
+    const handleReviewAndExport = () => {
+      void (async () => {
+        if (await validatePreviewBeforeOpen()) return;
+        setOpenPreviewDetail(null);
+        setOpenPreviewRowMenuId(null);
+        setExcludedPreviewItemIds([]);
+        setShowNoPreviewItemsSelectedCallout(false);
+        setIsBuilderPreviewOpen(true);
+      })();
+    };
+    const handleSave = () => {
+      void saveCurrentTemplate();
+    };
+    const handleCancel = () => {
+      void requestCancelEditing();
+    };
+    const handleSaveAsTemplate = () => {
+      if (canSaveAsTemplate) {
+        openBuilderTemplateSaveDialog();
+      }
+    };
+    const saveAsTemplateDisabledClass =
+      "disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none";
+
+    return (
+      <section className={`${plansSurfaceClass} px-[16px] py-[14px] sm:px-[20px]`} data-plan-action-bar="true">
+        <div className="hidden items-center justify-between gap-[10px] min-[900px]:flex min-[900px]:flex-nowrap" data-plan-action-layout="desktop">
+          <button
+            type="button"
+            onClick={handleCancel}
+            className={`${plansSecondaryButtonClass} h-[40px] whitespace-nowrap border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50`}
+          >
+            Cancel
+          </button>
+          <div className="flex min-w-0 items-center justify-end gap-[10px]">
+            <button
+              type="button"
+              onClick={handleSave}
+              className={`${plansSecondaryButtonClass} h-[40px] whitespace-nowrap`}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveAsTemplate}
+              disabled={!canSaveAsTemplate}
+              aria-disabled={!canSaveAsTemplate}
+              className={`${plansSecondaryButtonClass} h-[40px] min-w-[138px] whitespace-nowrap ${saveAsTemplateDisabledClass}`}
+              title={canSaveAsTemplate ? "Save as Template" : "Add event details, actions, or Anchor Fields before saving as a template."}
+            >
+              Save as Template
+            </button>
+            {executionNotices.some((entry) => entry.notice.tone === "success") ? <ExportDoneBadge /> : null}
+            <button
+              type="button"
+              onClick={handleReviewAndExport}
+              className={`${plansPrimaryButtonClass} h-[40px] min-w-[150px] whitespace-nowrap`}
+            >
+              Review &amp; Export
+            </button>
+          </div>
+        </div>
+        <div className="grid gap-[10px] min-[900px]:hidden" data-plan-action-layout="narrow">
+          <button
+            type="button"
+            onClick={handleReviewAndExport}
+            className={`${plansPrimaryButtonClass} h-[40px] w-full whitespace-nowrap`}
+          >
+            Review &amp; Export
+          </button>
+          <div className="grid grid-cols-2 gap-[8px]">
+            <button type="button" onClick={handleSave} className={`${plansSecondaryButtonClass} h-[40px] w-full whitespace-nowrap px-3`}>
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveAsTemplate}
+              disabled={!canSaveAsTemplate}
+              aria-disabled={!canSaveAsTemplate}
+              className={`${plansSecondaryButtonClass} h-[40px] w-full min-w-0 whitespace-nowrap px-3 ${saveAsTemplateDisabledClass}`}
+              title={canSaveAsTemplate ? "Save as Template" : "Add event details, actions, or Anchor Fields before saving as a template."}
+            >
+              Save as Template
+            </button>
+          </div>
+          {executionNotices.some((entry) => entry.notice.tone === "success") ? <ExportDoneBadge /> : null}
+          <button
+            type="button"
+            onClick={handleCancel}
+            className={`${plansSecondaryButtonClass} h-[40px] w-full whitespace-nowrap border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50`}
+          >
+            Cancel
+          </button>
+        </div>
+      </section>
     );
   }
 
@@ -4980,7 +5428,7 @@ export default function PlansPage() {
     const pastItems = scopedItems.filter(isPreviewItemScheduledInPast);
 
     if (pastItems.length === 0) return null;
-    return "One or more selected items are scheduled before now. Exporting them may create outdated reminders, meetings, or email drafts. Are you sure you want to continue?";
+    return "One or more selected items are scheduled before now. Exporting them may create outdated reminders, meetings, or email drafts.";
   }
 
   async function warnIfPastScheduledItems(options?: { usePopup?: boolean; itemIds?: string[] }) {
@@ -4990,8 +5438,10 @@ export default function PlansPage() {
       const confirmed = await showConfirmModal({
         title: "Some selected items are in the past",
         message,
-        confirmLabel: "Continue Export",
-        cancelLabel: "Cancel",
+        content: renderPastScheduledItemsContent(options?.itemIds),
+        confirmLabel: "Continue export",
+        cancelLabel: "Go back",
+        severity: "warning",
       });
       return !confirmed;
     }
@@ -6227,7 +6677,7 @@ export default function PlansPage() {
       selectedTemplateId: template.id,
       planType: template.baseType,
       templateName: template.name,
-      eventName: templateMode === "template" ? template.name : "",
+      eventName: "",
       anchorDate: nextAnchorDate,
       hasExplicitEventDate: Boolean(nextAnchorDate),
       eventTime: "",
@@ -6285,7 +6735,7 @@ export default function PlansPage() {
     setWeekendRule(snapshot.weekendRule);
     setRows(cloneTemplateRows(snapshot.rows).map((row) => ({ ...row, timeZone: row.timeZone || nextEventTimeZone })));
     setAnchors(cloneAnchors(snapshot.anchors));
-    setAreAnchorsHidden(false);
+    setAreAnchorsHidden(true);
     setGuidedForm({ ...snapshot.guidedForm });
     setLastDynamicFieldsExportAt(snapshot.lastDynamicFieldsExportAt);
     clearTransientEditingState();
@@ -7094,12 +7544,15 @@ export default function PlansPage() {
 
   async function promptForNewTemplateName(defaultName: string) {
     const nextName = await showPromptModal({
-      title: "Save as Template",
-      message: "Enter a template name.",
+      title: "Save as template",
+      message: "Save this workflow structure so it can be reused for another event.",
       defaultValue: defaultName,
+      inputLabel: "Template name",
+      helperText: "Event details and run-specific Anchor Field values are not saved.",
       placeholder: "Template name",
-      confirmLabel: "Save Template",
+      confirmLabel: "Save template",
       cancelLabel: "Cancel",
+      severity: "information",
     });
     if (!nextName) return null;
     const trimmedName = nextName.trim();
@@ -7237,7 +7690,7 @@ export default function PlansPage() {
         : [],
     );
     setAnchors(createGenericPresetAnchors());
-    setAreAnchorsHidden(false);
+    setAreAnchorsHidden(true);
     setGuidedForm(createEmptyGuidedForm());
     setLastDynamicFieldsExportAt(null);
     clearPersistedBuilderDraft();
@@ -7250,6 +7703,9 @@ export default function PlansPage() {
     setTemplateActionMessage("");
     shouldFocusEventNameInputRef.current = !options?.keepViewAtTop;
     shouldScrollBuilderIntoViewRef.current = !options?.keepViewAtTop;
+    if (!options?.keepViewAtTop) {
+      setBuilderScrollRequestNonce((current) => current + 1);
+    }
     setIsBuilderVisualRevealDeferred(true);
     setIsNewPlanSetupPending(false);
     setPlanSetupDialogMode("new");
@@ -7500,6 +7956,19 @@ export default function PlansPage() {
       setBuilderSourceProvenance(null);
       clearTransientEditingState();
     });
+  }
+
+  async function requestCancelEditing() {
+    const confirmed = await showConfirmModal({
+      title: "Discard this plan?",
+      message: "Unsaved changes in this event plan will be cleared. Saved templates are not affected.",
+      confirmLabel: "Discard plan",
+      cancelLabel: "Keep editing",
+      destructive: true,
+      severity: "destructive",
+    });
+    if (!confirmed) return;
+    cancelEditing();
   }
 
   async function exportPreviewReminderItem(itemId: string) {
@@ -7798,16 +8267,129 @@ export default function PlansPage() {
     });
   }
 
+  function getValidationFieldLabel(field?: ValidationFieldName) {
+    switch (field) {
+      case "title":
+        return "Title";
+      case "body":
+        return "Body";
+      case "reminderTime":
+        return "Time";
+      case "emailTo":
+        return "Recipients";
+      case "emailCc":
+        return "CC";
+      case "emailBcc":
+        return "BCC";
+      case "emailSubject":
+        return "Subject";
+      case "emailBody":
+        return "Message";
+      case "meetingAttendees":
+        return "Attendees";
+      case "meetingLocation":
+        return "Location";
+      default:
+        return "Field";
+    }
+  }
+
+  function getValidationIssueGroupLabel(issue: MissingFieldIssue) {
+    if (issue.eventName || issue.eventDate || issue.eventTime) return "Event details";
+    const targetRowId = issue.fieldTargets?.[0]?.rowId ?? issue.rowId ?? issue.rowIds?.[0];
+    const row = targetRowId ? rows.find((entry) => entry.id === targetRowId) : null;
+    if (row) {
+      const rowKind = classifyPlanRow(row);
+      const rowTypeLabel = rowKind === "email" ? "Email" : rowKind === "meeting" ? "Meeting" : "Reminder";
+      const rowTitle =
+        rowKind === "email"
+          ? normalizeEmailDraft(row.emailDraft).subject.trim() || row.title.trim() || "Untitled email"
+          : row.title.trim() || `Untitled ${rowTypeLabel.toLowerCase()}`;
+      return `${rowTypeLabel} · ${rowTitle}`;
+    }
+    return "Anchor Fields";
+  }
+
+  function getValidationIssueFieldLabel(issue: MissingFieldIssue) {
+    if (issue.eventName) return "Event Name";
+    if (issue.eventDate) return "Event Date";
+    if (issue.eventTime) return "Event Time";
+    if (issue.anchorKey) return formatAnchorTokenDisplay(issue.anchorKey);
+    return getValidationFieldLabel(issue.fieldTargets?.[0]?.field);
+  }
+
+  function getValidationIssueExplanation(issue: MissingFieldIssue) {
+    if (issue.eventName) return "Enter a name for this event.";
+    if (issue.eventDate) return "Choose the date this event occurs.";
+    if (issue.eventTime) return "Enter the time this event starts.";
+    if (issue.isUndefinedAnchor && issue.anchorKey) {
+      return `${formatAnchorTokenDisplay(issue.anchorKey)} is used here but is not listed in Anchor Fields.`;
+    }
+    if (issue.anchorKey) {
+      return `Add a value for ${formatAnchorTokenDisplay(issue.anchorKey)} before continuing.`;
+    }
+    if (issue.message) return issue.message;
+    return "Review this field before continuing.";
+  }
+
+  function renderValidationIssueGroups(issues: MissingFieldIssue[]) {
+    const issueCountLabel = issues.length === 1 ? "1 issue" : `${issues.length} issues`;
+    const groups = new Map<string, MissingFieldIssue[]>();
+    issues.forEach((issue) => {
+      const groupLabel = getValidationIssueGroupLabel(issue);
+      groups.set(groupLabel, [...(groups.get(groupLabel) ?? []), issue]);
+    });
+
+    return (
+      <div className="space-y-3">
+        <div className="text-[13px] font-semibold text-slate-600">{issueCountLabel}</div>
+        <div className="overflow-hidden rounded-[10px] border border-slate-200 bg-white">
+          {Array.from(groups.entries()).map(([groupLabel, groupIssues], groupIndex) => (
+            <div key={groupLabel} className={groupIndex > 0 ? "border-t border-slate-200/80" : ""}>
+              <div className="bg-slate-50/70 px-3.5 py-2 text-[13px] font-semibold text-slate-700">
+                {groupLabel}
+              </div>
+              <div className="divide-y divide-slate-200/80">
+                {groupIssues.map((issue, index) => {
+                  const isWarning = issue.severity === "warning" || issue.isUndefinedAnchor;
+                  return (
+                    <div key={`${groupLabel}-${index}`} className="grid gap-1 px-3.5 py-3 min-[560px]:grid-cols-[92px_minmax(130px,0.48fr)_minmax(0,1fr)] min-[560px]:gap-3">
+                      <div className={`text-[13px] font-semibold ${isWarning ? "text-amber-700" : "text-red-600"}`}>
+                        {isWarning ? "Check this" : "Required"}
+                      </div>
+                      <div className="min-w-0 text-[14px] font-semibold leading-5 text-slate-900">
+                        {getValidationIssueFieldLabel(issue)}
+                      </div>
+                      <div className="min-w-0 text-[14px] leading-5 text-slate-600">
+                        {renderTextWithBoldAnchors(getValidationIssueExplanation(issue), {
+                          anchorClassName: "font-bold text-slate-950",
+                          invalidAnchorClassName: "font-bold text-red-500",
+                          knownAnchorKeys,
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   async function validatePreviewBeforeOpen() {
     const missingRequirements = getMissingPreviewRequirements();
     if (missingRequirements.length > 0) {
       await showAlertModal({
-        title: "Missing required fields",
-        message: "Preview is missing:",
-        items: missingRequirements.map((issue) => formatMissingFieldIssueForModal(issue)),
-        secondaryLabel: "Fix",
-        onSecondaryAction: () => applyMissingFieldHighlights(missingRequirements),
-        confirmLabel: "OK",
+        title: "Resolve plan issues",
+        message: "Review the highlighted fields before continuing.",
+        content: renderValidationIssueGroups(missingRequirements),
+        secondaryLabel: "Back to plan",
+        confirmLabel: "Fix first issue",
+        onConfirmAction: () => applyMissingFieldHighlights(missingRequirements),
+        severity: "validation",
+        maxWidthClassName: "max-w-[640px]",
       });
       return true;
     }
@@ -7822,12 +8404,14 @@ export default function PlansPage() {
     const missingRequirements = getMissingPreviewRequirements();
     if (missingRequirements.length > 0) {
       await showAlertModal({
-        title: "Missing required fields",
-        message: "Export is missing:",
-        items: missingRequirements.map((issue) => formatMissingFieldIssueForModal(issue)),
-        secondaryLabel: "Fix",
-        onSecondaryAction: () => applyMissingFieldHighlights(missingRequirements),
-        confirmLabel: "OK",
+        title: "Resolve plan issues",
+        message: "Review the highlighted fields before continuing.",
+        content: renderValidationIssueGroups(missingRequirements),
+        secondaryLabel: "Back to plan",
+        confirmLabel: "Fix first issue",
+        onConfirmAction: () => applyMissingFieldHighlights(missingRequirements),
+        severity: "validation",
+        maxWidthClassName: "max-w-[640px]",
       });
       return true;
     }
@@ -7843,11 +8427,12 @@ export default function PlansPage() {
     const template = savedTemplates.find((entry) => entry.id === templateId);
     if (!template) return;
     const confirmed = await showConfirmModal({
-      title: "Delete template",
-      message: `Delete "${template.name}"? This cannot be undone.`,
-      confirmLabel: "Delete",
+      title: "Delete template?",
+      message: `“${template.name}” will be removed from your saved templates. This cannot be undone.`,
+      confirmLabel: "Delete template",
       cancelLabel: "Cancel",
       destructive: true,
+      severity: "destructive",
     });
     if (!confirmed) {
       return;
@@ -7880,11 +8465,13 @@ export default function PlansPage() {
 
     const nextName = await showPromptModal({
       title: "Rename template",
-      message: "Enter a new template name.",
+      message: "Choose a clear name for this reusable workflow.",
       defaultValue: template.name,
+      inputLabel: "Template name",
       placeholder: "Template name",
-      confirmLabel: "Rename",
+      confirmLabel: "Rename template",
       cancelLabel: "Cancel",
+      severity: "information",
     });
     if (!nextName) return;
 
@@ -8252,14 +8839,14 @@ export default function PlansPage() {
   }, [builderScrollRequestNonce, focusEventNameInput, isBuilderSectionVisible]);
 
   useEffect(() => {
-    if (!isBuilderSectionVisible || !isBuilderVisualRevealDeferred) return;
+    if (!isBuilderWorkspaceVisible || !isBuilderVisualRevealDeferred) return;
 
     const timeoutId = window.setTimeout(() => {
       setIsBuilderVisualRevealDeferred(false);
     }, 420);
 
     return () => window.clearTimeout(timeoutId);
-  }, [isBuilderSectionVisible, isBuilderVisualRevealDeferred]);
+  }, [isBuilderVisualRevealDeferred, isBuilderWorkspaceVisible]);
 
   useEffect(() => {
     if (isBuilderSectionVisible) return;
@@ -8321,7 +8908,7 @@ export default function PlansPage() {
   }, [isAiPanelOpen]);
 
   return (
-    <div className="space-y-3 text-gray-900">
+    <div className={plansWorkspaceClass}>
       <AppShellSidebarContent>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Connected Email Account</div>
@@ -8361,19 +8948,6 @@ export default function PlansPage() {
         </div>
       ) : null}
 
-      <section ref={templatesSectionRef} className="hidden" aria-hidden="true">
-        <TemplatesGrid
-          templates={savedTemplates}
-          selectedTemplateId={selectedTemplateId}
-          highlightedTemplateId={highlightedTemplateId}
-          onSelectTemplate={(templateId) => void onSelectSavedTemplate(templateId)}
-          onDuplicateTemplate={(templateId) => void duplicateSavedTemplate(templateId)}
-          onRenameTemplate={(templateId) => void renameSavedTemplate(templateId)}
-          onDeleteTemplate={(templateId) => void deleteSavedTemplate(templateId)}
-          onReorderTemplates={setSavedTemplates}
-        />
-      </section>
-
       {AI_ENABLED && aiApplySuccessMessage ? (
         <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900 shadow-sm">
           {aiApplySuccessMessage}
@@ -8384,395 +8958,361 @@ export default function PlansPage() {
         <div className="h-[76vh] min-h-[680px]" aria-hidden="true" />
       ) : null}
 
-      {isInlineEditorBackdropMounted ? (
-        <div
-          className={`pointer-events-none fixed inset-0 z-30 bg-slate-950/62 transition-opacity duration-[2800ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
-            isInlineEditorBackdropVisible ? "opacity-100" : "opacity-0"
-          }`}
-          aria-hidden="true"
-        />
-      ) : null}
-
       <AnimatedRowEditor
         open={isBuilderWorkspaceVisible}
       >
         <section
           ref={builderSectionRef}
           data-plan-builder="true"
-          className="rounded-[28px] bg-[var(--app-bg)]"
+          className="min-w-0"
         >
-          <div className={`space-y-2 px-1.5 pt-0 pb-2 transition-opacity duration-300 ${isBuilderVisualRevealDeferred ? "opacity-0" : ""}`}>
-              <div
-                className="space-y-2 rounded-[24px] bg-transparent p-1 transition-opacity duration-200"
-              >
-                <div className="rounded-[24px] bg-transparent p-1">
+          <div className={`space-y-5 transition-opacity duration-300 ${isBuilderVisualRevealDeferred ? "opacity-0" : ""}`}>
+              <div className="transition-opacity duration-200">
+                <div>
                   <div>
                     {shouldRenderSimpleEventHeaderFields ? (
-                      <div className="space-y-3">
-                        <StaggeredInlineEditorItem active={isBuilderEntryRevealActive} immediate={isBuilderEntryRevealImmediate} delayMs={40} className={`relative w-full transition-opacity duration-200 ${openTimeZoneRowId === EVENT_TIME_ZONE_MENU_ID ? "z-[120]" : "z-30"} ${builderInactiveControlClass}`}>
-                          <div
-                            ref={eventHeaderCardRef}
-                            className="w-full pb-4.5 pt-1.5 sm:-ml-[7.75rem] sm:w-[calc(100%+7.75rem)]"
-                          >
-                            <div className="mb-3 flex items-center justify-between gap-3">
-                              <div className="text-left text-[2rem] font-extrabold leading-tight tracking-[-0.02em] text-slate-950">
-                                Plan Builder
-                              </div>
-                            </div>
-                            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(180px,0.34fr)] lg:items-start">
-                              <div>
-                                <label className="mb-1 block px-4 text-[9px] font-medium text-slate-700">Event Name</label>
-                                <input
-                                  ref={eventNameInputRef}
-                                  className={`min-h-[36px] w-full rounded-[16px] border border-[var(--app-border)] bg-[var(--app-control)] px-4 py-2 text-[14px] font-semibold text-slate-950 shadow-[0_8px_18px_-20px_rgba(38,72,104,0.3)] placeholder:font-normal placeholder:text-slate-500 focus:outline-none focus:ring-0 ${
-                                    missingFieldHighlights.eventName ? "rounded-lg ring-2 ring-red-200" : ""
-                                  }`}
-                                  placeholder="Enter event name..."
-                                  value={eventName}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      e.preventDefault();
-                                      focusNextEventHeaderField("eventDate");
-                                      return;
-                                    }
-                                    if (e.key === "Tab" && !e.shiftKey) {
-                                      e.preventDefault();
-                                      focusNextEventHeaderField("eventDate");
-                                    }
-                                  }}
-                                  onChange={(e) => {
-                                    setEventName(e.target.value);
-                                    if (missingFieldHighlights.eventName) {
-                                      setMissingFieldHighlights((current) => ({ ...current, eventName: false }));
-                                    }
-                                  }}
-                                />
-                              </div>
-                              <TemplateDropdown
-                                templates={savedTemplates}
-                                selectedTemplateId={selectedTemplateId}
-                                highlightedTemplateId={highlightedTemplateId}
-                                actionMessage={templateActionMessage}
-                                onSelectTemplate={(templateId) => void onSelectSavedTemplate(templateId)}
-                                onDuplicateTemplate={(templateId) => void duplicateSavedTemplate(templateId)}
-                                onRenameTemplate={(templateId) => void renameSavedTemplate(templateId)}
-                                onDeleteTemplate={(templateId) => void deleteSavedTemplate(templateId)}
-                                onStartNewTemplate={() => void startNewPlan({ keepViewAtTop: true })}
-                              />
-                            </div>
-                            <div className="mt-3.5 grid grid-cols-[minmax(0,1fr)_176px] items-end gap-3 max-[620px]:grid-cols-1">
-                              <div>
-                                <div className="mb-1 flex items-center gap-3 px-4 text-[9px] font-medium text-slate-700">
-                                  <span className="min-w-0 flex-1">Event Date</span>
-                                  <span className="h-px w-px shrink-0" aria-hidden="true" />
-                                  <span className="min-w-[120px] flex-1 -translate-x-3 text-center">Event Time</span>
-                                  <span className="h-px w-px shrink-0" aria-hidden="true" />
-                                  <span className="w-[5.75rem] text-left">Today</span>
-                                </div>
-                                <span
-                                  className={`plans-token-input-shell flex h-[36px] w-full items-center gap-3 rounded-[16px] border bg-[var(--app-control)] px-4 text-slate-950 shadow-sm ${
-                                    missingFieldHighlights.eventDate || missingFieldHighlights.eventTime ? "border-red-300 ring-2 ring-red-200" : "border-[var(--app-border)]"
-                                  }`}
+                      <div className="space-y-[18px]">
+			                        <StaggeredInlineEditorItem active={isBuilderEntryRevealActive} immediate={isBuilderEntryRevealImmediate} delayMs={20} className={builderInactiveControlClass}>
+			                          <div className="flex flex-col gap-[18px] md:flex-row md:items-start md:justify-between md:gap-6">
+			                            <div className="min-w-0">
+			                              <h1 className="text-[30px] font-bold leading-[1.08] tracking-[-0.02em] text-slate-950 md:text-[34px]">Plans</h1>
+			                              <p className="mt-1.5 text-[15px] leading-[1.4] text-slate-600">
+			                                Create a new event plan or reuse a saved workflow.
+			                              </p>
+                                      <p className="mt-[7px] text-[13px] font-medium leading-5 text-slate-500">
+                                        {currentSourceLine}
+                                      </p>
+			                            </div>
+                              <div className="grid w-full grid-cols-2 gap-[10px] md:w-auto md:flex md:shrink-0 md:justify-end">
+                                <button
+                                  ref={templateLibraryButtonRef}
+                                  type="button"
+                                  onClick={() => setIsTemplateLibraryOpen(true)}
+                                  className={`${plansSecondaryButtonClass} min-w-0 whitespace-nowrap rounded-[10px] px-3 md:min-w-[128px] md:px-4`}
                                 >
-                                  <input
-                                    ref={eventDateInputRef}
-                                    type="text"
-                                    inputMode="numeric"
-                                    className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] font-semibold text-slate-950 placeholder:font-normal placeholder:text-slate-500 focus:outline-none focus:ring-0"
-                                    value={noEventDate ? "Today" : eventDateInputValue}
-                                    readOnly={noEventDate}
-                                    placeholder="mm/dd/yyyy"
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") {
-                                        e.preventDefault();
-                                        focusNextEventHeaderField("eventTime");
-                                      }
-                                    }}
-                                    onChange={(e) => setEventDateInputValue(e.target.value)}
-                                    onBlur={(e) => {
-                                      const parsed = parseEventDateInput(e.target.value);
-                                      if (parsed === null) {
-                                        setEventDateInputValue(formatEventDateForEditor(anchorDate));
-                                        return;
-                                      }
-                                      setAnchorDate(parsed);
-                                      setHasExplicitEventDate(Boolean(parsed.trim()));
-                                      setEventDateInputValue(formatEventDateForEditor(parsed));
-                                      if (missingFieldHighlights.eventDate) {
-                                        setMissingFieldHighlights((current) => ({ ...current, eventDate: false }));
-                                      }
-                                    }}
-                                  />
-                                  <span className="h-4 w-px shrink-0 bg-slate-200" aria-hidden="true" />
-                                  <span className="relative flex min-w-[120px] flex-1 items-center justify-center">
-                                    <input
-                                      ref={eventTimeInputRef}
-                                      type="text"
-                                      inputMode="text"
-                                      className="min-w-0 flex-1 border-0 bg-transparent p-0 text-center text-[14px] font-semibold text-slate-950 placeholder:font-normal placeholder:text-slate-500 focus:outline-none focus:ring-0"
-                                      value={eventTimeInputValue}
-                                      placeholder="--:-- --"
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") {
-                                          e.preventDefault();
-                                          focusNextEventHeaderField("weekendHandling");
-                                        }
-                                      }}
-                                      onChange={(e) => {
-                                        const rawValue = e.target.value;
-                                        const selectionEnd = e.target.selectionEnd ?? rawValue.length;
-                                        const meaningfulCount = countReminderTimeMeaningfulChars(rawValue, selectionEnd);
-                                        const nextMaskedValue = maskReminderTimeDraftInput(rawValue);
-                                        const nextCursor = findReminderTimeCursorFromMeaningfulCount(nextMaskedValue, meaningfulCount);
-
-                                        setEventTimeInputValue(nextMaskedValue);
-
-                                        requestAnimationFrame(() => {
-                                          const input = eventTimeInputRef.current;
-                                          if (input && document.activeElement === input) {
-                                            input.setSelectionRange(nextCursor, nextCursor);
-                                          }
-                                        });
-                                      }}
-                                      onBlur={(e) => {
-                                        const normalized = normalizeReminderTimeInput(e.target.value);
-                                        setEventTime(normalized);
-                                        setEventTimeInputValue(normalized || "");
-                                        if (missingFieldHighlights.eventTime) {
-                                          setMissingFieldHighlights((current) => ({ ...current, eventTime: false }));
-                                        }
-                                      }}
-                                    />
-                                    <span className="relative inline-flex">
-                                      <button
-                                        type="button"
-                                        aria-label="Set event time zone"
-                                        title="Set time zone"
-                                        onClick={() => {
-                                          setTimeZoneSearch("");
-                                          setOpenTimeZoneRowId((current) => (current === EVENT_TIME_ZONE_MENU_ID ? null : EVENT_TIME_ZONE_MENU_ID));
-                                        }}
-                                        className="group/timezone-globe inline-flex h-[18px] w-[18px] items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
-                                      >
-                                        <svg
-                                          viewBox="0 0 24 24"
-                                          aria-hidden="true"
-                                          className="h-3.5 w-3.5"
-                                          fill="none"
-                                          stroke="currentColor"
-                                          strokeWidth="1.9"
-                                          strokeLinecap="round"
-                                          strokeLinejoin="round"
-                                        >
-                                          <circle cx="12" cy="12" r="9" />
-                                          <path d="M3 12h18" />
-                                          <path d="M12 3c2.35 2.46 3.55 5.46 3.55 9S14.35 18.54 12 21" />
-                                          <path d="M12 3c-2.35 2.46-3.55 5.46-3.55 9S9.65 18.54 12 21" />
-                                        </svg>
-                                        <span className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-24 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-[11px] font-medium text-slate-600 shadow-lg group-hover/timezone-globe:block">
-                                          Set time zone
-                                        </span>
-                                      </button>
-                                      {openTimeZoneRowId === EVENT_TIME_ZONE_MENU_ID ? (
-                                        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-[130] w-72 rounded-2xl border border-slate-600 bg-slate-800 p-2 text-left shadow-[0_18px_36px_-16px_rgba(15,23,42,0.65)]">
-                                          <div className="mb-2 px-2 text-[11px] font-semibold text-slate-200">
-                                            {getOutlookTimeZoneLabel(eventTimeZone)}
-                                          </div>
-                                          <input
-                                            type="search"
-                                            autoFocus
-                                            value={timeZoneSearch}
-                                            onChange={(e) => setTimeZoneSearch(e.target.value)}
-                                            onKeyDown={(e) => {
-                                              if (e.key === "Escape") {
-                                                e.preventDefault();
-                                                setOpenTimeZoneRowId(null);
-                                                setTimeZoneSearch("");
-                                              }
-                                            }}
-                                            placeholder="Search time zones"
-                                            className="mb-2 w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-[12px] text-white placeholder:text-slate-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
-                                          />
-                                          <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-600 bg-slate-900 p-1">
-                                            {filteredGlobalTimeZoneOptions.length > 0 ? (
-                                              filteredGlobalTimeZoneOptions.map((timeZone) => {
-                                                const isSelectedTimeZone = timeZone.value === eventTimeZone;
-                                                return (
-                                                  <button
-                                                    key={timeZone.value}
-                                                    type="button"
-                                                    onClick={() => {
-                                                      applyEventTimeZone(timeZone.value);
-                                                      setOpenTimeZoneRowId(null);
-                                                      setTimeZoneSearch("");
-                                                    }}
-                                                    className={`block w-full rounded-lg px-2 py-1.5 text-left text-[12px] leading-5 transition ${
-                                                      isSelectedTimeZone
-                                                        ? "bg-blue-500/30 text-white"
-                                                        : "text-slate-200 hover:bg-slate-700"
-                                                    }`}
-                                                  >
-                                                    <span className="block font-medium">{timeZone.label}</span>
-                                                    <span className="mt-0.5 block text-[10px] text-slate-400">{timeZone.value}</span>
-                                                  </button>
-                                                );
-                                              })
-                                            ) : (
-                                              <div className="px-3 py-4 text-center text-[12px] text-slate-400">
-                                                No time zones found
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      ) : null}
-                                    </span>
-                                  </span>
-                                  <span className="h-4 w-px shrink-0 bg-slate-200" aria-hidden="true" />
-                                  <label className="inline-flex w-[5.75rem] shrink-0 items-center justify-end gap-1.5 text-[12px] font-medium text-slate-700">
-                                    <input
-                                      ref={useTodayInputRef}
-                                      type="checkbox"
-                                      className="h-3.5 w-3.5"
-                                      checked={noEventDate}
-                                      onChange={(e) => {
-                                        setNoEventDate(e.target.checked);
-                                        if (missingFieldHighlights.eventDate) {
-                                          setMissingFieldHighlights((current) => ({ ...current, eventDate: false }));
-                                        }
-                                      }}
-                                    />
-                                    <span>Today</span>
-                                    <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
-                                      i
-                                      <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-48 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
-                                        Schedules this plan from today instead of using a specific event date.
-                                      </span>
-                                    </span>
-                                  </label>
-                                </span>
-                              </div>
-                              <div>
-                                <label className="mb-1 flex items-center gap-1.5 px-4 text-[9px] font-medium text-slate-700">
-                                  <span>Weekend Handling</span>
-                                  <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
-                                    i
-                                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-48 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
-                                      Choose whether dates that land on weekends should stay there or move to Friday.
-                                    </span>
-                                  </span>
-                                </label>
-                                <select
-                                  ref={weekendHandlingSelectRef}
-                                  className="h-[36px] w-full rounded-[16px] border border-[var(--app-border)] bg-[var(--app-control)] px-4 text-[14px] font-normal text-slate-950 shadow-sm"
-                                  value={weekendRule}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      e.preventDefault();
-                                      focusNextEventHeaderField("useToday");
-                                    }
+                                  {templateLibraryButtonLabel}
+                                </button>
+			                              <button
+			                                type="button"
+                                  onClick={() => {
+                                    setIsTemplateLibraryOpen(false);
+                                    void startNewPlan();
                                   }}
-                                  onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
-                                >
-                                  <option value="none">Keep weekend date</option>
-                                  <option value="prior_business_day">Move to Friday</option>
-                                </select>
+                                  className={`${plansPrimaryButtonClass} min-w-0 whitespace-nowrap rounded-[10px] px-3 md:min-w-[118px] md:px-4`}
+			                              >
+			                                + New Event
+				                              </button>
                               </div>
-                            </div>
-                          </div>
-                        </StaggeredInlineEditorItem>
-                        <StaggeredInlineEditorItem active={isBuilderEntryRevealActive} immediate={isBuilderEntryRevealImmediate} delayMs={180} className={`relative z-20 flex flex-wrap items-center justify-center gap-5 pt-[2.4375rem] pb-2 transition-opacity duration-200 sm:-ml-[7.75rem] sm:w-[calc(100%+7.75rem)] ${builderInactiveControlClass}`}>
-                          <button
-                            ref={addReminderButtonRef}
-                            type="button"
-                            onClick={addReminderRow}
-                            className="min-w-[9rem] rounded-full border border-[#93c5fd] bg-white px-6 py-3 text-[14px] font-semibold text-blue-500 transition hover:border-blue-500 hover:bg-slate-50"
-                          >
-                            + Reminder
-                          </button>
-                          <button
-                            ref={addEmailButtonRef}
-                            type="button"
-                            onClick={addEmailRow}
-                            className="min-w-[9rem] rounded-full border border-[#86efac] bg-white px-6 py-3 text-[14px] font-semibold text-green-500 transition hover:border-green-500 hover:bg-slate-50"
-                          >
-                            + Email
-                          </button>
-                          <button
-                            ref={addMeetingButtonRef}
-                            type="button"
-                            onClick={addMeetingRow}
-                            className="min-w-[9rem] rounded-full border border-[#c4b5fd] bg-white px-6 py-3 text-[14px] font-semibold text-violet-500 transition hover:border-violet-500 hover:bg-slate-50"
-                          >
-                            + Meeting
-                          </button>
-                        </StaggeredInlineEditorItem>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
+				                          </div>
+				                        </StaggeredInlineEditorItem>
+			                        <StaggeredInlineEditorItem active={isBuilderEntryRevealActive} immediate={isBuilderEntryRevealImmediate} delayMs={40} className={`relative w-full transition-opacity duration-200 ${openTimeZoneRowId === EVENT_TIME_ZONE_MENU_ID ? "z-[120]" : "z-30"} ${builderInactiveControlClass}`}>
+			                          <section ref={eventHeaderCardRef} className={plansSurfaceClass}>
+		                            <div className={plansSectionHeaderClass}>
+		                              <h2 className={plansPanelHeadingClass}>Event details</h2>
+		                              <p className={plansPanelHelperClass}>Name and schedule this run.</p>
+		                            </div>
+		                            <div className={plansCanvasSectionClass}>
+		                            <div>
+		                              <div>
+		                                <label className={plansFieldLabelClass}>Event Name</label>
+		                                <input
+	                                  ref={eventNameInputRef}
+	                                  className={`${plansInputClass} ${
+	                                    missingFieldHighlights.eventName ? "border-red-300 ring-2 ring-red-200" : ""
+	                                  }`}
+	                                  placeholder="Enter event name..."
+	                                  value={eventName}
+	                                  onKeyDown={(e) => {
+	                                    if (e.key === "Enter") {
+	                                      e.preventDefault();
+	                                      focusNextEventHeaderField("eventDate");
+	                                      return;
+	                                    }
+	                                    if (e.key === "Tab" && !e.shiftKey) {
+	                                      e.preventDefault();
+	                                      focusNextEventHeaderField("eventDate");
+	                                    }
+	                                  }}
+	                                  onChange={(e) => {
+	                                    setEventName(e.target.value);
+	                                    if (missingFieldHighlights.eventName) {
+	                                      setMissingFieldHighlights((current) => ({ ...current, eventName: false }));
+	                                    }
+		                                  }}
+		                                />
+		                              </div>
+		                            </div>
+		                            <div className="mt-4 grid gap-4 min-[520px]:grid-cols-2 min-[900px]:grid-cols-3 min-[900px]:items-start">
+			                              <div className={eventDetailFieldClass}>
+		                                <label className={eventDetailLabelClass}>Event Date</label>
+		                                <input
+	                                  ref={eventDateInputRef}
+	                                  type="text"
+	                                  inputMode="numeric"
+	                                  className={`${plansInputClass} ${
+	                                    missingFieldHighlights.eventDate ? "border-red-300 ring-2 ring-red-200" : ""
+	                                  }`}
+	                                  value={noEventDate ? "Today" : eventDateInputValue}
+	                                  readOnly={noEventDate}
+	                                  placeholder="mm/dd/yyyy"
+	                                  onKeyDown={(e) => {
+	                                    if (e.key === "Enter") {
+	                                      e.preventDefault();
+	                                      focusNextEventHeaderField("eventTime");
+	                                    }
+	                                  }}
+	                                  onChange={(e) => setEventDateInputValue(e.target.value)}
+	                                  onBlur={(e) => {
+	                                    const parsed = parseEventDateInput(e.target.value);
+	                                    if (parsed === null) {
+	                                      setEventDateInputValue(formatEventDateForEditor(anchorDate));
+	                                      return;
+	                                    }
+	                                    setAnchorDate(parsed);
+	                                    setHasExplicitEventDate(Boolean(parsed.trim()));
+	                                    setEventDateInputValue(formatEventDateForEditor(parsed));
+	                                    if (missingFieldHighlights.eventDate) {
+	                                      setMissingFieldHighlights((current) => ({ ...current, eventDate: false }));
+	                                    }
+	                                  }}
+	                                />
+		                                <label className={`${eventDetailSupplementClass} gap-2`}>
+		                                  <input
+	                                    ref={useTodayInputRef}
+	                                    type="checkbox"
+	                                    className="h-3.5 w-3.5 rounded border-slate-300 text-[#315f92] focus:ring-[#6f9fd1]/30"
+	                                    checked={noEventDate}
+	                                    onChange={(e) => {
+	                                      setNoEventDate(e.target.checked);
+	                                      if (missingFieldHighlights.eventDate) {
+	                                        setMissingFieldHighlights((current) => ({ ...current, eventDate: false }));
+	                                      }
+	                                    }}
+	                                  />
+	                                  <span>Today</span>
+	                                  <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+	                                    i
+	                                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-48 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+	                                      Schedules this plan from today instead of using a specific event date.
+	                                    </span>
+	                                  </span>
+	                                </label>
+	                              </div>
+		                              <div className={eventDetailFieldClass}>
+		                                <label className={eventDetailLabelClass}>Event Time</label>
+		                                <div
+	                                  className={`flex h-[42px] w-full items-center gap-2 rounded-xl border bg-white px-3.5 text-slate-950 shadow-sm ${
+	                                    missingFieldHighlights.eventTime ? "border-red-300 ring-2 ring-red-200" : "border-slate-200"
+	                                  }`}
+	                                >
+	                                  <input
+	                                    ref={eventTimeInputRef}
+	                                    type="text"
+	                                    inputMode="text"
+	                                    className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] font-semibold text-slate-950 placeholder:font-normal placeholder:text-slate-400 focus:outline-none focus:ring-0"
+	                                    value={eventTimeInputValue}
+	                                    placeholder="--:-- --"
+	                                    onKeyDown={(e) => {
+	                                      if (e.key === "Enter") {
+	                                        e.preventDefault();
+	                                        focusNextEventHeaderField("weekendHandling");
+	                                      }
+	                                    }}
+	                                    onChange={(e) => {
+	                                      const rawValue = e.target.value;
+	                                      const selectionEnd = e.target.selectionEnd ?? rawValue.length;
+	                                      const meaningfulCount = countReminderTimeMeaningfulChars(rawValue, selectionEnd);
+	                                      const nextMaskedValue = maskReminderTimeDraftInput(rawValue);
+	                                      const nextCursor = findReminderTimeCursorFromMeaningfulCount(nextMaskedValue, meaningfulCount);
 
-              <div className="space-y-0 pb-2">
-                <div ref={rowListStackRef}>
-                <div className="relative pt-[2.625rem]">
-                  {renderedRows.length > 0 ? (
-                    <StaggeredInlineEditorItem active={isBuilderEntryRevealActive} immediate={isBuilderEntryRevealImmediate} delayMs={280} className={`absolute right-0 -top-3 z-20 flex justify-center transition-opacity duration-200 md:justify-end ${builderInactiveControlClass}`}>
-                      <div ref={sortMenuRef} className="relative">
-                        <button
-                          type="button"
-                          onClick={() => setIsSortMenuOpen((current) => !current)}
-                          className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500 shadow-[0_8px_18px_-20px_rgba(15,23,42,0.3)] transition hover:border-slate-300 hover:text-slate-700"
-                          aria-label="Sort rows"
-                          aria-expanded={isSortMenuOpen}
-                        >
-                          <svg
-                            viewBox="0 0 20 20"
-                            aria-hidden="true"
-                            className="h-3.5 w-3.5"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M4 5h8" />
-                            <path d="M4 10h12" />
-                            <path d="M4 15h6" />
-                          </svg>
-                          <span>Sort</span>
-                        </button>
-                        {isSortMenuOpen ? (
-                          <div className="absolute right-0 top-full z-30 mt-2 min-w-[220px] rounded-2xl border border-slate-300 bg-white p-2 shadow-[0_18px_36px_-16px_rgba(15,23,42,0.35)] ring-1 ring-slate-900/5">
-                            <button
-                              type="button"
-                              onClick={() => applyBuilderSort("nearest_first")}
-                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-800 transition hover:bg-slate-100"
-                            >
-                              <span>Closest to now</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => applyBuilderSort("latest_first")}
-                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-800 transition hover:bg-slate-100"
-                            >
-                              <span>Furthest from now</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => applyBuilderSort("type")}
-                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-800 transition hover:bg-slate-100"
-                            >
-                              <span>By reminder type</span>
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </StaggeredInlineEditorItem>
-                  ) : null}
-                  <div>
-                    <div ref={rowInsertAnchorRef} className="h-0" aria-hidden="true" />
-                    <div className="space-y-[2.75rem]">
-                  {renderedRows.map((row, index) => {
+	                                      setEventTimeInputValue(nextMaskedValue);
+
+	                                      requestAnimationFrame(() => {
+	                                        const input = eventTimeInputRef.current;
+	                                        if (input && document.activeElement === input) {
+	                                          input.setSelectionRange(nextCursor, nextCursor);
+	                                        }
+	                                      });
+	                                    }}
+	                                    onBlur={(e) => {
+	                                      const normalized = normalizeReminderTimeInput(e.target.value);
+	                                      setEventTime(normalized);
+	                                      setEventTimeInputValue(normalized || "");
+	                                      if (missingFieldHighlights.eventTime) {
+	                                        setMissingFieldHighlights((current) => ({ ...current, eventTime: false }));
+	                                      }
+	                                    }}
+	                                  />
+	                                  <span className="relative inline-flex">
+	                                    <button
+	                                      type="button"
+	                                      aria-label="Set event time zone"
+	                                      title="Set time zone"
+	                                      onClick={() => {
+	                                        setTimeZoneSearch("");
+	                                        setOpenTimeZoneRowId((current) => (current === EVENT_TIME_ZONE_MENU_ID ? null : EVENT_TIME_ZONE_MENU_ID));
+	                                      }}
+	                                      className="group/timezone-globe inline-flex h-[22px] w-[22px] items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+	                                    >
+	                                      <svg
+	                                        viewBox="0 0 24 24"
+	                                        aria-hidden="true"
+	                                        className="h-3.5 w-3.5"
+	                                        fill="none"
+	                                        stroke="currentColor"
+	                                        strokeWidth="1.9"
+	                                        strokeLinecap="round"
+	                                        strokeLinejoin="round"
+	                                      >
+	                                        <circle cx="12" cy="12" r="9" />
+	                                        <path d="M3 12h18" />
+	                                        <path d="M12 3c2.35 2.46 3.55 5.46 3.55 9S14.35 18.54 12 21" />
+	                                        <path d="M12 3c-2.35 2.46-3.55 5.46-3.55 9S9.65 18.54 12 21" />
+	                                      </svg>
+	                                      <span className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-24 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-[11px] font-medium text-slate-600 shadow-lg group-hover/timezone-globe:block">
+	                                        Set time zone
+	                                      </span>
+	                                    </button>
+	                                    {openTimeZoneRowId === EVENT_TIME_ZONE_MENU_ID ? (
+	                                      <div className="absolute right-0 top-[calc(100%+0.5rem)] z-[170] w-72 rounded-2xl border border-slate-600 bg-slate-800 p-2 text-left shadow-[0_18px_36px_-16px_rgba(15,23,42,0.65)]">
+	                                        <div className="mb-2 px-2 text-[11px] font-semibold text-slate-200">
+	                                          {getOutlookTimeZoneLabel(eventTimeZone)}
+	                                        </div>
+	                                        <input
+	                                          type="search"
+	                                          autoFocus
+	                                          value={timeZoneSearch}
+	                                          onChange={(e) => setTimeZoneSearch(e.target.value)}
+	                                          onKeyDown={(e) => {
+	                                            if (e.key === "Escape") {
+	                                              e.preventDefault();
+	                                              setOpenTimeZoneRowId(null);
+	                                              setTimeZoneSearch("");
+	                                            }
+	                                          }}
+	                                          placeholder="Search time zones"
+	                                          className="mb-2 w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-[12px] text-white placeholder:text-slate-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+	                                        />
+	                                        <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-600 bg-slate-900 p-1">
+	                                          {filteredGlobalTimeZoneOptions.length > 0 ? (
+	                                            filteredGlobalTimeZoneOptions.map((timeZone) => {
+	                                              const isSelectedTimeZone = timeZone.value === eventTimeZone;
+	                                              return (
+	                                                <button
+	                                                  key={timeZone.value}
+	                                                  type="button"
+	                                                  onClick={() => {
+	                                                    applyEventTimeZone(timeZone.value);
+	                                                    setOpenTimeZoneRowId(null);
+	                                                    setTimeZoneSearch("");
+	                                                  }}
+	                                                  className={`block w-full rounded-lg px-2 py-1.5 text-left text-[12px] leading-5 transition ${
+	                                                    isSelectedTimeZone
+	                                                      ? "bg-blue-500/30 text-white"
+	                                                      : "text-slate-200 hover:bg-slate-700"
+	                                                  }`}
+	                                                >
+	                                                  <span className="block font-medium">{timeZone.label}</span>
+	                                                  <span className="mt-0.5 block text-[10px] text-slate-400">{timeZone.value}</span>
+	                                                </button>
+	                                              );
+	                                            })
+	                                          ) : (
+	                                            <div className="px-3 py-4 text-center text-[12px] text-slate-400">
+	                                              No time zones found
+	                </div>
+	              )}
+	            </div>
+		          </div>
+		                              ) : null}
+		                                  </span>
+		                                </div>
+		                                <div className={eventDetailSupplementSpacerClass} aria-hidden="true" />
+		                              </div>
+			                              <div className={`${eventDetailFieldClass} min-[520px]:col-span-2 min-[900px]:col-span-1`}>
+			                                <label className={eventDetailLabelClass}>
+		                                  <span>Weekend Handling</span>
+	                                  <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+	                                    i
+	                                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-48 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+	                                      Choose whether dates that land on weekends should stay there or move to Friday.
+	                                    </span>
+	                                  </span>
+	                                </label>
+	                                <select
+	                                  ref={weekendHandlingSelectRef}
+	                                  className={plansInputClass}
+	                                  value={weekendRule}
+	                                  onKeyDown={(e) => {
+	                                    if (e.key === "Enter") {
+	                                      e.preventDefault();
+	                                      focusNextEventHeaderField("useToday");
+	                                    }
+	                                  }}
+	                                  onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+	                                >
+	                                  <option value="none">Keep weekend date</option>
+		                                  <option value="prior_business_day">Move to Friday</option>
+		                                </select>
+		                                <div className={eventDetailSupplementSpacerClass} aria-hidden="true" />
+		                              </div>
+	                            </div>
+	                            </div>
+	                          </section>
+	                        </StaggeredInlineEditorItem>
+			              <StaggeredInlineEditorItem
+			                active={isBuilderEntryRevealActive}
+			                immediate={isBuilderEntryRevealImmediate}
+			                delayMs={180}
+			                className="relative z-20 transition-opacity duration-200"
+			              >
+			                <section className={plansSurfaceClass}>
+		                  <div className={plansSectionHeaderClass}>
+		                  <div className="flex flex-col gap-4 min-[900px]:flex-row min-[900px]:items-start min-[900px]:justify-between">
+		                    <div className="min-w-0">
+		                        <h2 className={plansPanelHeadingClass}>Workflow actions</h2>
+		                        <p className={plansPanelHelperClass}>Add the reminders, emails, and meetings that should run for this event.</p>
+		                        {renderedRows.length > 0 ? (
+		                          <p className="mt-2 text-[13px] font-medium text-slate-500">{renderedRows.length} actions</p>
+		                        ) : null}
+		                    </div>
+			                    <div className="grid grid-cols-2 gap-2 min-[520px]:flex min-[520px]:flex-wrap min-[900px]:justify-end">
+		                      <button
+		                        ref={addReminderButtonRef}
+		                        type="button"
+		                        onClick={addReminderRow}
+		                        className={`${plansToolbarButtonClass} border-blue-200 text-blue-700 hover:border-blue-300 hover:bg-blue-50/70`}
+		                      >
+		                        + Reminder
+		                      </button>
+	                      <button
+		                        ref={addEmailButtonRef}
+		                        type="button"
+		                        onClick={addEmailRow}
+		                        className={`${plansToolbarButtonClass} border-emerald-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50/70`}
+		                      >
+		                        + Email
+		                      </button>
+	                      <button
+		                        ref={addMeetingButtonRef}
+		                        type="button"
+		                        onClick={addMeetingRow}
+		                        className={`${plansToolbarButtonClass} border-violet-200 text-violet-700 hover:border-violet-300 hover:bg-violet-50/70`}
+		                      >
+		                        + Meeting
+		                      </button>
+	                      {renderSortControl()}
+	                    </div>
+	                  </div>
+	                  </div>
+	                  <div className={plansCanvasSectionClass}>
+			                  <div className="overflow-hidden border-t border-slate-200/80 bg-white">
+			                    <div ref={rowListStackRef}>
+			                      <div className="relative">
+			                        <div ref={rowInsertAnchorRef} className="h-0" aria-hidden="true" />
+                                  {renderedRows.length > 0 ? (
+			                        <div className="divide-y divide-slate-200/80">
+	                  {renderedRows.map((row, index) => {
                     const rowMeta = getBuilderRowTypeMeta(row);
                     const rowKind = classifyPlanRow(row);
                     const shouldHideFollowingRowDuringAddRowSettle =
@@ -8813,14 +9353,53 @@ export default function PlansPage() {
                       openDurationEditorRowId === row.id ||
                       openMeetingEditorRowId === row.id ||
                       closingRowEditor?.rowId === row.id;
-                    const isInlineEditorRevealActive = shouldRevealInlineEditorItems && isThisRowEditorLayered;
+                    const isThisRowEditorClosing = closingRowEditor?.rowId === row.id;
+                    const isInlineEditorRevealActive = isThisRowEditorLayered;
+                    const inspectorRevealDelay = (delayMs: number) => (isThisRowEditorLayered ? Math.min(delayMs, 120) : delayMs);
                     const isMissingRowHighlighted = missingFieldHighlights.rowIds.includes(row.id);
-                    const reminderEditorIndentClass = "ml-4 md:ml-7";
-                    const reminderSurfaceInputClass =
-                      "w-full rounded-[16px] border border-slate-200 bg-white px-3.5 py-1.5 text-[11px] text-slate-900 shadow-sm placeholder:text-slate-400 focus:outline-none focus:ring-0";
+                    const inspectorTitleId = `row-inspector-title-${row.id}`;
+                    const inspectorKindLabel =
+                      rowKind === "email" ? "email" : rowKind === "meeting" ? "meeting" : "reminder";
+                    const inspectorWidthClass =
+                      rowKind === "email" || rowKind === "meeting"
+                        ? "lg:w-[min(720px,calc(100vw-48px))]"
+                        : "lg:w-[min(680px,calc(100vw-48px))]";
+                    const handleInspectorKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+                      if (!isThisRowEditorLayered) return;
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        closeRowEditorsAfterAnimation(() => {
+                          if (rowKind === "meeting") {
+                            setForcedOpenMeetingEditorRowIds((current) => current.filter((id) => id !== row.id));
+                          }
+                        });
+                        return;
+                      }
+                      if (event.key !== "Tab") return;
+
+                      const focusableElements = Array.from(
+                        event.currentTarget.querySelectorAll<HTMLElement>(
+                          "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])"
+                        )
+                      ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
+                      if (focusableElements.length === 0) return;
+
+                      const firstElement = focusableElements[0];
+                      const lastElement = focusableElements[focusableElements.length - 1];
+                      if (!firstElement || !lastElement) return;
+                      if (event.shiftKey && document.activeElement === firstElement) {
+                        event.preventDefault();
+                        lastElement.focus();
+                      } else if (!event.shiftKey && document.activeElement === lastElement) {
+                        event.preventDefault();
+                        firstElement.focus();
+                      }
+                    };
+                    const reminderEditorIndentClass = "";
+                    const reminderSurfaceInputClass = plansEditorInputClass;
                     const rowDateBasisControl =
                       !emailUsesTimingFields && row.rowType === "email" ? null : (
-                        <label className="inline-flex w-fit items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-medium text-slate-600 shadow-sm">
+	                        <label className="inline-flex w-fit items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-medium text-slate-600 shadow-sm">
                           <input
                             type="checkbox"
                             className="h-4 w-4 rounded border-slate-300 text-slate-700 focus:ring-slate-300"
@@ -8847,30 +9426,40 @@ export default function PlansPage() {
                           </span>
                         </label>
                       );
-                    const detailEditorIndentClass = "ml-4 md:ml-7";
-                    const detailInputClass =
-                      "w-full rounded-[16px] border border-slate-200 bg-white px-3.5 py-1.5 text-[11px] text-slate-900 shadow-sm placeholder:text-slate-400 focus:outline-none focus:ring-0";
+	                    const detailEditorIndentClass = "";
+	                    const detailInputClass = plansEditorInputClass;
                     const reminderInlineEditor = isReminderInlineEditorRendered ? (
-                      <AnimatedRowEditor open={isReminderInlineEditorOpen} openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS} closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}>
+                      <AnimatedRowEditor
+                        open={isReminderInlineEditorOpen}
+                        activeLayer={isThisRowEditorLayered}
+                        animate={!isThisRowEditorLayered}
+                        openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS}
+                        closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}
+                        className={isThisRowEditorLayered ? "min-h-0 flex-1" : ""}
+                        contentClassName={isThisRowEditorLayered ? "flex h-full min-h-0 flex-col" : undefined}
+                        innerClassName={isThisRowEditorLayered ? "flex h-full min-h-0 w-full flex-col" : undefined}
+                      >
                         <div
                           data-inline-row-editor="true"
-                          ref={(node) => {
-                            rowEditorPanelRefs.current[row.id] = node;
-                          }}
-                          className={`${reminderEditorIndentClass} space-y-4 pt-1 ${inactiveEditorDimTransitionClass} ${
-                            isAnyBuilderRowEditorVisible && !isThisRowEditorLayered ? "opacity-35" : "opacity-100"
-                          }`}
-                        >
+	                          ref={(node) => {
+	                            rowEditorPanelRefs.current[row.id] = node;
+	                          }}
+	                          className={`${reminderEditorIndentClass} ${plansInspectorBodyClass} ${inactiveEditorDimTransitionClass} opacity-100`}
+	                        >
                         <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={0}>
-                        <div>{rowDateBasisControl}</div>
+                        <div className={plansInspectorSectionClass}>
+                          <div className={plansInspectorSectionHeadingClass}>Schedule</div>
+                          <div>{rowDateBasisControl}</div>
+                        </div>
                         </StaggeredInlineEditorItem>
-                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={360}>
-                        <div>
+                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(360)}>
+                        <div className={plansInspectorSectionClass}>
+                          <div className={plansInspectorSectionHeadingClass}>Reminder content</div>
                           <div className="mb-2 text-sm font-medium text-slate-700">Reminder Title</div>
                           <div className="relative">
                             <div
                               aria-hidden="true"
-                              className={`pointer-events-none absolute inset-0 flex items-center overflow-hidden rounded-[16px] px-3.5 py-1.5 text-[11px] text-slate-900 ${
+                              className={`pointer-events-none absolute inset-0 flex items-center overflow-hidden rounded-[16px] px-3.5 py-2.5 text-[14px] text-slate-900 ${
                                 focusedTitleInputId === reminderTitleInputId ? "opacity-0" : ""
                               }`}
                             >
@@ -8908,8 +9497,8 @@ export default function PlansPage() {
                         </div>
                         </StaggeredInlineEditorItem>
 
-                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={720}>
-                        <div>
+                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(720)}>
+                        <div className={plansInspectorSectionClass}>
                           <div className="mb-2 text-sm font-medium text-slate-700">Body</div>
                           <textarea
                             data-validation-field={`${row.id}:body`}
@@ -8924,8 +9513,9 @@ export default function PlansPage() {
                         </div>
                         </StaggeredInlineEditorItem>
 
-                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1080}>
-                        <div>
+                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1080)}>
+                        <div className={plansInspectorSectionClass}>
+                          <div className={plansInspectorSectionHeadingClass}>Schedule options</div>
                           {(() => {
                             const previewDurationItem = previewPlan.items.find((preview) => preview.id === row.id);
                             const computedStartDate =
@@ -8981,7 +9571,7 @@ export default function PlansPage() {
                                       ))}
                                     </select>
                                   </div>
-                                  <label className="inline-flex h-[28px] w-fit items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-700 shadow-sm">
+                                  <label className="inline-flex h-8 w-fit items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-2.5 text-[12px] font-medium text-slate-700 shadow-sm">
                                     <input
                                       type="checkbox"
                                       className="m-0 h-4 w-4"
@@ -9045,46 +9635,55 @@ export default function PlansPage() {
                         </div>
                         </StaggeredInlineEditorItem>
 
-                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1440}>
-                        <div>
-                          <div className="mb-1 text-sm font-medium text-slate-700">Anchors</div>
-                          {renderDynamicFieldsSection({ inlineEditor: true })}
-                        </div>
-                        </StaggeredInlineEditorItem>
-
-                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1800} className="flex justify-end">
+	                        <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1440)}>
+	                          <div className={plansInspectorSectionClass}>
+	                            {renderDynamicFieldsSection({ inlineEditor: true })}
+	                          </div>
+	                        </StaggeredInlineEditorItem>
+                      </div>
+	                        <div className={plansInspectorFooterClass}>
                           <button
                             type="button"
                             onClick={() => {
                               closeRowEditorsAfterAnimation();
                             }}
-                            className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+	                            className={`${plansPrimaryButtonClass} !h-[40px] min-w-[96px]`}
                           >
                             Done
                           </button>
-                        </StaggeredInlineEditorItem>
-                      </div>
+                        </div>
                       </AnimatedRowEditor>
                     ) : null;
                     const emailInlineEditorRendered = isEmailEditorOpen || isClosingEmailEditor;
                     const emailInlineEditor = emailInlineEditorRendered ? (
-                      <AnimatedRowEditor open={isEmailEditorOpen} openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS} closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}>
+	                      <AnimatedRowEditor
+	                        open={isEmailEditorOpen}
+	                        activeLayer={isThisRowEditorLayered}
+	                        animate={!isThisRowEditorLayered}
+	                        openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS}
+	                        closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}
+	                        className={isThisRowEditorLayered ? "min-h-0 flex-1" : ""}
+	                        contentClassName={isThisRowEditorLayered ? "flex h-full min-h-0 flex-col" : undefined}
+	                        innerClassName={isThisRowEditorLayered ? "flex h-full min-h-0 w-full flex-col" : undefined}
+	                      >
                         <div
                           data-inline-row-editor="true"
-                          ref={(node) => {
-                            rowEditorPanelRefs.current[row.id] = node;
-                          }}
-                          className={`${detailEditorIndentClass} space-y-4 pt-1 ${inactiveEditorDimTransitionClass} ${
-                            isAnyBuilderRowEditorVisible && !isThisRowEditorLayered ? "opacity-35" : "opacity-100"
-                          }`}
-                        >
+	                          ref={(node) => {
+	                            rowEditorPanelRefs.current[row.id] = node;
+	                          }}
+	                          className={`${detailEditorIndentClass} ${plansInspectorBodyClass} ${inactiveEditorDimTransitionClass} opacity-100`}
+	                        >
                           {emailUsesTimingFields ? (
                             <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={0}>
-                              <div>{rowDateBasisControl}</div>
+                              <div className={plansInspectorSectionClass}>
+                                <div className={plansInspectorSectionHeadingClass}>Schedule</div>
+                                <div>{rowDateBasisControl}</div>
+                              </div>
                             </StaggeredInlineEditorItem>
                           ) : null}
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={360}>
-                            <div>
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(360)}>
+                            <div className={plansInspectorSectionClass}>
+                              <div className={plansInspectorSectionHeadingClass}>Message</div>
                               <div className="mb-2 text-sm font-medium text-slate-700">Subject</div>
                               <input
                                 data-validation-field={`${row.id}:emailSubject`}
@@ -9102,8 +9701,9 @@ export default function PlansPage() {
                               />
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={720}>
-                            <div>
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(720)}>
+                            <div className={plansInspectorSectionClass}>
+                              <div className={plansInspectorSectionHeadingClass}>Recipients</div>
                               {(() => {
                                 const normalizedDraft = normalizeEmailDraft(row.emailDraft);
                                 const showCc = Boolean(emailFieldVisibility[row.id]?.cc || normalizedDraft.cc.length);
@@ -9214,8 +9814,8 @@ export default function PlansPage() {
                               })()}
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1080}>
-                            <div>
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1080)}>
+                            <div className={plansInspectorSectionClass}>
                               <div className="mb-2 text-sm font-medium text-slate-700">Message</div>
                               <textarea
                                 data-validation-field={`${row.id}:emailBody`}
@@ -9232,49 +9832,59 @@ export default function PlansPage() {
                               />
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1440}>
-                            <div>
-                              <div className="mb-1 text-sm font-medium text-slate-700">Anchors</div>
-                              {renderDynamicFieldsSection({ inlineEditor: true })}
-                            </div>
-                          </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1800} className="flex justify-end">
+	                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1440)}>
+	                            <div className={plansInspectorSectionClass}>
+	                              {renderDynamicFieldsSection({ inlineEditor: true })}
+	                            </div>
+	                          </StaggeredInlineEditorItem>
+                        </div>
+	                        <div className={plansInspectorFooterClass}>
                             <button
                               type="button"
                               onClick={() => {
                                 collapseEmptyEmailFields(row.id, row.emailDraft);
                                 closeRowEditorsAfterAnimation();
                               }}
-                              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+	                            className={`${plansPrimaryButtonClass} !h-[40px] min-w-[96px]`}
                             >
                               Done
                             </button>
-                          </StaggeredInlineEditorItem>
-                        </div>
+                          </div>
                       </AnimatedRowEditor>
                     ) : null;
                     const meetingInlineEditorRendered = isMeetingEditorOpen || isClosingMeetingEditor;
                     const meetingInlineEditor = meetingInlineEditorRendered ? (
-                      <AnimatedRowEditor open={isMeetingEditorOpen} openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS} closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}>
+	                      <AnimatedRowEditor
+	                        open={isMeetingEditorOpen}
+	                        activeLayer={isThisRowEditorLayered}
+	                        animate={!isThisRowEditorLayered}
+	                        openMs={INLINE_EDITOR_EXPAND_ANIMATION_MS}
+	                        closeMs={ROW_EDITOR_CLOSE_ANIMATION_MS}
+	                        className={isThisRowEditorLayered ? "min-h-0 flex-1" : ""}
+	                        contentClassName={isThisRowEditorLayered ? "flex h-full min-h-0 flex-col" : undefined}
+	                        innerClassName={isThisRowEditorLayered ? "flex h-full min-h-0 w-full flex-col" : undefined}
+	                      >
                         <div
                           data-inline-row-editor="true"
-                          ref={(node) => {
-                            rowEditorPanelRefs.current[row.id] = node;
-                          }}
-                          className={`${detailEditorIndentClass} space-y-4 pt-1 ${inactiveEditorDimTransitionClass} ${
-                            isAnyBuilderRowEditorVisible && !isThisRowEditorLayered ? "opacity-35" : "opacity-100"
-                          }`}
-                        >
+	                          ref={(node) => {
+	                            rowEditorPanelRefs.current[row.id] = node;
+	                          }}
+	                          className={`${detailEditorIndentClass} ${plansInspectorBodyClass} ${inactiveEditorDimTransitionClass} opacity-100`}
+	                        >
                           <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={0}>
-                            <div>{rowDateBasisControl}</div>
+                            <div className={plansInspectorSectionClass}>
+                              <div className={plansInspectorSectionHeadingClass}>Schedule</div>
+                              <div>{rowDateBasisControl}</div>
+                            </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={360}>
-                            <div>
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(360)}>
+                            <div className={plansInspectorSectionClass}>
+                              <div className={plansInspectorSectionHeadingClass}>Meeting content</div>
                               <div className="mb-2 text-sm font-medium text-slate-700">Meeting Title</div>
                               <div className="relative">
                                 <div
                                   aria-hidden="true"
-                                  className={`pointer-events-none absolute inset-0 flex items-center overflow-hidden rounded-[16px] px-3.5 py-1.5 text-[11px] text-slate-900 ${
+                                  className={`pointer-events-none absolute inset-0 flex items-center overflow-hidden rounded-[16px] px-3.5 py-2.5 text-[14px] text-slate-900 ${
                                     focusedTitleInputId === meetingTitleInputId ? "opacity-0" : ""
                                   }`}
                                 >
@@ -9311,8 +9921,9 @@ export default function PlansPage() {
                               </div>
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={720}>
-                            <div className="space-y-3">
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(720)}>
+                            <div className={`${plansInspectorSectionClass} space-y-3`}>
+                              <div className={plansInspectorSectionHeadingClass}>Attendees and location</div>
                               <div>
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                   <div className="text-sm font-medium text-slate-700">
@@ -9435,7 +10046,7 @@ export default function PlansPage() {
                                       ))}
                                     </select>
                                   </div>
-                                  <label className="inline-flex h-[28px] w-fit items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-700 shadow-sm">
+                                  <label className="inline-flex h-8 w-fit items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-2.5 text-[12px] font-medium text-slate-700 shadow-sm">
                                     <input
                                       type="checkbox"
                                       checked={Boolean(normalizeMeetingDraft(row.meetingDraft)?.isAllDay)}
@@ -9455,8 +10066,9 @@ export default function PlansPage() {
                               </div>
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1080}>
-                            <div className="space-y-3">
+                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1080)}>
+                            <div className={`${plansInspectorSectionClass} space-y-3`}>
+                              <div className={plansInspectorSectionHeadingClass}>Meeting options</div>
                               {activeAccountProvider === "gmail" ? (
                                 <label className="inline-flex items-center gap-2 text-sm text-slate-700">
                                   <input
@@ -9589,13 +10201,13 @@ export default function PlansPage() {
                               ) : null}
                             </div>
                           </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1440}>
-                            <div>
-                              <div className="mb-1 text-sm font-medium text-slate-700">Anchors</div>
-                              {renderDynamicFieldsSection({ inlineEditor: true })}
-                            </div>
-                          </StaggeredInlineEditorItem>
-                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={1800} className="flex justify-end">
+	                          <StaggeredInlineEditorItem active={isInlineEditorRevealActive} delayMs={inspectorRevealDelay(1440)}>
+	                            <div className={plansInspectorSectionClass}>
+	                              {renderDynamicFieldsSection({ inlineEditor: true })}
+	                            </div>
+	                          </StaggeredInlineEditorItem>
+                        </div>
+	                          <div className={plansInspectorFooterClass}>
                             <button
                               type="button"
                               onClick={() => {
@@ -9603,16 +10215,17 @@ export default function PlansPage() {
                                   setForcedOpenMeetingEditorRowIds((current) => current.filter((id) => id !== row.id));
                                 });
                               }}
-                              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+		                              className={`${plansPrimaryButtonClass} !h-[40px] min-w-[96px]`}
                             >
                               Done
                             </button>
-                          </StaggeredInlineEditorItem>
-                        </div>
+                          </div>
                       </AnimatedRowEditor>
                     ) : null;
-                    const rowTimingChipClass =
-                      "inline-flex min-h-[22px] items-center justify-center rounded-[12px] border border-slate-200 bg-white/90 px-2 text-center text-[10px] font-medium leading-none text-slate-500 shadow-[0_6px_14px_-16px_rgba(15,23,42,0.35)]";
+		                    const rowTimingChipClass =
+				                      "inline-flex h-[36px] items-center justify-center whitespace-nowrap rounded-[9px] border border-slate-200 bg-white text-center text-[13px] font-medium leading-none text-slate-600 shadow-sm";
+		                    const inspectorTimingChipClass =
+				                      "inline-flex h-[34px] items-center justify-center whitespace-nowrap rounded-xl border border-slate-200 bg-white px-3 text-center text-[13px] font-medium leading-none text-slate-600 shadow-sm";
                     const rowTimeZone = normalizeOutlookTimeZone(row.timeZone || eventTimeZone);
                     const normalizedTimeZoneSearch = timeZoneSearch.trim().toLowerCase();
                     const filteredTimeZoneOptions = normalizedTimeZoneSearch
@@ -9653,7 +10266,7 @@ export default function PlansPage() {
                           </span>
                         </button>
                         {openTimeZoneRowId === row.id ? (
-                          <div className="absolute right-0 top-[calc(100%+0.5rem)] z-[90] w-72 rounded-2xl border border-slate-600 bg-slate-800 p-2 text-left shadow-[0_18px_36px_-16px_rgba(15,23,42,0.65)]">
+	                          <div className="absolute right-0 top-[calc(100%+0.5rem)] z-[170] w-72 rounded-2xl border border-slate-600 bg-slate-800 p-2 text-left shadow-[0_18px_36px_-16px_rgba(15,23,42,0.65)]">
                             <div className="mb-2 px-2 text-[11px] font-semibold text-slate-200">
                               {getOutlookTimeZoneLabel(rowTimeZone)}
                             </div>
@@ -9708,21 +10321,342 @@ export default function PlansPage() {
                         ) : null}
                       </span>
                     );
-                    return (
-                      <StaggeredInlineEditorItem
-                        key={row.id}
-                        active={isBuilderEntryRevealActive}
-                        immediate={isBuilderEntryRevealImmediate || instantlyVisibleRowId === row.id}
-                        delayMs={360 + index * 70}
-                        className={`relative space-y-4 ${isTimeZoneMenuOpen ? "z-[80]" : ""} ${instantlyVisibleRowId === row.id ? "plans-new-row-enter" : ""} ${isThisRowEditorLayered ? "z-[60] -mx-3 -my-3 rounded-[20px] bg-[var(--app-bg)] px-3 py-3 lg:-ml-5 lg:-mr-10 lg:-my-5 lg:pl-5 lg:pr-10 lg:py-5" : ""}`}
-                      >
+                    const inspectorSubtitle =
+                      row.title ||
+                      (rowKind === "email"
+                        ? "Email Subject Line"
+                        : rowKind === "meeting"
+                          ? "Meeting Title"
+                          : "Enter Reminder Title");
+                    const inspectorDotClass = `h-3 w-3 shrink-0 rounded-full ${
+                      rowKind === "email" ? "bg-green-500" : rowKind === "meeting" ? "bg-violet-500" : "bg-blue-500"
+                    }`;
+                    const handleInspectorClose = () => {
+                      closeRowEditorsAfterAnimation(() => {
+                        if (rowKind === "meeting") {
+                          setForcedOpenMeetingEditorRowIds((current) => current.filter((id) => id !== row.id));
+                        }
+                      });
+                    };
+	                    const renderInspectorTimingChips = () => (
+	                      <>
+	                        <span className={`${inspectorTimingChipClass} min-w-[92px]`}>
+	                          {formatOffsetLabel(row.offsetDays, {
+	                            relativeToToday: noEventDate,
+	                            dateBasis: row.dateBasis,
+	                          })}
+	                        </span>
+	                        <span className={`${inspectorTimingChipClass} min-w-[86px] gap-1 px-2`}>
+	                          {row.meetingDraft?.isAllDay || row.durationDraft?.isAllDay
+	                            ? "All day"
+	                            : getReminderTimeDisplayValue(row.reminderTime ?? "") || "No time"}
+	                          {rowTimeZoneControl}
+	                        </span>
+	                      </>
+	                    );
+	                    const emailProviderNote =
+	                      row.rowType === "email" ? getBuilderEmailModeMessage(appSettings.emailHandlingMode) : null;
+	                    const collapsedOffsetChipClass = `${rowTimingChipClass} w-full max-w-full min-[900px]:w-[136px]`;
+	                    const collapsedTimeChipClass = `${rowTimingChipClass} w-full max-w-full tabular-nums min-[900px]:w-[112px]`;
+	                    const collapsedOffsetControl = (
+	                      <div data-workflow-row-part="offset" className="min-w-0 max-w-full min-[900px]:justify-self-start">
+	                        {editingOffsetRowId === row.id ? (
+	                          <div className={`${collapsedOffsetChipClass} gap-2 px-2 py-1`}>
+	                            <input
+	                              ref={(node) => {
+	                                builderOffsetInputRefs.current[row.id] = node;
+	                              }}
+	                              type="text"
+	                              inputMode="numeric"
+	                              className="min-w-0 flex-1 border-0 bg-transparent px-1 text-slate-600 focus:outline-none focus:ring-0"
+	                              value={offsetDrafts[row.id] ?? (row.offsetDays == null ? "" : String(row.offsetDays))}
+	                              onChange={(e) =>
+	                                setOffsetDrafts((current) => ({
+	                                  ...current,
+	                                  [row.id]: e.target.value,
+	                                }))
+	                              }
+	                              onFocus={(e) => {
+	                                e.currentTarget.select();
+	                              }}
+	                              onBlur={() => {
+	                                commitOffsetDraft(row.id);
+	                              }}
+	                              onKeyDown={(e) => {
+	                                if (e.key === "ArrowUp") {
+	                                  e.preventDefault();
+	                                  nudgeOffsetDraft(row.id, 1);
+	                                  return;
+	                                }
+	                                if (e.key === "ArrowDown") {
+	                                  e.preventDefault();
+	                                  nudgeOffsetDraft(row.id, -1);
+	                                  return;
+	                                }
+	                                if (e.key === "Enter") {
+	                                  e.preventDefault();
+	                                  commitOffsetDraft(row.id);
+	                                  focusBuilderTimeInput(row.id);
+	                                  return;
+	                                }
+	                                if (e.key === "Tab" && !e.shiftKey) {
+	                                  e.preventDefault();
+	                                  commitOffsetDraft(row.id);
+	                                  focusBuilderTimeInput(row.id);
+	                                  return;
+	                                }
+	                                if (e.key === "Tab" && e.shiftKey) {
+	                                  e.preventDefault();
+	                                  commitOffsetDraft(row.id);
+	                                  focusCollapsedTitleInput(row.id);
+	                                }
+	                              }}
+	                              autoFocus
+	                            />
+	                            <div className="flex flex-col gap-0.5">
+	                              <button
+	                                type="button"
+	                                data-no-row-drag="true"
+	                                tabIndex={-1}
+	                                aria-label="Increase offset"
+	                                className="flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+	                                onMouseDown={(e) => e.preventDefault()}
+	                                onClick={() => nudgeOffsetDraft(row.id, 1)}
+	                              >
+	                                <svg
+	                                  viewBox="0 0 16 16"
+	                                  aria-hidden="true"
+	                                  className="h-3 w-3"
+	                                  fill="none"
+	                                  stroke="currentColor"
+	                                  strokeWidth="1.8"
+	                                  strokeLinecap="round"
+	                                  strokeLinejoin="round"
+	                                >
+	                                  <path d="M4 10l4-4 4 4" />
+	                                </svg>
+	                              </button>
+	                              <button
+	                                type="button"
+	                                data-no-row-drag="true"
+	                                tabIndex={-1}
+	                                aria-label="Decrease offset"
+	                                className="flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+	                                onMouseDown={(e) => e.preventDefault()}
+	                                onClick={() => nudgeOffsetDraft(row.id, -1)}
+	                              >
+	                                <svg
+	                                  viewBox="0 0 16 16"
+	                                  aria-hidden="true"
+	                                  className="h-3 w-3"
+	                                  fill="none"
+	                                  stroke="currentColor"
+	                                  strokeWidth="1.8"
+	                                  strokeLinecap="round"
+	                                  strokeLinejoin="round"
+	                                >
+	                                  <path d="M4 6l4 4 4-4" />
+	                                </svg>
+	                              </button>
+	                            </div>
+	                          </div>
+	                        ) : (
+	                          <span className={`${collapsedOffsetChipClass} gap-1 py-0.5 pl-2 pr-1 transition-colors hover:border-slate-300 hover:text-slate-600`}>
+	                            <button
+	                              type="button"
+	                              data-no-row-drag="true"
+	                              className="min-w-0 flex-1 bg-transparent px-0 text-center focus:outline-none"
+	                              onFocus={() => beginEditingOffsetForRow(row.id, row.offsetDays)}
+	                              onClick={() => beginEditingOffsetForRow(row.id, row.offsetDays)}
+	                            >
+	                              {formatOffsetLabel(row.offsetDays, {
+	                                relativeToToday: noEventDate,
+	                                dateBasis: row.dateBasis,
+	                              })}
+	                            </button>
+	                            <span className="flex flex-col gap-0.5">
+	                              <button
+	                                type="button"
+	                                data-no-row-drag="true"
+	                                tabIndex={-1}
+	                                aria-label="Increase offset"
+	                                className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+	                                onMouseDown={(e) => e.preventDefault()}
+	                                onClick={() => nudgeRowOffset(row.id, 1)}
+	                              >
+	                                <svg
+	                                  viewBox="0 0 16 16"
+	                                  aria-hidden="true"
+	                                  className="h-2.5 w-2.5"
+	                                  fill="none"
+	                                  stroke="currentColor"
+	                                  strokeWidth="1.9"
+	                                  strokeLinecap="round"
+	                                  strokeLinejoin="round"
+	                                >
+	                                  <path d="M4 10l4-4 4 4" />
+	                                </svg>
+	                              </button>
+	                              <button
+	                                type="button"
+	                                data-no-row-drag="true"
+	                                tabIndex={-1}
+	                                aria-label="Decrease offset"
+	                                className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+	                                onMouseDown={(e) => e.preventDefault()}
+	                                onClick={() => nudgeRowOffset(row.id, -1)}
+	                              >
+	                                <svg
+	                                  viewBox="0 0 16 16"
+	                                  aria-hidden="true"
+	                                  className="h-2.5 w-2.5"
+	                                  fill="none"
+	                                  stroke="currentColor"
+	                                  strokeWidth="1.9"
+	                                  strokeLinecap="round"
+	                                  strokeLinejoin="round"
+	                                >
+	                                  <path d="M4 6l4 4 4-4" />
+	                                </svg>
+	                              </button>
+	                            </span>
+	                          </span>
+	                        )}
+	                      </div>
+	                    );
+	                    const collapsedTimeControl = (
+	                      <div data-workflow-row-part="time" className="relative min-w-0 max-w-full min-[900px]:justify-self-start">
+	                        {meetingErrors?.time ? <div className="absolute -top-[18px] left-0 text-[12px] font-medium text-red-500">Time *</div> : null}
+	                        {(() => {
+	                          const shouldWrapTimeField =
+	                            Boolean(row.reminderTime?.includes("[")) || Boolean(row.reminderTime?.includes("\n"));
+	                          const isAnchorTimeValue = isReminderTimeAnchorValue(row.reminderTime ?? "");
+	                          const literalTimeEditorValue =
+	                            focusedTimeInputRowId === row.id
+	                              ? (timeInputDrafts[row.id] ?? buildReminderTimeMaskedValue(row.reminderTime ?? ""))
+	                              : getReminderTimeDisplayValue(row.reminderTime ?? "");
+
+	                          if (row.meetingDraft?.isAllDay || row.durationDraft?.isAllDay) {
+	                            return <span className={`${collapsedTimeChipClass} px-2`}>All day</span>;
+	                          }
+
+	                          if (!shouldWrapTimeField && !isAnchorTimeValue) {
+	                            return (
+	                              <span className={`${collapsedTimeChipClass} gap-0 px-2`}>
+	                                <input
+	                                  ref={(node) => {
+	                                    builderTimeInputRefs.current[row.id] = node;
+	                                  }}
+	                                  data-validation-field={`${row.id}:reminderTime`}
+	                                  type="text"
+	                                  inputMode="text"
+	                                  className={`w-[56px] min-w-0 border-0 bg-transparent p-0 text-center placeholder:text-slate-400 focus:outline-none focus:ring-0 ${getValidationFieldHighlightClass(row.id, "reminderTime")}`}
+	                                  value={literalTimeEditorValue}
+	                                  placeholder={focusedTimeInputRowId === row.id ? REMINDER_TIME_INPUT_MASK : "No time"}
+	                                  onFocus={(e) => {
+	                                    const input = e.currentTarget;
+	                                    setFocusedTimeInputRowId(row.id);
+	                                    setTimeInputDrafts((current) => ({
+	                                      ...current,
+	                                      [row.id]: buildReminderTimeMaskedValue(row.reminderTime ?? ""),
+	                                    }));
+	                                    requestAnimationFrame(() => {
+	                                      input.setSelectionRange(0, 0);
+	                                    });
+	                                  }}
+	                                  onChange={(e) => {
+	                                    const rawValue = e.target.value;
+	                                    const selectionEnd = e.target.selectionEnd ?? rawValue.length;
+	                                    const meaningfulCount = countReminderTimeMeaningfulChars(rawValue, selectionEnd);
+	                                    const nextMaskedValue = maskReminderTimeDraftInput(rawValue);
+	                                    const nextCursor = findReminderTimeCursorFromMeaningfulCount(nextMaskedValue, meaningfulCount);
+
+	                                    setTimeInputDrafts((current) => ({
+	                                      ...current,
+	                                      [row.id]: nextMaskedValue,
+	                                    }));
+
+	                                    requestAnimationFrame(() => {
+	                                      const input = builderTimeInputRefs.current[row.id];
+	                                      if (input && input instanceof HTMLInputElement && document.activeElement === input) {
+	                                        input.setSelectionRange(nextCursor, nextCursor);
+	                                      }
+	                                    });
+	                                  }}
+	                                  onBlur={(e) => {
+	                                    clearValidationFieldHighlight(row.id, "reminderTime");
+	                                    const nextValue = normalizeReminderTimeInput(e.target.value);
+	                                    updateRow(row.id, (current) => ({
+	                                      ...current,
+	                                      reminderTime: nextValue,
+	                                    }));
+	                                    setFocusedTimeInputRowId((current) => (current === row.id ? null : current));
+	                                    setTimeInputDrafts((current) => clearReminderTimeDraft(current, row.id));
+	                                  }}
+	                                />
+	                                {rowTimeZoneControl}
+	                              </span>
+	                            );
+	                          }
+
+	                          return (
+	                            <span className={`${collapsedTimeChipClass} gap-0 px-2 py-1.5`}>
+	                              <textarea
+	                                ref={(node) => {
+	                                  builderTimeInputRefs.current[row.id] = node;
+	                                }}
+	                                data-validation-field={`${row.id}:reminderTime`}
+	                                rows={shouldWrapTimeField ? 2 : 1}
+	                                className={`w-[66px] min-w-0 resize-none border-0 bg-transparent p-0 placeholder:text-slate-400 [overflow-wrap:anywhere] focus:outline-none focus:ring-0 ${getValidationFieldHighlightClass(row.id, "reminderTime")}`}
+	                                value={row.reminderTime ?? ""}
+	                                placeholder={REMINDER_TIME_INPUT_MASK}
+	                                onChange={(e) => {
+	                                  clearValidationFieldHighlight(row.id, "reminderTime");
+	                                  updateRow(row.id, (current) => ({
+	                                    ...current,
+	                                    reminderTime: maskReminderTimeDraftInput(e.target.value),
+	                                  }))
+	                                }}
+	                                onBlur={(e) =>
+	                                  updateRow(row.id, (current) => ({
+	                                    ...current,
+	                                    reminderTime: normalizeReminderTimeInput(e.target.value),
+	                                  }))
+	                                }
+	                              />
+	                              {rowTimeZoneControl}
+	                            </span>
+	                          );
+	                        })()}
+	                      </div>
+	                    );
+                    const rowEditorElement = (
+	                      <StaggeredInlineEditorItem
+	                        key={row.id}
+	                        active={isBuilderEntryRevealActive}
+	                        immediate={isBuilderEntryRevealImmediate || instantlyVisibleRowId === row.id}
+		                        delayMs={360 + index * 70}
+		                        role={isThisRowEditorLayered ? "dialog" : undefined}
+		                        aria-modal={isThisRowEditorLayered ? true : undefined}
+		                        aria-labelledby={isThisRowEditorLayered ? inspectorTitleId : undefined}
+		                        data-plans-inspector-panel={isThisRowEditorLayered ? "true" : undefined}
+		                        tabIndex={isThisRowEditorLayered ? -1 : undefined}
+		                        onKeyDown={handleInspectorKeyDown}
+			                        className={`${isThisRowEditorLayered ? "absolute" : "relative"} space-y-0 ${isTimeZoneMenuOpen ? "z-[80]" : ""} ${instantlyVisibleRowId === row.id ? "plans-new-row-enter" : ""} ${
+		                          isThisRowEditorLayered
+		                            ? `${isThisRowEditorClosing ? "plans-inspector-exit pointer-events-none" : "plans-inspector-enter pointer-events-auto"} inset-3 z-10 mx-auto flex h-[calc(100dvh-24px)] max-h-[calc(100dvh-24px)] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-[-18px_0_50px_rgba(30,50,75,0.12)] max-[480px]:inset-0 max-[480px]:h-[100dvh] max-[480px]:max-h-[100dvh] max-[480px]:max-w-none max-[480px]:rounded-none lg:inset-y-0 lg:left-auto lg:right-0 lg:top-0 lg:mx-0 lg:h-[100dvh] lg:max-h-[100dvh] lg:max-w-none lg:rounded-none lg:border-y-0 lg:border-r-0 ${inspectorWidthClass}`
+		                            : ""
+		                        }`}
+	                      >
                         <div
                           data-builder-row-card="true"
-                          ref={(node) => {
-                            rowNodeRefs.current[row.id] = node;
-                          }}
-                          onPointerDown={(e) => {
-                            if (e.button !== 0) return;
+                          data-layered-row-editor={isThisRowEditorLayered ? "true" : undefined}
+	                          ref={(node) => {
+	                            rowNodeRefs.current[row.id] = node;
+	                          }}
+	                          onPointerDown={(e) => {
+	                            if (isThisRowEditorLayered) return;
+	                            if (e.button !== 0) return;
                             const target = e.target as HTMLElement | null;
                             if (target?.closest("[data-no-row-drag='true']")) return;
                             activeDragRef.current = {
@@ -9734,8 +10668,9 @@ export default function PlansPage() {
                             };
                             setPressedRowId(row.id);
                           }}
-                          onPointerMove={(e) => {
-                            const activeDrag = activeDragRef.current;
+	                          onPointerMove={(e) => {
+	                            if (isThisRowEditorLayered) return;
+	                            const activeDrag = activeDragRef.current;
                             if (!activeDrag || activeDrag.pointerId !== e.pointerId) return;
 
                             if (!activeDrag.isDragging) {
@@ -9757,29 +10692,126 @@ export default function PlansPage() {
                             dragInsertionIndexRef.current = nextInsertionIndex;
                             setDragInsertionIndex(nextInsertionIndex);
                           }}
-                          onPointerUp={(e) => {
-                            const activeDrag = activeDragRef.current;
+	                          onPointerUp={(e) => {
+	                            if (isThisRowEditorLayered) return;
+	                            const activeDrag = activeDragRef.current;
                             if (!activeDrag || activeDrag.pointerId !== e.pointerId) return;
                             if (e.currentTarget.hasPointerCapture(e.pointerId)) {
                               e.currentTarget.releasePointerCapture(e.pointerId);
                             }
                             finishRowDrag(activeDrag.isDragging);
                           }}
-                          onPointerCancel={(e) => {
-                            const activeDrag = activeDragRef.current;
+	                          onPointerCancel={(e) => {
+	                            if (isThisRowEditorLayered) return;
+	                            const activeDrag = activeDragRef.current;
                             if (!activeDrag || activeDrag.pointerId !== e.pointerId) return;
                             if (e.currentTarget.hasPointerCapture(e.pointerId)) {
                               e.currentTarget.releasePointerCapture(e.pointerId);
                             }
                             finishRowDrag(false);
                           }}
-                        className={`group relative sm:-ml-[7.75rem] cursor-grab overflow-hidden rounded-l-[4px] rounded-r-[16px] border border-transparent bg-[#ffffff] px-4 py-2.5 shadow-[0_8px_18px_-20px_rgba(15,23,42,0.3)] transition duration-150 ${inactiveEditorDimTransitionClass} active:cursor-grabbing ${isThisRowEditorLayered ? "relative z-40 border-transparent bg-[#ffffff]" : ""} ${isActiveDragRow ? "relative z-40 select-none bg-[#ffffff] shadow-[0_18px_34px_-22px_rgba(15,23,42,0.35)] ring-1 ring-slate-200" : ""} ${
-                            draggingRowId && !isDraggingRow ? "transition-transform duration-150" : ""
-                          } ${isMissingRowHighlighted ? "border-red-300 bg-red-50/35 ring-2 ring-red-200" : ""} ${isAnyBuilderRowEditorVisible && !isThisRowEditorLayered ? "opacity-35" : "opacity-100"} ${shouldHideFollowingRowDuringAddRowSettle ? "pointer-events-none invisible opacity-0" : ""} ${hiddenAddRowId === row.id ? "pointer-events-none invisible" : ""}`}
-                        >
-                        <span
-                          aria-hidden="true"
-                          className={`absolute bottom-0 left-0 top-0 w-2 ${
+			                        className={`group relative overflow-hidden bg-white transition duration-150 ${inactiveEditorDimTransitionClass} ${
+			                          isThisRowEditorLayered
+			                            ? "shrink-0 cursor-default border-0 shadow-none focus-within:!border-transparent focus-within:!shadow-none"
+			                            : "min-h-[72px] cursor-grab px-4 py-3 hover:bg-slate-50/70 active:cursor-grabbing"
+			                        } ${isActiveDragRow ? "relative z-40 select-none bg-slate-50 shadow-[0_12px_24px_-20px_rgba(15,23,42,0.25)]" : ""} ${
+	                            draggingRowId && !isDraggingRow ? "transition-transform duration-150" : ""
+		                          } ${isMissingRowHighlighted ? "bg-red-50/35 ring-2 ring-inset ring-red-200" : ""} opacity-100 ${shouldHideFollowingRowDuringAddRowSettle ? "pointer-events-none invisible opacity-0" : ""} ${hiddenAddRowId === row.id ? "pointer-events-none invisible" : ""}`}
+	                        >
+	                          {isThisRowEditorLayered ? (
+	                            <div className="grid shrink-0 gap-2 border-b border-slate-200/80 bg-white px-4 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:gap-x-5 sm:gap-y-0 sm:px-6 sm:py-5">
+	                              <div className="flex min-w-0 items-center justify-between gap-2 sm:col-start-2 sm:row-span-3 sm:row-start-1 sm:min-w-fit sm:justify-end">
+	                                <div className="flex min-w-0 items-center gap-2 sm:hidden">
+	                                  <span aria-hidden="true" className={inspectorDotClass} />
+	                                  <div className="truncate text-[12px] font-semibold uppercase tracking-[0.09em] text-slate-600">
+	                                    {rowMeta.label}
+	                                  </div>
+	                                </div>
+	                                <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+	                                  <div className="hidden items-center gap-2 sm:flex">{renderInspectorTimingChips()}</div>
+	                                  <button
+	                                    type="button"
+	                                    data-no-row-drag="true"
+	                                    aria-label={`More actions for row ${index + 1}`}
+	                                    className="flex h-[32px] w-[32px] items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30 sm:h-[36px] sm:w-[36px]"
+	                                  >
+	                                    <span className="text-base leading-none">•••</span>
+	                                  </button>
+	                                  <button
+	                                    type="button"
+	                                    data-no-row-drag="true"
+	                                    onClick={() => deleteBuilderRow(row.id)}
+	                                    aria-label={`Delete row ${index + 1}`}
+	                                    className="flex h-[32px] w-[32px] items-center justify-center rounded-xl border border-red-200 bg-white text-red-500 transition hover:border-red-300 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200 sm:h-[36px] sm:w-[36px]"
+	                                  >
+	                                    <svg
+	                                      viewBox="0 0 24 24"
+	                                      aria-hidden="true"
+	                                      className="h-4 w-4"
+	                                      fill="none"
+	                                      stroke="currentColor"
+	                                      strokeWidth="2"
+	                                      strokeLinecap="round"
+	                                      strokeLinejoin="round"
+	                                    >
+	                                      <path d="M4 7h16" />
+	                                      <path d="M9 7V5h6v2" />
+	                                      <path d="M7 7l1 12h8l1-12" />
+	                                      <path d="M10 11v5M14 11v5" />
+	                                    </svg>
+	                                  </button>
+	                                  <button
+	                                    type="button"
+	                                    data-no-row-drag="true"
+	                                    autoFocus
+	                                    onClick={handleInspectorClose}
+	                                    aria-label={`Close ${inspectorKindLabel} inspector`}
+	                                    className="flex h-[32px] w-[32px] items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30 sm:h-[36px] sm:w-[36px]"
+	                                  >
+	                                    <svg
+	                                      viewBox="0 0 20 20"
+	                                      aria-hidden="true"
+	                                      className="h-4 w-4"
+	                                      fill="none"
+	                                      stroke="currentColor"
+	                                      strokeWidth="2"
+	                                      strokeLinecap="round"
+	                                    >
+	                                      <path d="M5 5l10 10" />
+	                                      <path d="M15 5 5 15" />
+	                                    </svg>
+	                                  </button>
+	                                </div>
+	                              </div>
+	                              <div className="hidden min-w-0 items-center gap-4 sm:col-start-1 sm:row-start-1 sm:flex">
+	                                <span aria-hidden="true" className={inspectorDotClass} />
+	                                <div className="min-w-0 text-[12px] font-semibold uppercase tracking-[0.09em] text-slate-600">
+	                                  {rowMeta.label}
+	                                </div>
+	                              </div>
+	                              <h2
+	                                id={inspectorTitleId}
+	                                className="min-w-0 whitespace-nowrap text-[25px] font-semibold leading-[1.05] text-slate-950 sm:col-start-1 sm:row-start-2 sm:mt-1 sm:pl-7 sm:leading-7"
+	                              >
+	                                Edit {inspectorKindLabel}
+	                              </h2>
+	                              <div className="min-w-0 sm:col-start-1 sm:row-start-3 sm:mt-1 sm:pl-7">
+	                                <p
+	                                  className="truncate text-[14px] font-medium text-slate-600"
+	                                  title={inspectorSubtitle}
+	                                >
+	                                  {inspectorSubtitle}
+	                                </p>
+	                                <div className="mt-2 flex flex-wrap items-center gap-2 sm:hidden">
+	                                  {renderInspectorTimingChips()}
+	                                </div>
+	                              </div>
+	                            </div>
+	                          ) : (
+	                            <>
+	                        <span
+	                          aria-hidden="true"
+		                          className={`absolute bottom-0 left-0 top-0 w-[3px] ${
                             rowKind === "email"
                               ? "bg-green-500"
                               : rowKind === "meeting"
@@ -9787,15 +10819,18 @@ export default function PlansPage() {
                                 : "bg-blue-500"
                           }`}
                         />
-                        <div className="grid grid-cols-[minmax(0,1fr)_3.2rem] items-center gap-6 max-[520px]:grid-cols-1">
-                          <div className="min-w-0">
-                            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-                              <div className="flex min-h-7 min-w-[16rem] flex-1 items-center gap-1.5">
-                                <div className="inline-grid min-h-5 min-w-0 flex-1 items-center px-2 [grid-template-areas:'stack']">
-                                  <div
-                                    aria-hidden="true"
-                                    className="[grid-area:stack] invisible whitespace-normal px-0 py-0 text-left text-[10px] font-medium leading-5 [overflow-wrap:anywhere]"
-                                  >
+			                        <div className="relative grid grid-cols-2 gap-x-2 gap-y-3 min-[900px]:grid-cols-[minmax(0,1fr)_136px_112px_32px] min-[900px]:items-center min-[900px]:gap-x-3 min-[900px]:gap-y-0">
+	                          <div data-workflow-row-part="content" className="col-span-2 min-w-0 max-w-full pr-[40px] min-[900px]:col-span-1 min-[900px]:pr-0">
+	                            <div className="mb-1 flex items-center gap-2 pl-2 text-[12px] font-semibold text-slate-500">
+	                              <span>{rowMeta.label}</span>
+	                            </div>
+		                            <div className="min-w-0">
+		                              <div className="min-w-0">
+		                                <div className="inline-grid min-h-6 w-full min-w-0 items-center px-2 [grid-template-areas:'stack']">
+	                                  <div
+	                                    aria-hidden="true"
+	                                    className="[grid-area:stack] invisible whitespace-normal px-0 py-0 text-left text-[14px] font-semibold leading-5 [overflow-wrap:anywhere]"
+	                                  >
                                     {row.title ||
                                       (rowKind === "email"
                                         ? "Email Subject Line"
@@ -9805,10 +10840,10 @@ export default function PlansPage() {
                                             ? "Meeting title"
                                             : "Enter Reminder Title")}
                                   </div>
-                                  <div
-                                    aria-hidden="true"
-                                    className={`pointer-events-none [grid-area:stack] whitespace-normal text-left text-[10px] font-medium leading-5 text-slate-950 [overflow-wrap:anywhere] ${focusedTitleInputId === collapsedTitleInputId ? "opacity-0" : ""
-                                    }`}
+	                                  <div
+	                                    aria-hidden="true"
+	                                    className={`pointer-events-none [grid-area:stack] whitespace-normal text-left text-[15px] font-semibold leading-5 text-slate-900 [overflow-wrap:anywhere] ${focusedTitleInputId === collapsedTitleInputId ? "opacity-0" : ""
+	                                    }`}
                                   >
                                     {row.title ? (
                                       renderTextWithBoldAnchors(row.title, {
@@ -9816,7 +10851,7 @@ export default function PlansPage() {
                                         knownAnchorKeys,
                                       })
                                     ) : (
-                                      <span className="text-slate-400">
+	                                      <span className="font-medium text-slate-500">
                                         {rowKind === "email"
                                           ? "Email Subject Line"
                                           : rowKind === "meeting"
@@ -9833,7 +10868,7 @@ export default function PlansPage() {
                                       builderTitleInputRefs.current[collapsedTitleInputId] = node;
                                     }}
                                     rows={1}
-                                    className={`[grid-area:stack] min-w-0 max-w-full resize-none border-0 bg-transparent px-0 py-0 text-left text-[10px] font-medium leading-5 focus:outline-none focus:ring-0 ${
+		                                    className={`[grid-area:stack] min-w-0 max-w-full resize-none border-0 bg-transparent px-0 py-0 text-left text-[15px] font-semibold leading-5 focus:outline-none focus:ring-0 ${
                                       focusedTitleInputId === collapsedTitleInputId
                                         ? "h-auto overflow-y-hidden whitespace-pre-wrap text-slate-950 caret-slate-950 [overflow-wrap:anywhere] placeholder:text-slate-400"
                                         : "h-full overflow-hidden whitespace-pre-wrap text-transparent caret-slate-950 placeholder:text-transparent"
@@ -9871,436 +10906,146 @@ export default function PlansPage() {
                                   />
                                 </div>
                               </div>
-
-                              <div className="flex min-h-[22px] flex-wrap items-center gap-5 pl-2 pr-3">
-                                {!emailUsesTimingFields && row.rowType === "email" ? (
-                                  <span className={`${rowTimingChipClass} text-slate-500`}>{getBuilderEmailModeMessage(appSettings.emailHandlingMode)}</span>
-                                ) : (
-                                  <>
-                                    {editingOffsetRowId === row.id ? (
-                                      <div className={`${rowTimingChipClass} min-w-[164px] gap-2 border border-slate-200 bg-white px-2 py-1`}>
-                                        <input
-                                          ref={(node) => {
-                                            builderOffsetInputRefs.current[row.id] = node;
-                                          }}
-                                          type="text"
-                                          inputMode="numeric"
-                                          className="min-w-0 flex-1 border-0 bg-transparent px-1 text-slate-600 focus:outline-none focus:ring-0"
-                                          value={offsetDrafts[row.id] ?? (row.offsetDays == null ? "" : String(row.offsetDays))}
-                                          onChange={(e) =>
-                                            setOffsetDrafts((current) => ({
-                                              ...current,
-                                              [row.id]: e.target.value,
-                                            }))
-                                          }
-                                          onFocus={(e) => {
-                                            e.currentTarget.select();
-                                          }}
-                                          onBlur={() => {
-                                            commitOffsetDraft(row.id);
-                                          }}
-                                          onKeyDown={(e) => {
-                                            if (e.key === "ArrowUp") {
-                                              e.preventDefault();
-                                              nudgeOffsetDraft(row.id, 1);
-                                              return;
-                                            }
-                                            if (e.key === "ArrowDown") {
-                                              e.preventDefault();
-                                              nudgeOffsetDraft(row.id, -1);
-                                              return;
-                                            }
-                                            if (e.key === "Enter") {
-                                              e.preventDefault();
-                                              commitOffsetDraft(row.id);
-                                              focusBuilderTimeInput(row.id);
-                                              return;
-                                            }
-                                            if (e.key === "Tab" && !e.shiftKey) {
-                                              e.preventDefault();
-                                              commitOffsetDraft(row.id);
-                                              focusBuilderTimeInput(row.id);
-                                              return;
-                                            }
-                                            if (e.key === "Tab" && e.shiftKey) {
-                                              e.preventDefault();
-                                              commitOffsetDraft(row.id);
-                                              focusCollapsedTitleInput(row.id);
-                                            }
-                                          }}
-                                          autoFocus
-                                        />
-                                        <div className="flex flex-col gap-0.5">
-                                          <button
-                                            type="button"
-                                            data-no-row-drag="true"
-                                            tabIndex={-1}
-                                            aria-label="Increase offset"
-                                            className="flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => nudgeOffsetDraft(row.id, 1)}
-                                          >
-                                            <svg
-                                              viewBox="0 0 16 16"
-                                              aria-hidden="true"
-                                              className="h-3 w-3"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="1.8"
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                            >
-                                              <path d="M4 10l4-4 4 4" />
-                                            </svg>
-                                          </button>
-                                          <button
-                                            type="button"
-                                            data-no-row-drag="true"
-                                            tabIndex={-1}
-                                            aria-label="Decrease offset"
-                                            className="flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => nudgeOffsetDraft(row.id, -1)}
-                                          >
-                                            <svg
-                                              viewBox="0 0 16 16"
-                                              aria-hidden="true"
-                                              className="h-3 w-3"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="1.8"
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                            >
-                                              <path d="M4 6l4 4 4-4" />
-                                            </svg>
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <span className={`${rowTimingChipClass} min-w-[104px] gap-1 py-0.5 pl-2 pr-1 transition-colors hover:border-slate-300 hover:text-slate-600`}>
-                                        <button
-                                          type="button"
-                                          data-no-row-drag="true"
-                                          className="min-w-0 flex-1 bg-transparent px-0 text-center focus:outline-none"
-                                          onFocus={() => beginEditingOffsetForRow(row.id, row.offsetDays)}
-                                          onClick={() => beginEditingOffsetForRow(row.id, row.offsetDays)}
-                                        >
-                                          {formatOffsetLabel(row.offsetDays, {
-                                            relativeToToday: noEventDate,
-                                            dateBasis: row.dateBasis,
-                                          })}
-                                        </button>
-                                        <span className="flex flex-col gap-0.5">
-                                          <button
-                                            type="button"
-                                            data-no-row-drag="true"
-                                            tabIndex={-1}
-                                            aria-label="Increase offset"
-                                            className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => nudgeRowOffset(row.id, 1)}
-                                          >
-                                            <svg
-                                              viewBox="0 0 16 16"
-                                              aria-hidden="true"
-                                              className="h-2.5 w-2.5"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="1.9"
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                            >
-                                              <path d="M4 10l4-4 4 4" />
-                                            </svg>
-                                          </button>
-                                          <button
-                                            type="button"
-                                            data-no-row-drag="true"
-                                            tabIndex={-1}
-                                            aria-label="Decrease offset"
-                                            className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => nudgeRowOffset(row.id, -1)}
-                                          >
-                                            <svg
-                                              viewBox="0 0 16 16"
-                                              aria-hidden="true"
-                                              className="h-2.5 w-2.5"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="1.9"
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                            >
-                                              <path d="M4 6l4 4 4-4" />
-                                            </svg>
-                                          </button>
-                                        </span>
-                                      </span>
-                                    )}
-                                    {meetingErrors?.time ? <div className="text-[11px] font-medium text-red-500">Time *</div> : null}
-                                    {(() => {
-                                      const shouldWrapTimeField =
-                                        Boolean(row.reminderTime?.includes("[")) || Boolean(row.reminderTime?.includes("\n"));
-                                      const isAnchorTimeValue = isReminderTimeAnchorValue(row.reminderTime ?? "");
-                                      const literalTimeEditorValue =
-                                        focusedTimeInputRowId === row.id
-                                          ? (timeInputDrafts[row.id] ?? buildReminderTimeMaskedValue(row.reminderTime ?? ""))
-                                          : getReminderTimeDisplayValue(row.reminderTime ?? "");
-
-                                      if (row.meetingDraft?.isAllDay || row.durationDraft?.isAllDay) {
-                                        return <span className={rowTimingChipClass}>All day</span>;
-                                      }
-
-                                      if (!shouldWrapTimeField && !isAnchorTimeValue) {
-                                        return (
-                                          <span className={`${rowTimingChipClass} min-w-[104px] gap-0 border border-slate-200 bg-white px-2`}>
-                                            <input
-                                              ref={(node) => {
-                                                builderTimeInputRefs.current[row.id] = node;
-                                              }}
-                                              data-validation-field={`${row.id}:reminderTime`}
-                                              type="text"
-                                              inputMode="text"
-                                              className={`w-[56px] min-w-0 border-0 bg-transparent p-0 text-center placeholder:text-slate-400 focus:outline-none focus:ring-0 ${getValidationFieldHighlightClass(row.id, "reminderTime")}`}
-                                              value={literalTimeEditorValue}
-                                              placeholder={REMINDER_TIME_INPUT_MASK}
-                                              onFocus={(e) => {
-                                                const input = e.currentTarget;
-                                                setFocusedTimeInputRowId(row.id);
-                                                setTimeInputDrafts((current) => ({
-                                                  ...current,
-                                                  [row.id]: buildReminderTimeMaskedValue(row.reminderTime ?? ""),
-                                                }));
-                                                requestAnimationFrame(() => {
-                                                  input.setSelectionRange(0, 0);
-                                                });
-                                              }}
-                                              onChange={(e) => {
-                                                const rawValue = e.target.value;
-                                                const selectionEnd = e.target.selectionEnd ?? rawValue.length;
-                                                const meaningfulCount = countReminderTimeMeaningfulChars(rawValue, selectionEnd);
-                                                const nextMaskedValue = maskReminderTimeDraftInput(rawValue);
-                                                const nextCursor = findReminderTimeCursorFromMeaningfulCount(nextMaskedValue, meaningfulCount);
-
-                                                setTimeInputDrafts((current) => ({
-                                                  ...current,
-                                                  [row.id]: nextMaskedValue,
-                                                }));
-
-                                                requestAnimationFrame(() => {
-                                                  const input = builderTimeInputRefs.current[row.id];
-                                                  if (input && input instanceof HTMLInputElement && document.activeElement === input) {
-                                                    input.setSelectionRange(nextCursor, nextCursor);
-                                                  }
-                                                });
-                                              }}
-                                              onBlur={(e) => {
-                                                clearValidationFieldHighlight(row.id, "reminderTime");
-                                                const nextValue = normalizeReminderTimeInput(e.target.value);
-                                                updateRow(row.id, (current) => ({
-                                                  ...current,
-                                                  reminderTime: nextValue,
-                                                }));
-                                                setFocusedTimeInputRowId((current) => (current === row.id ? null : current));
-                                                setTimeInputDrafts((current) => clearReminderTimeDraft(current, row.id));
-                                              }}
-                                            />
-                                            {rowTimeZoneControl}
-                                          </span>
-                                        );
-                                      }
-
-                                      return (
-                                        <span className={`${rowTimingChipClass} min-w-[104px] gap-0 border border-slate-200 bg-white px-2 py-1.5`}>
-                                          <textarea
-                                            ref={(node) => {
-                                              builderTimeInputRefs.current[row.id] = node;
-                                            }}
-                                            data-validation-field={`${row.id}:reminderTime`}
-                                            rows={shouldWrapTimeField ? 2 : 1}
-                                            className={`w-[66px] min-w-0 resize-none border-0 bg-transparent p-0 placeholder:text-slate-400 [overflow-wrap:anywhere] focus:outline-none focus:ring-0 ${getValidationFieldHighlightClass(row.id, "reminderTime")}`}
-                                            value={row.reminderTime ?? ""}
-                                            placeholder={REMINDER_TIME_INPUT_MASK}
-                                            onChange={(e) => {
-                                              clearValidationFieldHighlight(row.id, "reminderTime");
-                                              updateRow(row.id, (current) => ({
-                                                ...current,
-                                                reminderTime: maskReminderTimeDraftInput(e.target.value),
-                                              }))
-                                            }}
-                                            onBlur={(e) =>
-                                              updateRow(row.id, (current) => ({
-                                                ...current,
-                                                reminderTime: normalizeReminderTimeInput(e.target.value),
-                                              }))
-                                            }
-                                          />
-                                          {rowTimeZoneControl}
-                                        </span>
-                                      );
-                                    })()}
-                                  </>
-                                )}
-                              </div>
+                              {emailProviderNote ? (
+                                <div className="mt-[3px] px-2 text-[12px] font-medium leading-[1.35] text-slate-500">
+                                  {emailProviderNote}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
 
-                          <div className="relative flex min-h-[52px] flex-col items-center justify-center gap-1.5 pt-0 lg:justify-self-end lg:self-center lg:text-center">
+			                          {collapsedOffsetControl}
+			                          {collapsedTimeControl}
+
                             <button
+                              ref={(node) => {
+                                workflowRowMenuButtonRefs.current[row.id] = node;
+                              }}
                               type="button"
                               data-no-row-drag="true"
-                              onClick={() =>
-                                openExclusiveRowEditor(
-                                  row.id,
-                                  rowKind === "email" ? "email" : rowKind === "meeting" ? "meeting" : "reminder"
-                                )
-                              }
-                              title="Open or close details"
-                              aria-label={`Open or close row ${index + 1}`}
-                              className="flex h-6 w-[2.2rem] min-w-[2.2rem] flex-none items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition hover:border-slate-300 hover:text-slate-700"
+                              data-workflow-row-part="menu"
+                              aria-haspopup="menu"
+                              aria-expanded={openWorkflowRowMenuId === row.id}
+                              onClick={(event) => openWorkflowRowMenu(event, row.id)}
+                              title="More actions"
+                              aria-label={`More actions for row ${index + 1}`}
+			                              className="absolute right-0 top-0 flex h-[32px] w-[32px] flex-none items-center justify-center rounded-[8px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30 min-[900px]:static min-[900px]:justify-self-center"
                             >
                               <span className="text-base leading-none">•••</span>
                             </button>
-                            <button
-                              type="button"
-                              data-no-row-drag="true"
-                              onClick={() => deleteBuilderRow(row.id)}
-                              title="Delete"
-                              aria-label={`Delete row ${index + 1}`}
-                              className="flex h-6 w-[2.2rem] min-w-[2.2rem] flex-none items-center justify-center rounded-full border border-red-200 bg-white text-red-500 transition hover:border-red-300 hover:bg-red-50 hover:text-red-600"
-                            >
-                              <svg
-                                viewBox="0 0 24 24"
-                                aria-hidden="true"
-                                className="h-4 w-4"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <path d="M4 7h16" />
-                                <path d="M9 7V5h6v2" />
-                                <path d="M7 7l1 12h8l1-12" />
-                                <path d="M10 11v5M14 11v5" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                        </div>
-                        {reminderInlineEditor}
+                            {hasMounted && openWorkflowRowMenuId === row.id && workflowRowMenuPosition
+                              ? createPortal(
+                                  <div
+                                    ref={workflowRowMenuRef}
+                                    role="menu"
+                                    className="plans-menu-enter fixed z-[170] min-w-[184px] rounded-[10px] border border-slate-200 bg-white p-[7px] shadow-[0_18px_46px_rgba(21,40,66,0.18)]"
+                                    style={{ top: workflowRowMenuPosition.top, left: workflowRowMenuPosition.left }}
+                                  >
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        closeWorkflowRowMenu();
+                                        openExclusiveRowEditor(
+                                          row.id,
+                                          rowKind === "email" ? "email" : rowKind === "meeting" ? "meeting" : "reminder"
+                                        );
+                                      }}
+                                      className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+                                    >
+                                      Edit details
+                                    </button>
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        closeWorkflowRowMenu();
+                                        deleteBuilderRow(row.id);
+                                      }}
+                                      className="block h-10 w-full rounded-[8px] px-3 text-left text-[14px] font-medium text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+                                    >
+                                      Delete {inspectorKindLabel}
+                                    </button>
+                                  </div>,
+                                  document.body
+                                )
+                              : null}
+	                        </div>
+	                            </>
+	                          )}
+	                        </div>
+	                        {reminderInlineEditor}
                         {emailInlineEditor}
                         {meetingInlineEditor}
-                      </StaggeredInlineEditorItem>
+	                      </StaggeredInlineEditorItem>
                     );
-                  })}
-                    </div>
-                  </div>
-                </div>
+
+                    if (isThisRowEditorLayered && hasMounted) {
+                      return createPortal(
+                        <div
+                          data-plans-inspector-overlay-root="true"
+                          className="pointer-events-none fixed inset-0 z-[200]"
+                        >
+                          <div
+                            aria-hidden="true"
+                            data-plans-inspector-scrim="true"
+                            className={`absolute inset-0 z-0 bg-slate-950/[0.14] ${
+                              isThisRowEditorClosing ? "plans-scrim-exit pointer-events-none" : "plans-scrim-enter pointer-events-auto"
+                            }`}
+                          />
+                          {rowEditorElement}
+                        </div>,
+                        document.body,
+                        `plans-inspector-${row.id}`
+                      );
+                    }
+
+                    return rowEditorElement;
+			                  })}
+		                        </div>
+                                  ) : (
+                                    <div className="flex min-h-[102px] flex-col items-center justify-center bg-slate-50/50 px-5 py-6 text-center">
+                                      <h3 className="text-[15px] font-semibold leading-5 text-slate-950">No actions yet</h3>
+                                      <p className="mt-2 max-w-[360px] text-[14px] leading-5 text-slate-600">
+                                        Add a reminder, email, or meeting above.
+                                      </p>
+                                    </div>
+                                  )}
+		                      </div>
+		                    </div>
+		                  </div>
+		                  </div>
+	                </section>
+	              </StaggeredInlineEditorItem>
+		                        {!isAnyBuilderRowEditorVisible ? renderDynamicFieldsSection() : null}
+		                        {!shouldRenderSimpleEventHeaderFields ? (
+		                          <section className={`${plansSurfaceClass} ${plansCanvasSectionClass}`}>
+		                            <label className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
+		                              <span>Weekend Handling</span>
+		                              <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
+		                                i
+		                                <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
+		                                  If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
+		                                </span>
+		                              </span>
+		                            </label>
+		                            <select
+		                              className={`${plansInputClass} mt-2 max-w-md`}
+		                              value={weekendRule}
+		                              onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+		                            >
+		                              <option value="none">Allow weekends (no adjustment)</option>
+		                              <option value="prior_business_day">Adjust to prior business day (Fri)</option>
+		                            </select>
+		                          </section>
+		                        ) : null}
+		                        {renderPlanActionsSection()}
+		                      </div>
+		                  ) : null}
+          </div>
                 </div>
               </div>
-              <div
-                aria-hidden="true"
-                className="transition-[height] duration-700 ease-[cubic-bezier(0.22,1,0.36,1)]"
-                style={{ height: rowEditorBottomRoomPx }}
-              />
-
-              <StaggeredInlineEditorItem
-                active={isBuilderEntryRevealActive}
-                immediate={isBuilderEntryRevealImmediate}
-                delayMs={renderedRows.length > 0 ? 360 + renderedRows.length * 70 + 120 : 360}
-                className={renderedRows.length === 0 ? "pt-10" : "pt-10"}
-              >
-                <div className="space-y-4">
-                  {!isAnyBuilderRowEditorVisible ? renderDynamicFieldsSection() : null}
-
-                  <div className="space-y-5 pt-6">
-                    {!shouldRenderSimpleEventHeaderFields ? (
-                      <div className="max-w-md">
-                        <label className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
-                          <span>Weekend Handling</span>
-                          <span className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-semibold text-slate-500">
-                            i
-                            <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-56 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-normal leading-4 text-slate-600 shadow-lg group-hover:block">
-                              If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
-                            </span>
-                          </span>
-                        </label>
-                        <select
-                          className="w-full rounded-lg border px-3 py-2"
-                          value={weekendRule}
-                          onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
-                        >
-                          <option value="none">Allow weekends (no adjustment)</option>
-                          <option value="prior_business_day">Adjust to prior business day (Fri)</option>
-                        </select>
-                      </div>
-                    ) : null}
-
-                    <div className="mx-auto flex max-w-[620px] flex-nowrap items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
-                      <div className="flex shrink-0 flex-nowrap items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={cancelEditing}
-                          className="rounded-full border border-red-200 bg-white px-4 py-2.5 text-sm font-medium text-red-600 transition hover:border-red-300 hover:bg-red-50 hover:text-red-700"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void saveCurrentTemplate();
-                          }}
-                          className="rounded-full border border-slate-200 bg-[var(--app-control)] px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-slate-300"
-                        >
-                          Save
-                        </button>
-                        {shouldRenderBuilderSourceBanner ? (
-                          <button
-                            type="button"
-                            onClick={openBuilderTemplateSaveDialog}
-                            className="rounded-full border border-slate-200 bg-[var(--app-control)] px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-slate-300"
-                          >
-                            Save as Template
-                          </button>
-                        ) : null}
-                        {executionNotices.some((entry) => entry.notice.tone === "success") ? (
-                          <div className="flex items-center">
-                            <ExportDoneBadge />
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="flex shrink-0 flex-nowrap items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => void startNewPlan()}
-                          className="rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
-                        >
-                          + New Event
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void (async () => {
-                              if (await validatePreviewBeforeOpen()) return;
-                              setOpenPreviewDetail(null);
-                              setOpenPreviewRowMenuId(null);
-                              setExcludedPreviewItemIds([]);
-                              setIsBuilderPreviewOpen(true);
-                            })();
-                          }}
-                          className="rounded-full border border-blue-600 bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
-                        >
-                          Review &amp; Export
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </StaggeredInlineEditorItem>
-          </div>
+            </div>
         </section>
       </AnimatedRowEditor>
 
@@ -10308,30 +11053,44 @@ export default function PlansPage() {
         <div className="h-16" aria-hidden="true" />
       ) : null}
 
-      {isBuilderPreviewOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-          <div ref={previewModalScrollRef} className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b px-4 py-3">
-              <div>
-                <h2 className="text-xl font-semibold text-gray-900">Review and Export</h2>
-                <p className="mt-1 text-sm text-gray-600">
-                  Review the current event plan before exporting it to Outlook or saving a local file for review.
+      {isBuilderPreviewOpen && hasMounted ? createPortal(
+		        <div className="fixed inset-0 z-[180] flex items-stretch justify-center bg-slate-950/[0.12] p-0 min-[640px]:items-center min-[640px]:p-5">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="review-export-title"
+            aria-describedby="review-export-description"
+            className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-white min-[640px]:h-auto min-[640px]:max-h-[calc(100dvh-40px)] min-[640px]:w-[min(1100px,calc(100vw-40px))] min-[640px]:rounded-[16px] min-[640px]:border min-[640px]:border-slate-200 min-[640px]:shadow-[0_28px_80px_rgba(21,40,66,0.20)]"
+          >
+            <div className="flex flex-none items-start justify-between gap-4 border-b border-slate-200/80 bg-white px-4 py-4 min-[640px]:px-5 min-[640px]:py-[18px]">
+              <div className="min-w-0">
+                <h2 id="review-export-title" className="text-[22px] font-semibold leading-7 text-slate-950 min-[640px]:text-[24px]">Review &amp; Export</h2>
+                <p id="review-export-description" className="mt-1.5 text-[14px] leading-[1.4] text-slate-600">
+                  Review the selected actions before creating them in your connected tools.
                 </p>
+                {previewPlanForRender ? (
+                  <p className="mt-[5px] text-[13px] font-medium leading-5 text-slate-500">
+                    {previewPlanForRender.name} · {previewPlanForRender.items.length} {previewPlanForRender.items.length === 1 ? "action" : "actions"}
+                  </p>
+                ) : null}
               </div>
               <button
+                type="button"
                 onClick={() => {
-                  setIsBuilderPreviewOpen(false);
-                  setOpenPreviewDetail(null);
-                  setOpenPreviewRowMenuId(null);
-                  setExcludedPreviewItemIds([]);
+		                  setIsBuilderPreviewOpen(false);
+		                  setOpenPreviewDetail(null);
+		                  setOpenPreviewRowMenuId(null);
+		                  setExcludedPreviewItemIds([]);
+		                  setShowNoPreviewItemsSelectedCallout(false);
                 }}
-                className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                aria-label="Close Review & Export"
+                className="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-[9px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
               >
-                Close
+                <span aria-hidden="true" className="text-[20px] leading-none">×</span>
               </button>
             </div>
 
-            <div className="space-y-4 p-4" style={{ paddingBottom: openPreviewDetail ? "55vh" : undefined }}>
+	            <div ref={previewModalScrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-slate-50/70 p-3 pb-5 scroll-pb-[96px] scroll-pt-4 min-[640px]:p-4 min-[640px]:pb-5">
               {executionNotices.length > 0 ? (
                 <div className="space-y-3">
                   {executionNotices.map((entry) => (
@@ -10344,16 +11103,16 @@ export default function PlansPage() {
                 </div>
               ) : null}
               {previewPlanForRender ? (
-                <>
-                  <div className="rounded-xl border bg-white">
-                    <div className="rounded-t-xl border-b bg-gray-50 px-4 py-3">
-                      <div className="font-semibold text-gray-900">{previewPlanForRender.name}</div>
-                      {previewLoading ? <div className="mt-1 text-xs text-gray-500">Refreshing preview…</div> : null}
-                      <div className="mt-1 text-sm text-gray-600">
-                        {previewPlanForRender.items.filter((item) => classifyPlanRow(item) !== "email").length} scheduled items
-                      </div>
-                    </div>
-                    <div className="divide-y">
+	                <>
+	                  <div className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
+	                    <div ref={previewItemListHeadingRef} tabIndex={-1} className="rounded-t-[14px] border-b border-slate-200/80 bg-white px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30">
+	                      <div className="text-[15px] font-semibold leading-5 text-slate-950">{previewPlanForRender.name}</div>
+	                      {previewLoading ? <div className="mt-1 text-xs text-gray-500">Refreshing preview…</div> : null}
+	                      <div className="mt-1 text-[13px] leading-5 text-slate-600">
+	                        {previewPlanForRender.items.filter((item) => classifyPlanRow(item) !== "email").length} scheduled items
+	                      </div>
+	                    </div>
+	                    <div className="divide-y divide-slate-200/80">
                       {getReviewExportItemsForRender(previewPlanForRender.items).map((item) => {
                     const rowKind = classifyPlanRow(item);
                     const builderItem = rows.find((entry) => entry.id === item.id);
@@ -10417,27 +11176,26 @@ export default function PlansPage() {
                           delete previewDetailRowRefs.current[item.id];
                         }}
                       >
-                        <div className={`flex flex-col gap-3 px-4 py-3 transition md:flex-row md:items-center md:justify-between ${
-                          isItemIncluded ? "" : "bg-gray-100/80 text-gray-400 opacity-55 grayscale"
-                        }`}>
-                          <div className="flex min-w-0 flex-1 gap-3">
-                            <div className="pt-1">
-                              <input
-                                type="checkbox"
-                                checked={isItemIncluded}
+	                        <div className={`grid gap-3 px-4 py-3 transition min-[900px]:grid-cols-[32px_minmax(0,1fr)_136px_192px_36px] min-[900px]:items-center min-[900px]:gap-3 ${
+	                          isItemIncluded ? "" : "bg-slate-100/80 text-slate-400 opacity-65 grayscale"
+	                        }`}>
+	                            <div className="flex h-[32px] items-start pt-1 min-[900px]:items-center min-[900px]:justify-center min-[900px]:pt-0">
+	                              <input
+	                                type="checkbox"
+	                                checked={isItemIncluded}
                                 onChange={(e) => togglePreviewItemIncluded(item.id, e.target.checked)}
                                 aria-label={`${isItemIncluded ? "Exclude" : "Include"} ${item.customTitle ?? item.title}`}
-                                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
+	                                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+	                              />
+	                            </div>
+	                            <div className="min-w-0">
+	                            <div className="flex items-center gap-2">
                               <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${rowTypeDotClass}`} />
-                              <span className={`text-xs font-semibold uppercase tracking-wide ${
+	                              <span className={`text-[11px] font-semibold uppercase tracking-[0.06em] ${
                                 isItemIncluded ? "text-gray-500" : "text-gray-400"
                               }`}>{rowTypeLabel}</span>
                             </div>
-                            <div className={`mt-1 whitespace-normal break-words text-sm font-medium leading-6 ${
+	                            <div className={`mt-1 whitespace-normal break-words text-[14px] font-semibold leading-5 ${
                               isItemIncluded ? "text-gray-900" : "text-gray-400"
                             }`}>
                               {renderTextWithBoldAnchors(item.customTitle ?? item.title, {
@@ -10445,7 +11203,7 @@ export default function PlansPage() {
                                 knownAnchorKeys,
                               })}
                             </div>
-                            <div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${
+	                            <div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] leading-4 ${
                               isItemIncluded ? "text-gray-500" : "text-gray-400"
                             }`}>
                               <span>{formatOffsetLabel(item.offsetDays, { relativeToToday: noEventDate, dateBasis: item.dateBasis })}</span>
@@ -10469,11 +11227,10 @@ export default function PlansPage() {
                                 </>
                               ) : null}
                             </div>
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 flex-wrap items-center gap-2 md:justify-end">
-                            {hasReminderPreview || hasEmailPreview || hasMeetingPreview ? (
-                              <button
+	                            </div>
+	                          <div className="flex min-w-0 items-center min-[900px]:justify-self-stretch">
+	                            {hasReminderPreview || hasEmailPreview || hasMeetingPreview ? (
+	                              <button
                                 type="button"
                                 onClick={() => {
                                   togglePreviewDetail(
@@ -10481,16 +11238,18 @@ export default function PlansPage() {
                                     hasEmailPreview ? "email" : hasMeetingPreview ? "meeting" : "reminder"
                                   );
                                 }}
-                                className={`w-36 rounded-lg border px-3 py-2 text-center text-sm ${
-                                  isItemIncluded
-                                    ? "border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50"
-                                    : "border-gray-200 bg-gray-50 text-gray-400 hover:border-gray-300 hover:bg-gray-100"
+	                                className={`inline-flex h-[40px] w-full min-w-[136px] items-center justify-center rounded-[10px] border px-3 text-center text-[14px] font-semibold ${
+	                                  isItemIncluded
+	                                    ? "border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50"
+	                                    : "border-gray-200 bg-gray-50 text-gray-400 hover:border-gray-300 hover:bg-gray-100"
                                 }`}
                               >
                                 {detailLabel}
-                              </button>
-                            ) : null}
-                              <button
+	                              </button>
+	                            ) : null}
+	                          </div>
+	                          <div className="flex min-w-0 items-center min-[900px]:justify-self-stretch">
+	                              <button
                                 type="button"
                                 onClick={() => {
                                   if (hasEmailPreview) {
@@ -10511,23 +11270,25 @@ export default function PlansPage() {
                                       ? "Run this email action"
                                       : "Create this meeting"
                                 }
-                                className="w-48 rounded-lg border border-blue-600 bg-blue-600 px-3 py-2 text-center text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-100 disabled:text-gray-400"
-                              >
-                                {exportLabel}
-                              </button>
-                            {hasReminderPreview || hasEmailPreview || hasMeetingPreview ? (
-                              <div className="relative">
+	                                className="inline-flex h-[40px] w-full min-w-[192px] items-center justify-center rounded-[10px] border border-blue-600 bg-blue-600 px-3 text-center text-[14px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-100 disabled:text-gray-400"
+	                              >
+	                                {exportLabel}
+	                              </button>
+	                          </div>
+	                          <div className="flex items-center min-[900px]:justify-self-center">
+	                            {hasReminderPreview || hasEmailPreview || hasMeetingPreview ? (
+	                              <div className="relative">
                                 <button
                                   type="button"
                                   onClick={() => setOpenPreviewRowMenuId((prev) => (prev === item.id ? null : item.id))}
                                   title="Actions"
                                   aria-label="Actions"
-                                  className="flex h-8 w-10 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
+	                                  className="flex h-[36px] w-[36px] items-center justify-center rounded-[10px] border border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-700"
                                 >
                                   <span className="text-base leading-none">•••</span>
                                 </button>
                                 {openPreviewRowMenuId === item.id ? (
-                                  <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-40 rounded-xl border bg-white p-2 text-left shadow-lg">
+	                                  <div className="plans-menu-enter absolute right-0 top-[calc(100%+0.5rem)] z-[190] w-44 rounded-[10px] border border-slate-200 bg-white p-[7px] text-left shadow-[0_18px_46px_rgba(21,40,66,0.18)]">
                                     {hasReminderPreview ? (
                                       <button
                                         type="button"
@@ -10535,7 +11296,7 @@ export default function PlansPage() {
                                           togglePreviewDetail(item.id, "reminder");
                                           setOpenPreviewRowMenuId(null);
                                         }}
-                                        className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
+	                                        className="h-10 w-full rounded-[8px] px-3 text-left text-[13px] font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
                                       >
                                         {isReminderExpanded ? "Hide Reminder" : "View Reminder"}
                                       </button>
@@ -10547,7 +11308,7 @@ export default function PlansPage() {
                                           togglePreviewDetail(item.id, "email");
                                           setOpenPreviewRowMenuId(null);
                                         }}
-                                        className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
+	                                        className="h-10 w-full rounded-[8px] px-3 text-left text-[13px] font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
                                       >
                                         {isEmailExpanded ? "Hide Email" : "View Email"}
                                       </button>
@@ -10559,21 +11320,21 @@ export default function PlansPage() {
                                           togglePreviewDetail(item.id, "meeting");
                                           setOpenPreviewRowMenuId(null);
                                         }}
-                                        className="w-full rounded-lg px-3 py-2 text-left text-[12px] hover:bg-gray-50"
+	                                        className="h-10 w-full rounded-[8px] px-3 text-left text-[13px] font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
                                       >
                                         {isMeetingExpanded ? "Hide Meeting" : "View Meeting"}
                                       </button>
                                     ) : null}
-                                  </div>
-                                ) : null}
-                              </div>
+	                              </div>
+	                            ) : null}
+	                          </div>
                             ) : null}
                           </div>
                         </div>
 
                         {rowKind === "reminder" ? (
                           <AnimatedRowEditor open={isReminderExpanded}>
-                          <div className="mb-5 bg-blue-50 px-4 py-3">
+	                          <div className="mb-5 border-t border-blue-100 bg-blue-50/65 px-4 py-3">
                             <div className="grid grid-cols-1 gap-3">
                               <div>
                                 <label className="mb-1 block text-sm font-medium text-blue-950">Reminder Body</label>
@@ -10593,7 +11354,7 @@ export default function PlansPage() {
 
                         {rowKind === "meeting" ? (
                           <AnimatedRowEditor open={isMeetingExpanded}>
-                          <div className="mb-5 bg-violet-50 px-4 py-3">
+	                          <div className="mb-5 border-t border-violet-100 bg-violet-50/65 px-4 py-3">
                             <div className="mb-3 text-sm font-medium text-violet-900">
                               {activeAccountProvider === "gmail"
                                 ? "This meeting will be created in Google Calendar when Google is connected."
@@ -10802,11 +11563,11 @@ export default function PlansPage() {
                                       <div className="mb-1 font-medium text-violet-950">Join link</div>
                                       <div className="text-gray-500">
                                         Teams join info will appear here after the Outlook event is created.
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : null}
+	                                  </div>
+	                                </div>
+	                              </div>
+	                            </div>
+	                          ) : null}
                               {activeAccountProvider === "gmail" && isPreviewGoogleMeetEnabled ? (
                                 <div className="md:col-span-2 rounded-xl border border-violet-200 bg-white p-4">
                                   <div className="text-sm font-semibold text-violet-950">Google Meet Details</div>
@@ -10825,7 +11586,7 @@ export default function PlansPage() {
 
                         {rowKind === "email" ? (
                           <AnimatedRowEditor open={isEmailExpanded}>
-                          <div className="mb-5 bg-amber-50 px-4 py-3">
+	                          <div className="mb-5 border-t border-amber-100 bg-amber-50/65 px-4 py-3">
                             <div className="font-medium text-amber-950">
                               <span>Subject: </span>
                               {renderTextWithBoldAnchors(previewEmailSubject, {
@@ -10948,49 +11709,71 @@ export default function PlansPage() {
                     </div>
                   </div>
 
-                  <div className="flex flex-col gap-4">
-                    <div className="max-w-md">
-                      <label className="mb-1 block text-sm font-medium text-gray-700">Weekend handling</label>
-                      <select
-                        className="w-full rounded-lg border px-3 py-2"
-                        value={weekendRule}
-                        onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
+	                  {showNoPreviewItemsSelectedCallout && getIncludedPreviewItemIds().length === 0 ? (
+	                    <div className="rounded-[12px] border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] leading-5 text-amber-900">
+	                      <div className="font-semibold">Select at least one action.</div>
+	                      <p className="mt-1 text-amber-800">Choose one or more actions before exporting this plan.</p>
+	                    </div>
+	                  ) : null}
+
+		                  <div className="mb-4 flex flex-col gap-4 rounded-[14px] border border-slate-200 bg-white p-4 shadow-sm">
+		                    <div className="max-w-md">
+	                      <label className="mb-1 block text-[14px] font-semibold text-slate-700">Weekend handling</label>
+	                      <select
+	                        className="h-[42px] w-full rounded-[10px] border border-slate-200 bg-white px-3 text-[14px] text-slate-900 shadow-sm focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
+	                        value={weekendRule}
+	                        onChange={(e) => setWeekendRule(e.target.value as WeekendRule)}
                       >
                         <option value="none">Allow weekends (no adjustment)</option>
                         <option value="prior_business_day">Adjust to prior business day (Fri)</option>
                       </select>
-                      <p className="mt-1 text-xs text-gray-500">
-                        If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
-                      </p>
-                    </div>
+	                      <p className="mt-1.5 text-[13px] leading-5 text-slate-500">
+	                        If a computed date lands on Sat/Sun, we either move it to Friday or leave it as-is.
+	                      </p>
+	                    </div>
 
-                    <div className="flex flex-wrap items-center gap-3">
-                      <button
-                        onClick={() => {
-                          void exportCurrentPlan({ skipConfirm: true, itemIds: getIncludedPreviewItemIds() });
-                        }}
-                        disabled={executionState === "pending" || getIncludedPreviewItemIds().length === 0}
-                        className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400"
-                      >
-                        {executionState === "pending" ? "Exporting..." : "Export Plan"}
-                      </button>
-                      {executionState === "success" ? <ExportDoneBadge /> : null}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="rounded-xl border border-dashed px-4 py-8 text-sm text-gray-500">
-                  {noEventDate
-                    ? "Review is not ready for the current event plan yet."
-                    : "Add an event date to review the current event plan."}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+	                  </div>
+	                </>
+	              ) : (
+	                <div className="rounded-xl border border-dashed px-4 py-8 text-sm text-gray-500">
+	                  {noEventDate
+	                    ? "Review is not ready for the current event plan yet."
+	                    : "Add an event date to review the current event plan."}
+	                </div>
+	              )}
+	            </div>
+	            {previewPlanForRender ? (
+	              <div className="flex flex-none flex-col gap-3 border-t border-slate-200/80 bg-white px-[14px] py-3 [padding-bottom:max(12px,env(safe-area-inset-bottom))] min-[640px]:flex-row min-[640px]:items-center min-[640px]:justify-between min-[640px]:gap-4 min-[640px]:px-5 min-[640px]:py-[14px] min-[640px]:[padding-bottom:14px]">
+	                <div className="text-[13px] font-semibold leading-5 text-slate-600">
+	                  {getIncludedPreviewItemIds().length} of {previewPlanForRender.items.length} selected
+	                </div>
+	                <div className="flex w-full flex-col gap-2 min-[640px]:w-auto min-[640px]:flex-row min-[640px]:items-center min-[640px]:justify-end">
+	                  {executionState === "success" ? <ExportDoneBadge /> : null}
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      const includedItemIds = getIncludedPreviewItemIds();
+	                      if (includedItemIds.length === 0) {
+	                        setShowNoPreviewItemsSelectedCallout(true);
+	                        window.setTimeout(() => previewItemListHeadingRef.current?.focus(), 0);
+	                        return;
+	                      }
+	                      void exportCurrentPlan({ skipConfirm: true, itemIds: includedItemIds });
+	                    }}
+	                    disabled={executionState === "pending"}
+	                    className="inline-flex h-[40px] w-full min-w-[128px] items-center justify-center rounded-[10px] border border-blue-600 bg-blue-600 px-4 text-[14px] font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 min-[640px]:w-auto"
+	                  >
+	                    {executionState === "pending" ? "Exporting..." : "Export Plan"}
+	                  </button>
+	                </div>
+	              </div>
+	            ) : null}
+	          </div>
+	        </div>,
+	        document.body
+	      ) : null}
 
-      {AI_ENABLED && isAiPanelOpen ? (
+	      {AI_ENABLED && isAiPanelOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4 py-8">
           <div className="max-h-[90vh] w-full max-w-6xl overflow-hidden rounded-2xl border bg-white shadow-xl">
             <div className="flex items-center justify-between border-b px-4 py-3">
@@ -11488,46 +12271,104 @@ export default function PlansPage() {
         </div>
       ) : null}
 
-      <RecipientGroupsModal
-        open={isRecipientGroupsModalOpen}
-        groups={recipientGroups}
-        initialMode={recipientGroupsModalMode}
-        initialEditingGroup={recipientGroupsEditingGroup}
-        onClose={() => {
-          setIsRecipientGroupsModalOpen(false);
-          setRecipientGroupsEditingGroup(null);
-        }}
-        onSelect={applyRecipientGroupToTarget}
-        onDelete={handleDeleteRecipientGroup}
-        onSave={handleSaveRecipientGroup}
+      {hasMounted ? (
+        <div data-recipient-groups-modal-host="true">
+          <RecipientGroupsModal
+            open={isRecipientGroupsModalOpen}
+            groups={recipientGroups}
+            initialMode={recipientGroupsModalMode}
+            initialEditingGroup={recipientGroupsEditingGroup}
+            onClose={() => {
+              setIsRecipientGroupsModalOpen(false);
+              setRecipientGroupsEditingGroup(null);
+            }}
+            onSelect={applyRecipientGroupToTarget}
+            onDelete={handleDeleteRecipientGroup}
+            onSave={handleSaveRecipientGroup}
+          />
+        </div>
+      ) : null}
+
+      <TemplateLibrary
+        open={isTemplateLibraryOpen}
+        mounted={hasMounted}
+        templates={savedTemplates}
+        selectedTemplateId={selectedTemplateId}
+        highlightedTemplateId={highlightedTemplateId}
+        actionMessage={templateActionMessage}
+        onSelectTemplate={(templateId) => void onSelectSavedTemplate(templateId)}
+        onDuplicateTemplate={(templateId) => void duplicateSavedTemplate(templateId)}
+        onRenameTemplate={(templateId) => void renameSavedTemplate(templateId)}
+        onDeleteTemplate={(templateId) => void deleteSavedTemplate(templateId)}
+        onClose={() => setIsTemplateLibraryOpen(false)}
+        returnFocus={() => templateLibraryButtonRef.current?.focus()}
       />
 
       {plansModal ? (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 px-4">
-          <div
-            className={`w-full max-w-md origin-top transform-gpu rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl transition-all duration-300 ease-out ${
-              isPopupAnimatedIn
-                ? "translate-y-0 scale-100 opacity-100"
-                : "-translate-y-3 scale-95 opacity-0"
-            }`}
-          >
-            <h3 className="text-lg font-semibold text-slate-950">{plansModal.title}</h3>
-            {plansModal.message ? (
-              <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-600">{plansModal.message}</p>
-            ) : null}
-            {plansModal.items?.length ? (
-              <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                {plansModal.items.map((item, index) => (
-                  <li key={index} className="flex items-start gap-2">
-                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
-                    <span>{item}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {plansModal.kind === "prompt" ? (
-              <div className="mt-4">
+        <PlansDialogShell
+          title={plansModal.title}
+          description={plansModal.message}
+          animatedIn={isPopupAnimatedIn}
+          severity={plansModal.severity ?? (plansModal.destructive ? "destructive" : "information")}
+          maxWidthClassName={plansModal.maxWidthClassName}
+          onEscape={() => closePlansModal(plansModal.kind === "prompt" ? null : plansModal.kind === "alert" ? true : false)}
+          footer={
+            <>
+              {plansModal.secondaryLabel ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    plansModal.onSecondaryAction?.();
+                    closePlansModal(false);
+                  }}
+                  className={`${plansDialogSecondaryButtonClass} w-full whitespace-nowrap sm:w-auto`}
+                >
+                  {plansModal.secondaryLabel}
+                </button>
+              ) : null}
+              {plansModal.kind !== "alert" ? (
+                <button
+                  type="button"
+                  onClick={() => closePlansModal(plansModal.kind === "prompt" ? null : false)}
+                  className={`${plansDialogSecondaryButtonClass} w-full whitespace-nowrap sm:w-auto`}
+                >
+                  {plansModal.cancelLabel ?? "Cancel"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                autoFocus={plansModal.kind !== "prompt"}
+                onClick={() => {
+                  plansModal.onConfirmAction?.();
+                  closePlansModal(
+                    plansModal.kind === "prompt" ? plansModalInputValue : true
+                  );
+                }}
+                className={`${plansModal.destructive || plansModal.severity === "destructive" ? plansDialogDangerButtonClass : plansModal.severity === "warning" ? plansDialogWarningButtonClass : plansDialogPrimaryButtonClass} w-full whitespace-nowrap sm:w-auto`}
+              >
+                {plansModal.confirmLabel ?? "OK"}
+              </button>
+            </>
+          }
+        >
+          {plansModal.content ? plansModal.content : null}
+          {plansModal.items?.length ? (
+            <ul className="max-h-[36dvh] space-y-2 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 text-[14px] leading-5 text-slate-700">
+              {plansModal.items.map((item, index) => (
+                <li key={index} className="flex items-start gap-2">
+                  <span className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${plansModal.destructive ? "bg-red-400" : "bg-[#4f7fb8]"}`} />
+                  <span className="min-w-0">{item}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {plansModal.kind === "prompt" ? (
+            <div className={plansModal.items?.length || plansModal.content ? "mt-4" : ""}>
+              <label className="mb-1.5 block text-[13px] font-medium text-slate-600" htmlFor="plans-modal-prompt-input">
+                {plansModal.inputLabel ?? plansModal.placeholder ?? "Value"}
+              </label>
                 <input
+                  id="plans-modal-prompt-input"
                   autoFocus
                   value={plansModalInputValue}
                   onChange={(e) => setPlansModalInputValue(e.target.value)}
@@ -11541,49 +12382,14 @@ export default function PlansPage() {
                     }
                   }}
                   placeholder={plansModal.placeholder}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                  className={plansInputClass}
                 />
+                {plansModal.helperText ? (
+                  <div className="mt-2 text-[13px] leading-5 text-slate-500">{plansModal.helperText}</div>
+                ) : null}
               </div>
-            ) : null}
-            <div className="mt-5 flex flex-wrap justify-end gap-3">
-              {plansModal.secondaryLabel ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    plansModal.onSecondaryAction?.();
-                    closePlansModal(false);
-                  }}
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-900 hover:bg-slate-50"
-                >
-                  {plansModal.secondaryLabel}
-                </button>
-              ) : null}
-              {plansModal.kind !== "alert" ? (
-                <button
-                  type="button"
-                  onClick={() => closePlansModal(plansModal.kind === "prompt" ? null : false)}
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-900 hover:bg-slate-50"
-                >
-                  {plansModal.cancelLabel ?? "Cancel"}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                autoFocus={plansModal.kind !== "prompt"}
-                onClick={() =>
-                  closePlansModal(
-                    plansModal.kind === "prompt" ? plansModalInputValue : true
-                  )
-                }
-                className={`rounded-lg px-4 py-2 text-sm font-medium text-white ${
-                  plansModal.destructive ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
-                }`}
-              >
-                {plansModal.confirmLabel ?? "OK"}
-              </button>
-            </div>
-          </div>
-        </div>
+          ) : null}
+        </PlansDialogShell>
       ) : null}
 
       {AI_ENABLED && showAiApplyConfirm && aiChatDraft ? (
@@ -11805,50 +12611,63 @@ export default function PlansPage() {
       ) : null}
 
       {showBuilderTemplateSaveDialog && hasMeaningfulBuilderContent() ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4">
-          <div
-            className={`w-full max-w-md origin-top transform-gpu rounded-2xl border bg-white p-4 shadow-xl transition-all duration-300 ease-out ${
-              isPopupAnimatedIn
-                ? "translate-y-0 scale-100 opacity-100"
-                : "-translate-y-3 scale-95 opacity-0"
-            }`}
-          >
-            <h3 className="text-lg font-semibold text-gray-900">Save current event plan as template</h3>
-            <p className="mt-2 text-sm text-gray-600">
-              Create a reusable template from the current builder. The builder will stay unchanged.
-            </p>
-            <div className="mt-4">
-              <label className="mb-1 block text-sm font-medium text-gray-700">Template name</label>
-              <input
-                value={builderTemplateNameDraft}
-                onChange={(e) => setBuilderTemplateNameDraft(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                placeholder="Template name"
-              />
-            </div>
-            {builderTemplateSaveMessage ? (
-              <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                {builderTemplateSaveMessage}
+        <PlansDialogShell
+          title="Save as template"
+          description={
+            <>
+              <div>Save this workflow structure so it can be reused for another event.</div>
+              <div className="mt-1 text-[13px] text-slate-500">
+                Event details and run-specific Anchor Field values are not saved.
               </div>
-            ) : null}
-            <div className="mt-5 flex flex-wrap justify-end gap-3">
+            </>
+          }
+          animatedIn={isPopupAnimatedIn}
+          severity="information"
+          onEscape={() => setShowBuilderTemplateSaveDialog(false)}
+          footer={
+            <>
               <button
                 type="button"
                 onClick={() => setShowBuilderTemplateSaveDialog(false)}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-50"
+                className={`${plansDialogSecondaryButtonClass} w-full sm:w-auto`}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={saveCurrentBuilderAsTemplate}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                className={`${plansDialogPrimaryButtonClass} w-full sm:w-auto`}
               >
                 Save template
               </button>
+            </>
+          }
+        >
+            <div>
+              <label className="mb-1.5 block text-[13px] font-medium text-slate-600" htmlFor="builder-template-name">
+                Template name
+              </label>
+              <input
+                id="builder-template-name"
+                autoFocus
+                value={builderTemplateNameDraft}
+                onChange={(e) => setBuilderTemplateNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveCurrentBuilderAsTemplate();
+                  }
+                }}
+                className={plansInputClass}
+                placeholder="Template name"
+              />
             </div>
-          </div>
-        </div>
+            {builderTemplateSaveMessage ? (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] font-medium leading-5 text-amber-900">
+                {builderTemplateSaveMessage}
+              </div>
+            ) : null}
+        </PlansDialogShell>
       ) : null}
     </div>
   );

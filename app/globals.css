@@ -45,6 +45,22 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+@media (max-width: 767px) {
+  html {
+    scroll-padding-top: 112px;
+  }
+}
+
+.app-mobile-shell-header {
+  background-color: rgba(237, 244, 248, 0.92);
+}
+
+@supports (background-color: color-mix(in srgb, white, transparent)) {
+  .app-mobile-shell-header {
+    background-color: color-mix(in srgb, var(--app-bg) 92%, transparent);
+  }
+}
+
 .bg-white {
   background-color: #ffffff !important;
 }
@@ -179,6 +195,154 @@ body {
     transform 320ms cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
 
+@keyframes plans-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes plans-menu-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+.plans-menu-enter,
+.plans-menu-exit {
+  transform-origin: var(--plans-menu-origin, top right);
+  will-change: opacity, transform;
+}
+
+.plans-menu-enter {
+  animation: plans-menu-in 120ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.plans-menu-exit {
+  animation: plans-menu-out 90ms ease-in both;
+}
+
+@keyframes plans-scrim-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes plans-scrim-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+.plans-scrim-enter {
+  animation: plans-scrim-in 120ms ease-out both;
+}
+
+.plans-scrim-exit {
+  animation: plans-scrim-out 90ms ease-in both;
+}
+
+@keyframes plans-inspector-in {
+  from {
+    opacity: 0.98;
+    transform: translateX(18px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes plans-inspector-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  to {
+    opacity: 0.98;
+    transform: translateX(18px);
+  }
+}
+
+.plans-inspector-enter {
+  animation: plans-inspector-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.plans-inspector-exit {
+  animation: plans-inspector-out 120ms ease-in both;
+}
+
+@keyframes plans-inspector-in-mobile {
+  from {
+    opacity: 0.98;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes plans-inspector-out-mobile {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0.98;
+    transform: translateY(10px);
+  }
+}
+
+@media (max-width: 1023px) {
+  .plans-inspector-enter {
+    animation: plans-inspector-in-mobile 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .plans-inspector-exit {
+    animation: plans-inspector-out-mobile 120ms ease-in both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plans-menu-enter,
+  .plans-menu-exit,
+  .plans-scrim-enter,
+  .plans-scrim-exit,
+  .plans-inspector-enter,
+  .plans-inspector-exit {
+    animation-duration: 1ms !important;
+  }
+
+  .plans-inspector-enter,
+  .plans-inspector-exit {
+    transform: none !important;
+  }
+}
+
 [data-plan-builder] input,
 [data-plan-builder] select,
 [data-plan-builder] textarea,
@@ -251,6 +415,29 @@ body {
     0 0 0 1px var(--app-focus),
     0 0 0 5px rgba(11, 114, 231, 0.12),
     0 18px 34px -24px rgba(11, 74, 143, 0.28) !important;
+}
+
+[data-builder-row-card][data-layered-row-editor="true"]:focus-within {
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+[data-inline-row-editor="true"] {
+  -webkit-overflow-scrolling: touch;
+  scroll-padding: 16px 0 24px;
+}
+
+[data-inline-row-editor="true"] input,
+[data-inline-row-editor="true"] select,
+[data-inline-row-editor="true"] textarea,
+[data-inline-row-editor="true"] button {
+  scroll-margin-top: 16px;
+  scroll-margin-bottom: 24px;
+}
+
+[data-recipient-groups-modal-host="true"] > .fixed.inset-0,
+[data-recipient-groups-modal-host="true"] .z-\[140\] {
+  z-index: 230 !important;
 }
 
 [data-builder-row-card]:focus-within::before {

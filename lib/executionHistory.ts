@@ -56,6 +56,11 @@ export type ExecutionHistoryInsert = Omit<ExecutionHistoryRecord, "id" | "userKe
   executedAt?: string;
 };
 
+export type CachedExecutionHistorySnapshot = {
+  hasSnapshot: boolean;
+  records: ExecutionHistoryRecord[];
+};
+
 export const EXECUTION_HISTORY_UPDATED_EVENT = "event-based-reminders-app:execution-history-updated";
 const EXECUTION_HISTORY_STORAGE_KEY = "event-based-reminders-app:execution-history";
 const MAX_LOCAL_HISTORY_RECORDS = 400;
@@ -384,7 +389,12 @@ function normalizeRecord(value: unknown): ExecutionHistoryRecord | null {
 
 function loadLocalExecutionHistory() {
   if (typeof window === "undefined") return [];
-  const raw = readPersistedValue("localStorage", getExecutionHistoryStorageKey());
+  let raw: string | null = null;
+  try {
+    raw = readPersistedValue("localStorage", getExecutionHistoryStorageKey());
+  } catch {
+    return [];
+  }
   if (!raw) return [];
 
   try {
@@ -397,10 +407,41 @@ function loadLocalExecutionHistory() {
 }
 
 export function listCachedExecutionHistory(limit = 200) {
+  return readCachedExecutionHistorySnapshot(limit).records;
+}
+
+export function readCachedExecutionHistorySnapshot(limit = 200): CachedExecutionHistorySnapshot {
+  if (typeof window === "undefined") {
+    return { hasSnapshot: false, records: [] };
+  }
+
+  let raw: string | null = null;
+  try {
+    raw = readPersistedValue("localStorage", getExecutionHistoryStorageKey());
+  } catch {
+    return { hasSnapshot: false, records: [] };
+  }
+  if (raw === null) {
+    return { hasSnapshot: false, records: [] };
+  }
+
+  let localRecords: ExecutionHistoryRecord[] = [];
+  try {
+    const parsed = JSON.parse(raw) as unknown[];
+    localRecords = Array.isArray(parsed)
+      ? parsed.map(normalizeRecord).filter((entry): entry is ExecutionHistoryRecord => Boolean(entry))
+      : [];
+  } catch {
+    return { hasSnapshot: false, records: [] };
+  }
+
   const userKey = getLocalUserKey();
-  return loadLocalExecutionHistory()
-    .filter((record) => !record.userKey || record.userKey === userKey)
-    .slice(0, limit);
+  return {
+    hasSnapshot: true,
+    records: localRecords
+      .filter((record) => !record.userKey || record.userKey === userKey)
+      .slice(0, limit),
+  };
 }
 
 function saveLocalExecutionHistory(records: ExecutionHistoryRecord[]) {

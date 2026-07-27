@@ -26,16 +26,35 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { authEnabled, currentUser, signOut } = useAuthContext();
   const [sidebarContent, setSidebarContent] = useState<ReactNode | null>(null);
   const pathname = usePathname();
+  const isHomePage = pathname === "/";
   const isPlansPage = pathname === "/plans" || pathname.startsWith("/plans/");
+  const usesWideDesktopShell = isHomePage || isPlansPage;
+  const shellLayoutClassName = usesWideDesktopShell
+    ? "max-w-[1440px] gap-10 px-4 pt-4 md:px-6 md:pt-10 lg:gap-14 xl:px-8"
+    : "max-w-[960px] gap-4 px-2 pt-4 sm:px-2.5 md:pt-5 lg:gap-5";
+  const mainClassName = usesWideDesktopShell ? "flex-1 w-full min-w-0 max-w-none" : "min-w-0 w-full flex-1";
 
   return (
     <AppShellSidebarContentContext.Provider value={setSidebarContent}>
       <div className="min-h-screen bg-[var(--app-bg)]">
-        <div
-          className={`mx-auto flex w-full px-2 pb-2.5 sm:px-2.5 ${
-            isPlansPage ? "max-w-[1040px] gap-10 pt-10 lg:gap-14" : "max-w-[960px] gap-4 pt-5 lg:gap-5"
-          }`}
-        >
+        <header className="app-mobile-shell-header sticky top-0 z-40 w-full border-b border-[var(--app-border-soft)] backdrop-blur md:hidden">
+          <div className="flex min-h-[54px] items-center justify-between gap-3 px-[16px]">
+            <div className="min-w-0 truncate text-[1.4rem] font-semibold tracking-[-0.02em] text-slate-950">Event-Based Reminders</div>
+            {authEnabled && currentUser ? (
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                className="inline-flex h-[32px] shrink-0 items-center justify-center rounded-lg border border-[var(--app-border-soft)] bg-white px-[10px] text-[11px] font-medium text-slate-700 transition-colors duration-200 hover:border-slate-300 hover:bg-[var(--app-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-focus)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--app-bg)]"
+              >
+                Sign out
+              </button>
+            ) : null}
+          </div>
+          <div className="px-[12px] pb-[12px]">
+            <AppShellNav variant="mobile" />
+          </div>
+        </header>
+        <div className={`mx-auto flex w-full min-w-0 pb-2.5 ${shellLayoutClassName}`}>
           <aside className="hidden w-[150px] shrink-0 md:block lg:w-[160px]">
             <div>
               <div className="rounded-[18px] border border-[var(--app-border-soft)] bg-white/95 p-4 shadow-[var(--app-shadow)] backdrop-blur">
@@ -61,7 +80,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </aside>
 
-          <main className="min-w-0 flex-1">{children}</main>
+          <main className={mainClassName}>{children}</main>
         </div>
       </div>
     </AppShellSidebarContentContext.Provider>

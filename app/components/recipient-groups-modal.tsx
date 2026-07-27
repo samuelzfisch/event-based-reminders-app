@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import {
   isValidRecipientGroupEmail,
@@ -41,6 +41,8 @@ export function RecipientGroupsModal({
   const [emailsDraft, setEmailsDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -51,11 +53,6 @@ export function RecipientGroupsModal({
     setError(null);
     setSaving(false);
   }, [open, initialMode, initialEditingGroup]);
-
-  const groupedEmptyStateLabel = useMemo(() => {
-    if (mode === "select") return "No recipient groups yet. Create one to reuse the same recipients in emails and meetings.";
-    return "";
-  }, [mode]);
 
   if (!open) return null;
 
@@ -108,29 +105,55 @@ export function RecipientGroupsModal({
       <>
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-xl font-semibold text-slate-950">Recipient Groups</h3>
-            <p className="mt-1 text-sm text-slate-600">
+            <h3 id={titleId} className="text-[20px] font-semibold leading-6 text-slate-950">Recipient Groups</h3>
+            <p id={descriptionId} className="mt-2 text-[14px] leading-5 text-slate-600">
               Choose a saved group to add recipients faster, or create a new one.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setEditingGroup(null);
-              setNameDraft("");
-              setEmailsDraft("");
-              setError(null);
-              setMode("create");
-            }}
-            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
-          >
-            New Group
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setEditingGroup(null);
+                setNameDraft("");
+                setEmailsDraft("");
+                setError(null);
+                setMode("create");
+              }}
+              className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
+            >
+              New Group
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close recipient groups"
+              className="inline-flex h-[40px] w-[40px] items-center justify-center rounded-[10px] border border-slate-200 bg-white text-[20px] leading-none text-slate-500 shadow-sm hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
+            >
+              ×
+            </button>
+          </div>
         </div>
-        <div className="mt-5 max-h-[420px] space-y-3 overflow-y-auto pr-1">
+        <div className="mt-5 max-h-[min(420px,52dvh)] space-y-3 overflow-y-auto pr-1">
           {groups.length === 0 ? (
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
-              {groupedEmptyStateLabel}
+            <div className="rounded-[14px] border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center">
+              <h4 className="text-[15px] font-semibold leading-5 text-slate-950">No recipient groups yet</h4>
+              <p className="mx-auto mt-2 max-w-[360px] text-[14px] leading-5 text-slate-600">
+                Create a reusable group for email and meeting recipients.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingGroup(null);
+                  setNameDraft("");
+                  setEmailsDraft("");
+                  setError(null);
+                  setMode("create");
+                }}
+                className="mt-4 inline-flex h-[40px] items-center justify-center rounded-[10px] border border-blue-600 bg-blue-600 px-4 text-[14px] font-semibold text-white shadow-sm hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/35"
+              >
+                Create group
+              </button>
             </div>
           ) : (
             groups.map((group) => (
@@ -150,7 +173,7 @@ export function RecipientGroupsModal({
                       <button
                         type="button"
                         onClick={() => void onDelete(group)}
-                        className="rounded-xl border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+                        className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-red-200 bg-white px-4 text-[14px] font-semibold text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
                       >
                         Delete
                       </button>
@@ -164,7 +187,7 @@ export function RecipientGroupsModal({
                         setError(null);
                         setMode("edit");
                       }}
-                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
+                      className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
                     >
                       Edit
                     </button>
@@ -172,7 +195,7 @@ export function RecipientGroupsModal({
                       <button
                         type="button"
                         onClick={() => onSelect(group)}
-                        className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                        className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-blue-600 bg-blue-600 px-4 text-[14px] font-semibold text-white shadow-sm hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/35"
                       >
                         Use Group
                       </button>
@@ -187,7 +210,7 @@ export function RecipientGroupsModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
+            className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
           >
             Close
           </button>
@@ -205,9 +228,19 @@ export function RecipientGroupsModal({
 
     return (
       <>
-        <div>
-          <h3 className="text-xl font-semibold text-slate-950">{title}</h3>
-          <p className="mt-1 text-sm text-slate-600">{description}</p>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h3 id={titleId} className="text-[20px] font-semibold leading-6 text-slate-950">{title}</h3>
+            <p id={descriptionId} className="mt-2 text-[14px] leading-5 text-slate-600">{description}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close recipient groups"
+            className="inline-flex h-[40px] w-[40px] shrink-0 items-center justify-center rounded-[10px] border border-slate-200 bg-white text-[20px] leading-none text-slate-500 shadow-sm hover:bg-slate-50 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
+          >
+            ×
+          </button>
         </div>
         <div className="mt-5 space-y-4">
           <label className="block space-y-1 text-sm">
@@ -217,7 +250,7 @@ export function RecipientGroupsModal({
               value={nameDraft}
               onChange={(event) => setNameDraft(event.target.value)}
               placeholder="Family"
-              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
+              className="h-[42px] w-full rounded-xl border border-slate-200 bg-white px-3.5 text-[14px] font-medium text-slate-950 shadow-sm placeholder:text-slate-500 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
             />
           </label>
           <label className="block space-y-1 text-sm">
@@ -226,7 +259,7 @@ export function RecipientGroupsModal({
               value={emailsDraft}
               onChange={(event) => setEmailsDraft(event.target.value)}
               placeholder={"alice@example.com\nbob@example.com"}
-              className="min-h-40 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
+              className="min-h-40 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-[14px] leading-5 text-slate-950 shadow-sm placeholder:text-slate-500 focus:border-[#6f9fd1] focus:outline-none focus:ring-2 focus:ring-[#6f9fd1]/20"
             />
             <span className="block text-xs text-slate-500">Enter one email per line, or separate addresses with commas.</span>
           </label>
@@ -239,7 +272,7 @@ export function RecipientGroupsModal({
               setMode("select");
               setError(null);
             }}
-            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
+            className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
           >
             Back
           </button>
@@ -247,7 +280,7 @@ export function RecipientGroupsModal({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
+              className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-slate-200 bg-white px-4 text-[14px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/30"
             >
               Cancel
             </button>
@@ -255,7 +288,7 @@ export function RecipientGroupsModal({
               type="button"
               onClick={() => void handleSave()}
               disabled={saving}
-              className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+              className="inline-flex h-[40px] whitespace-nowrap items-center justify-center rounded-[10px] border border-blue-600 bg-blue-600 px-4 text-[14px] font-semibold text-white shadow-sm hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6f9fd1]/35 disabled:opacity-60"
             >
               {saving ? "Saving..." : "Save Group"}
             </button>
@@ -266,8 +299,14 @@ export function RecipientGroupsModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[140] flex items-start justify-center bg-slate-950/28 px-4 py-10">
-      <div className="w-full max-w-3xl rounded-[28px] border border-slate-200 bg-white p-4 shadow-[0_36px_80px_-36px_rgba(15,23,42,0.45)]">
+    <div className="fixed inset-0 z-[230] flex items-end justify-center bg-slate-950/[0.18] px-0 py-0 sm:items-center sm:px-4 sm:py-8">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        className="max-h-[calc(100dvh-24px)] w-full overflow-y-auto rounded-t-[18px] border border-slate-200 bg-white p-5 shadow-[0_28px_80px_rgba(21,40,66,0.24)] sm:max-h-[calc(100dvh-48px)] sm:max-w-[560px] sm:rounded-[18px]"
+      >
         {mode === "select" ? renderSelectMode() : renderFormMode()}
       </div>
     </div>
