@@ -3784,6 +3784,28 @@ export default function PlansPage() {
     () => new Set(resolvedAnchors.map((anchor) => normalizeAnchorKey(anchor.key))),
     [resolvedAnchors]
   );
+  const resolvedAutoFilledAnchorValueKeys = useMemo(
+    () =>
+      new Set(
+        resolvedAnchors
+          .filter((anchor) => Boolean(anchor.locked || isCoreEventAnchorKey(anchor.key)))
+          .filter((anchor) => anchor.value.trim())
+          .map((anchor) => normalizeAnchorKey(anchor.key))
+      ),
+    [resolvedAnchors]
+  );
+  useEffect(() => {
+    if (missingFieldHighlights.anchorKeys.length === 0 || resolvedAutoFilledAnchorValueKeys.size === 0) return;
+
+    setMissingFieldHighlights((current) => {
+      const nextAnchorKeys = current.anchorKeys.filter(
+        (anchorKey) => !resolvedAutoFilledAnchorValueKeys.has(normalizeAnchorKey(anchorKey))
+      );
+
+      if (nextAnchorKeys.length === current.anchorKeys.length) return current;
+      return { ...current, anchorKeys: nextAnchorKeys };
+    });
+  }, [missingFieldHighlights.anchorKeys, resolvedAutoFilledAnchorValueKeys]);
   const previewTemplate = useMemo(() => buildTemplateItemsFromRows(rows, recipientGroups), [recipientGroups, rows]);
   const renderedRows = useMemo(() => {
     return draggingRowId
@@ -7766,6 +7788,7 @@ export default function PlansPage() {
       .filter((anchor) => {
         const isEmpty = !anchor.value.trim();
         if (isEmpty) return true;
+        if (anchor.locked || isCoreEventAnchorKey(anchor.key)) return false;
         if (!lastDynamicFieldsExportAt) return false;
         if (!anchor.lastUpdatedAt) return true;
         return new Date(anchor.lastUpdatedAt).getTime() <= new Date(lastDynamicFieldsExportAt).getTime();
